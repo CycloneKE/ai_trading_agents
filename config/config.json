@@ -1,0 +1,107 @@
+{
+  "data_manager": {
+    "symbols": [
+      "AAPL",
+      "GOOGL",
+      "MSFT",
+      "TSLA",
+      "NVDA"
+    ],
+    "update_interval": 60,
+    "max_retries": 3,
+    "redis": {
+      "host": "localhost",
+      "port": 6379,
+      "db": 0
+    }
+  },
+  "strategies": {
+    "momentum": {
+      "type": "supervised_learning",
+      "enabled": true,
+      "lookback_period": 20,
+      "threshold": 0.02,
+      "weight": 1.0
+    },
+    "mean_reversion": {
+      "type": "supervised_learning",
+      "enabled": true,
+      "lookback_period": 10,
+      "z_score_threshold": 2.0,
+      "weight": 1.0
+    },
+    "sentiment": {
+      "type": "nlp",
+      "enabled": true,
+      "sentiment_threshold": 0.6,
+      "weight": 0.8
+    },
+    "reinforcement": {
+      "type": "dqn",
+      "enabled": true,
+      "lookback_period": 30,
+      "learning_rate": 0.001,
+      "exploration_rate": 0.1,
+      "weight": 1.0
+    }
+  },
+  "risk_management": {
+    "var_confidence": 0.95,
+    "max_position_size": 0.1,
+    "max_portfolio_var": 0.02,
+    "max_drawdown": 0.2,
+    "max_daily_loss": 0.02
+  },
+  "risk_limits": {
+    "max_portfolio_var": 0.05,
+    "max_position_size": 0.1,
+    "max_drawdown": 0.2
+  },
+  "brokers": {
+    "paper_broker": {
+      "type": "paper",
+      "initial_cash": 100000,
+      "commission_per_trade": 1.0,
+      "primary": true
+    }
+  },
+  "trading": {
+    "initial_capital": 100000,
+    "commission": 0.001,
+    "slippage": 0.0005
+  },
+  "trading_loop_interval": 60,
+  "nlp": {
+    "sentiment_model": "vader",
+    "text_processing": {
+      "remove_stopwords": true,
+      "lemmatize": true
+    }
+  },
+  "automl": {
+    "n_trials": 100,
+    "cv_folds": 5
+  },
+  "portfolio_optimization": {
+    "risk_free_rate": 0.02,
+    "frequency": "daily",
+    "lookback_period": 252
+  },
+  "monitoring": {
+    "enabled": true,
+    "port": 8080,
+    "metrics_interval": 15,
+    "system_metrics_enabled": true
+  },
+  "security": {
+    "use_encryption": true,
+    "api_key_rotation_days": 90
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "file": "logs/trading_agent.log",
+    "max_size_mb": 10,
+    "backup_count": 5
+  }
+}
