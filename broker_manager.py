@@ -3,20 +3,36 @@ Broker Manager for coordinating multiple broker connections.
 Provides unified interface for trading across different platforms.
 """
 
-from typing import Dict, Any, List, Optional, Type
+from typing import Dict, Any, List, Optional, Type, Any as TypingAny
 import logging
 from datetime import datetime
 import threading
 
 from base_broker import BaseBroker, OrderRequest, OrderResponse, Position, AccountInfo
-from paper_trading import PaperTradingBroker
 
+from paper_trading import PaperTradingBroker
+import logging
 try:
     from alpaca_broker import AlpacaBroker
     ALPACA_AVAILABLE = True
-except ImportError:
+except Exception as e:
     ALPACA_AVAILABLE = False
     AlpacaBroker = None
+    logging.error(f"AlpacaBroker import failed: {e}")
+try:
+    from coinbase_broker import CoinbaseBroker
+    COINBASE_AVAILABLE = True
+except Exception as e:
+    COINBASE_AVAILABLE = False
+    CoinbaseBroker = None
+    logging.error(f"CoinbaseBroker import failed: {e}")
+try:
+    from oanda_broker import OandaBroker
+    OANDA_AVAILABLE = True
+except Exception as e:
+    OANDA_AVAILABLE = False
+    OandaBroker = None
+    logging.error(f"OandaBroker import failed: {e}")
 
 logger = logging.getLogger(__name__)
 
@@ -33,16 +49,21 @@ class BrokerManager:
         self.lock = threading.Lock()
         
         # Available broker types
-        self.broker_types = {
+        self.broker_types: Dict[str, TypingAny] = {
             'paper': PaperTradingBroker
         }
-        
         if ALPACA_AVAILABLE:
             self.broker_types['alpaca'] = AlpacaBroker
-        
+        if COINBASE_AVAILABLE:
+            self.broker_types['coinbase'] = CoinbaseBroker
+            self.broker_types['coinbase_broker'] = CoinbaseBroker
+        if OANDA_AVAILABLE:
+            self.broker_types['oanda'] = OandaBroker
+            self.broker_types['oanda_broker'] = OandaBroker
+        # Log available broker types for debugging (moved inside __init__)
+        logger.info(f"Available broker types: {list(self.broker_types.keys())}")
         # Initialize brokers from config
         self._initialize_brokers()
-        
         logger.info("Broker manager initialized")
     
     def _initialize_brokers(self):
@@ -51,24 +72,21 @@ class BrokerManager:
         """
         try:
             brokers_config = self.config.get('brokers', {})
-            
+            logger.info(f"BrokerManager received brokers config: {brokers_config}")
+            logger.info(f"BrokerManager available broker types: {list(self.broker_types.keys())}")
             for broker_name, broker_config in brokers_config.items():
                 broker_type = broker_config.get('type', '').lower()
-                
+                logger.info(f"Processing broker: {broker_name}, type: {broker_type}, config: {broker_config}")
                 if broker_type in self.broker_types:
                     broker_class = self.broker_types[broker_type]
                     broker = broker_class(broker_config)
-                    
                     self.brokers[broker_name] = broker
-                    
                     # Set primary broker
                     if broker_config.get('primary', False) or self.primary_broker is None:
                         self.primary_broker = broker_name
-                    
                     logger.info(f"Initialized {broker_type} broker: {broker_name}")
                 else:
-                    logger.warning(f"Unknown broker type: {broker_type}")
-            
+                    logger.warning(f"Unknown broker type: {broker_type} for broker {broker_name}")
             if not self.brokers:
                 # Create default paper trading broker
                 default_config = {
@@ -76,13 +94,10 @@ class BrokerManager:
                     'initial_cash': 100000,
                     'commission_per_trade': 0.0
                 }
-                
                 broker = PaperTradingBroker(default_config)
                 self.brokers['default_paper'] = broker
                 self.primary_broker = 'default_paper'
-                
                 logger.info("Created default paper trading broker")
-                
         except Exception as e:
             logger.error(f"Error initializing brokers: {str(e)}")
     

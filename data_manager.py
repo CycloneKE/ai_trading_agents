@@ -19,15 +19,20 @@ except ImportError:
     REDIS_AVAILABLE = False
     redis = None
 
+
 try:
     from market_data_connector import FinnhubConnector
     from news_connector import FinnhubNewsConnector, RedditConnector
+    from coinbase_connector import CoinbaseConnector
+    from oanda_connector import OandaConnector
     CONNECTORS_AVAILABLE = True
 except ImportError:
     CONNECTORS_AVAILABLE = False
     FinnhubConnector = None
     FinnhubNewsConnector = None
     RedditConnector = None
+    CoinbaseConnector = None
+    OandaConnector = None
 
 try:
     from real_data_connector import RealDataConnector
@@ -62,7 +67,8 @@ class DataManager:
         self.data_lock = threading.Lock()
         
         # Initialize Redis for real-time data storage
-        self._init_redis()
+        if REDIS_AVAILABLE and redis is not None:
+            self._init_redis()
         
         # Initialize connectors
         self._init_connectors()
@@ -70,47 +76,57 @@ class DataManager:
     def _init_connectors(self):
         """Initialize data connectors"""
         # Initialize real data connector (priority)
-        if REAL_DATA_AVAILABLE:
+        if REAL_DATA_AVAILABLE and RealDataConnector is not None:
             try:
                 self.connectors['real_data'] = RealDataConnector(self.config)
                 logger.info("Initialized real data connector")
+                if hasattr(self.connectors['real_data'], 'connect'):
+                    self.connectors['real_data'].connect()
             except Exception as e:
                 logger.warning(f"Failed to initialize real data connector: {str(e)}")
         
         # Initialize legacy connectors as backup
         if CONNECTORS_AVAILABLE:
             connector_configs = self.config.get('connectors', {})
-            
-            # Ensure connector config exists for Finnhub
+            import os
+            # Finnhub
             if 'finnhub' not in connector_configs:
                 connector_configs['finnhub'] = {}
-            
-            import os
             if not connector_configs['finnhub'].get('api_key'):
                 connector_configs['finnhub']['api_key'] = os.getenv('FINNHUB_API_KEY', '')
-            
-            # Finnhub market data connector
-            try:
-                self.connectors['finnhub_market'] = FinnhubConnector(connector_configs['finnhub'])
-                logger.info("Initialized Finnhub market data connector")
-            except Exception as e:
-                logger.error(f"Failed to initialize Finnhub market data connector: {str(e)}")
-            
-            # Finnhub news connector
-            try:
-                self.connectors['finnhub_news'] = FinnhubNewsConnector(connector_configs['finnhub'])
-                logger.info("Initialized Finnhub news connector")
-            except Exception as e:
-                logger.error(f"Failed to initialize Finnhub news connector: {str(e)}")
-            
+            if FinnhubConnector is not None:
+                try:
+                    self.connectors['finnhub_market'] = FinnhubConnector(connector_configs['finnhub'])
+                    logger.info("Initialized Finnhub market data connector")
+                except Exception as e:
+                    logger.error(f"Failed to initialize Finnhub market data connector: {str(e)}")
+            if FinnhubNewsConnector is not None:
+                try:
+                    self.connectors['finnhub_news'] = FinnhubNewsConnector(connector_configs['finnhub'])
+                    logger.info("Initialized Finnhub news connector")
+                except Exception as e:
+                    logger.error(f"Failed to initialize Finnhub news connector: {str(e)}")
             # Optionally keep Reddit connector
-            if 'reddit' in connector_configs:
+            if 'reddit' in connector_configs and RedditConnector is not None:
                 try:
                     self.connectors['reddit'] = RedditConnector(connector_configs['reddit'])
                     logger.info("Initialized Reddit connector")
                 except Exception as e:
                     logger.error(f"Failed to initialize Reddit connector: {str(e)}")
-        
+            # Coinbase
+            if 'coinbase' in connector_configs and connector_configs['coinbase'].get('enabled', False) and CoinbaseConnector is not None and hasattr(CoinbaseConnector, 'connect') and hasattr(CoinbaseConnector, 'disconnect'):
+                try:
+                    self.connectors['coinbase'] = CoinbaseConnector(connector_configs['coinbase'])
+                    logger.info("Initialized Coinbase crypto data connector")
+                except Exception as e:
+                    logger.error(f"Failed to initialize Coinbase connector: {str(e)}")
+            # OANDA
+            if 'oanda' in connector_configs and connector_configs['oanda'].get('enabled', False) and OandaConnector is not None and hasattr(OandaConnector, 'connect') and hasattr(OandaConnector, 'disconnect'):
+                try:
+                    self.connectors['oanda'] = OandaConnector(connector_configs['oanda'])
+                    logger.info("Initialized OANDA forex data connector")
+                except Exception as e:
+                    logger.error(f"Failed to initialize OANDA connector: {str(e)}")
         if not self.connectors:
             logger.warning("No data connectors available. System will use mock data.")
     

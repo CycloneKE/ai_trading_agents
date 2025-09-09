@@ -68,19 +68,35 @@ jobs:
         context: .
         push: true
         tags: |
-          yourusername/ai-trading-agent:latest
-          yourusername/ai-trading-agent:${{ github.sha }}
-        cache-from: type=registry,ref=yourusername/ai-trading-agent:buildcache
-        cache-to: type=registry,ref=yourusername/ai-trading-agent:buildcache,mode=max
+          ${{ secrets.DOCKERHUB_USERNAME }}/ai-trading-agent:latest
+          ${{ secrets.DOCKERHUB_USERNAME }}/ai-trading-agent:${{ github.sha }}
+        cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/ai-trading-agent:buildcache
+        cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/ai-trading-agent:buildcache,mode=max
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
+    # Add permissions for authenticating to GCP
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
     steps:
-    - name: Deploy to production
-      run: |
-        echo "Deploying to production server"
-        # Add deployment steps here
-        # This could be SSH commands to a server or calls to cloud provider APIs
+    - name: Authenticate to Google Cloud
+      id: auth
+      uses: 'google-github-actions/auth@v1'
+      with:
+        workload_identity_provider: '${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}'
+        service_account: '${{ secrets.GCP_SERVICE_ACCOUNT }}'
+
+    - name: Deploy to Cloud Run
+      id: deploy
+      uses: 'google-github-actions/deploy-cloudrun@v1'
+      with:
+        service: 'ai-trading-agent' # Choose a name for your service
+        region: 'us-central1' # Choose a region for your service
+        image: 'docker.io/${{ secrets.DOCKERHUB_USERNAME }}/ai-trading-agent:${{ github.sha }}'
+        # Assign the service account to the Cloud Run service for runtime permissions
+        service_account: '${{ secrets.GCP_SERVICE_ACCOUNT }}'

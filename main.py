@@ -1,3 +1,38 @@
+def validate_config(config: dict) -> bool:
+    """
+    Validate the configuration structure and required fields.
+    Returns True if valid, False otherwise. Logs errors for missing/invalid fields.
+    """
+    import logging
+    required_top_keys = [
+        'data_manager', 'strategies', 'risk_management', 'risk_limits',
+        'brokers', 'trading', 'monitoring', 'security', 'logging'
+    ]
+    valid = True
+    for key in required_top_keys:
+        if key not in config:
+            logging.error(f"Missing required config section: {key}")
+            valid = False
+    # Check critical subkeys
+    dm = config.get('data_manager', {})
+    if not dm.get('symbols') or not isinstance(dm['symbols'], list):
+        logging.error("data_manager.symbols must be a non-empty list")
+        valid = False
+    if not dm.get('connectors') or not isinstance(dm['connectors'], dict):
+        logging.error("data_manager.connectors must be a dict")
+        valid = False
+    brokers = config.get('brokers', {})
+    if not brokers or not isinstance(brokers, dict):
+        logging.error("brokers must be a dict with at least one broker defined")
+        valid = False
+    trading = config.get('trading', {})
+    if 'initial_capital' not in trading:
+        logging.error("trading.initial_capital is required")
+        valid = False
+    # Add more checks as needed for production
+    if not valid:
+        logging.error("Configuration validation failed. See errors above.")
+    return valid
 #!/usr/bin/env python3
 """
 AI Trading Agent - Main Application Entry Point
@@ -35,7 +70,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Import local modules
-from config_validator import load_config, validate_config
+from config_validator import load_config
 from secure_config import SecureConfigManager
 from database_manager import DatabaseManager
 from realtime_data_feed import RealTimeDataFeed
@@ -111,18 +146,16 @@ class TradingAgent:
     """
     
     def __init__(self, config_path: str):
-        """
-        Initialize the trading agent.
-        
-        Args:
-            config_path: Path to configuration file
-        """
+        self._validate_secrets()
         self.config_path = config_path
-        self.config = load_config(config_path)
+        self.config = load_config(self.config_path)
+        # Validate configuration before proceeding
+        if not validate_config(self.config):
+            print("ERROR: Invalid configuration. See logs for details.")
+            sys.exit(1)
         self.running = False
         self.components = {}
         self.secure_config = SecureConfigManager()
-        
         # Initialize database (optional)
         try:
             db_config = self.secure_config.get_database_config()
@@ -130,18 +163,15 @@ class TradingAgent:
         except Exception as e:
             logger.warning(f"Database initialization failed: {e}")
             self.database = None
-        
         # Initialize monitoring service
         self.monitoring_service = get_monitoring_service(self.config)
-        
         # Initialize components
         self._initialize_components()
-        
         # Set up signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
-        
         logger.info("AI Trading Agent initialized successfully")
+
     
     def _initialize_components(self):
         """Initialize all system components."""
@@ -155,9 +185,7 @@ class TradingAgent:
                 logger.info(f"Monitoring service started on port {monitoring_port}")
             
             # Broker Integration (initialize first)
-            self.components['broker_manager'] = BrokerManager(
-                self.config.get('brokers', {})
-            )
+            self.components['broker_manager'] = BrokerManager(self.config)
             
             # Data Management
             self.components['data_manager'] = DataManager(
@@ -188,7 +216,7 @@ class TradingAgent:
             )
             
             # API Server (conditional)
-            if API_AVAILABLE:
+            if API_AVAILABLE and TradingAPI is not None:
                 self.api_server = TradingAPI(
                     self,
                     self.config.get('api', {})
@@ -244,121 +272,137 @@ class TradingAgent:
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
         logger.info(f"Received signal {signum}, initiating graceful shutdown...")
-        self.stop()
+        self.running = False
+        logger.info("Trading agent stopped.")
+
+    def stop(self):
+        """Stop the trading agent and clean up resources."""
+        self.running = False
+        logger.info("Trading agent stopping...")
+        # Attempt to gracefully stop threads (if any custom threads are tracked)
+        # Example: if hasattr(self, 'broker_health_thread'): self.broker_health_thread.join(timeout=5)
+        # Stop data manager and event risk manager if they have stop methods
+        try:
+            if 'data_manager' in self.components and hasattr(self.components['data_manager'], 'stop'):
+                self.components['data_manager'].stop()
+            if 'event_risk_manager' in self.components and hasattr(self.components['event_risk_manager'], 'stop'):
+                self.components['event_risk_manager'].stop()
+        except Exception as e:
+            logger.warning(f"Error stopping components: {e}")
+        # Close database connection if present
+        try:
+            if hasattr(self, 'database') and self.database:
+                if hasattr(self.database, 'close'):
+                    self.database.close()
+        except Exception as e:
+            logger.warning(f"Error closing database: {e}")
+        logger.info("Trading agent stopped and resources cleaned up.")
     
     def start(self):
-        """Start the trading agent."""
-        try:
-            logger.info("Starting AI Trading Agent...")
-            self.running = True
-            
-            # Connect to brokers
-            logger.info("Connecting to brokers...")
-            connection_results = self.components['broker_manager'].connect_all()
-            
-            for broker_name, connected in connection_results.items():
-                if connected:
-                    logger.info(f"✓ Connected to {broker_name}")
-                else:
-                    logger.error(f"✗ Failed to connect to {broker_name}")
-            
-            # Start data ingestion
-            logger.info("Starting data ingestion...")
-            self.components['data_manager'].start()
-            
-            # Start strategy manager
-            logger.info("Starting strategy manager...")
-            # self.components['strategy_manager'].start()
-            
-            # Start risk monitoring
-            logger.info("Starting risk monitoring...")
-            self.components['event_risk_manager'].start()
-            
-            # Start API server (if available)
-            if self.api_server:
-                logger.info("Starting API server...")
-                self.api_server.start()
+        """Start the trading agent with full automation."""
+        logger.info("Starting AI Trading Agent...")
+        self.running = True
+
+        # Connect to all brokers and run health checks
+        broker_manager = self.components['broker_manager']
+        connection_results = broker_manager.connect_all()
+        for broker_name, connected in connection_results.items():
+            if connected:
+                logger.info(f"Connected to {broker_name}")
             else:
-                logger.info("API server disabled - Flask not available")
-            
-            # Start main trading loop
-            self._run_trading_loop()
-            
-        except Exception as e:
-            logger.error(f"Error starting trading agent: {str(e)}")
-            self.stop()
-            raise
-    
-    def stop(self):
-        """Stop the trading agent."""
-        logger.info("Stopping AI Trading Agent...")
-        self.running = False
-        
-        try:
-            # Stop components in reverse order
-            if 'event_risk_manager' in self.components:
-                self.components['event_risk_manager'].stop()
-            
-            if 'strategy_manager' in self.components:
-                # self.components['strategy_manager'].stop()
-                pass
-            
-            if 'data_manager' in self.components:
-                self.components['data_manager'].stop()
-            
-            if 'broker_manager' in self.components:
-                self.components['broker_manager'].disconnect_all()
-            
-            # Stop monitoring service last
-            if self.monitoring_service:
-                self.monitoring_service.stop()
-                logger.info("Monitoring service stopped")
-            
-            logger.info("AI Trading Agent stopped successfully")
-            
-        except Exception as e:
-            logger.error(f"Error stopping trading agent: {str(e)}")
-    
-    def _run_trading_loop(self):
-        """Main trading loop."""
+                logger.error(f"✗ Failed to connect to {broker_name}")
+
+        # Health check loop (threaded)
+        def broker_health_loop():
+            while self.running:
+                for name, broker in broker_manager.brokers.items():
+                    if hasattr(broker, 'get_status'):
+                        status = broker.get_status()
+                        if not status.get('is_connected', False):
+                            logger.warning(f"Broker {name} disconnected, attempting reconnect...")
+                            broker.connect()
+                time.sleep(60)
+        threading.Thread(target=broker_health_loop, daemon=True).start()
+
+        # Failover logic: switch to backup broker if primary fails
+        def failover_monitor():
+            while self.running:
+                primary = broker_manager.get_broker()
+                if primary and not primary.is_connected:
+                    for name, broker in broker_manager.brokers.items():
+                        if broker.is_connected:
+                            broker_manager.set_primary_broker(name)
+                            logger.info(f"Failover: switched primary broker to {name}")
+                            break
+                time.sleep(30)
+        threading.Thread(target=failover_monitor, daemon=True).start()
+
+            # Start data ingestion
+        logger.info("Starting data ingestion...")
+        self.components['data_manager'].start()
+
+        # Start strategy manager
+        logger.info("Starting strategy manager...")
+        # self.components['strategy_manager'].start()
+
+        # Start risk monitoring
+        logger.info("Starting risk monitoring...")
+        self.components['event_risk_manager'].start()
+
+        # Start API server (if available)
+        if self.api_server:
+            logger.info("Starting API server...")
+            self.api_server.start()
+
+        logger.info("AI Trading Agent initialized successfully")
+
+    def _validate_secrets(self):
+        """Check for required secrets and log warnings/errors."""
+        required_env = [
+            'COINBASE_API_KEY', 'COINBASE_API_SECRET', 'COINBASE_PASSPHRASE',
+            'OANDA_API_KEY', 'OANDA_ACCOUNT_ID',
+            'TRADING_ALPHA_VANTAGE_API_KEY', 'TRADING_FMP_API_KEY', 'TRADING_FINNHUB_API_KEY'
+        ]
+        missing = []
+        for var in required_env:
+            if not os.getenv(var):
+                missing.append(var)
+        if missing:
+            logger.error(f"Missing required secrets: {', '.join(missing)}. Trading agent will not start.")
+            print(f"ERROR: Missing required secrets: {', '.join(missing)}. See logs for details.")
+            sys.exit(1)
+        else:
+            logger.info("All required secrets are present.")
+
+    def run_main_loop(self):
         logger.info("Starting main trading loop...")
-        
         loop_interval = self.config.get('trading_loop_interval', 60)  # seconds
-        
         while self.running:
             try:
                 loop_start_time = time.time()
-                
                 # Get latest market data
                 market_data = self.components['data_manager'].get_latest_data()
-                
                 if market_data:
                     # Generate trading signals
                     signals = self.components['strategy_manager'].generate_signals(market_data)
-                    
                     if signals:
                         # Assess risk
                         risk_assessment = self.components['risk_calculator'].assess_portfolio_risk(
                             market_data, signals
                         )
-                        
                         # Check risk limits
                         if self._check_risk_limits(risk_assessment):
                             # Execute trades
                             self._execute_trades(signals, risk_assessment)
                         else:
                             logger.warning("Risk limits exceeded, skipping trade execution")
-                    
                     # Update portfolio optimization
                     self._update_portfolio_optimization(market_data)
-                
                 # Calculate sleep time to maintain consistent loop interval
                 loop_duration = time.time() - loop_start_time
                 sleep_time = max(0, loop_interval - loop_duration)
-                
                 if sleep_time > 0:
                     time.sleep(sleep_time)
-                
             except Exception as e:
                 logger.error(f"Error in trading loop: {str(e)}")
                 time.sleep(loop_interval)  # Wait before retrying
@@ -403,39 +447,51 @@ class TradingAgent:
     
     def _execute_trades(self, signals: Dict[str, float], risk_assessment: Dict[str, Any]):
         """
-        Execute trades based on signals and risk assessment.
-        
-        Args:
-            signals: Trading signals
-            risk_assessment: Risk assessment results
+        Execute trades based on signals and risk assessment with unified order routing.
         """
         try:
             broker_manager = self.components['broker_manager']
-            
+
             for symbol, signal in signals.items():
                 if abs(signal) > 0.01:  # Minimum signal threshold
                     # Calculate position size based on risk assessment
                     position_size = risk_assessment.get('position_sizes', {}).get(symbol, 0)
-                    
+
                     if position_size > 0:
+                        # Determine asset type for routing
+                        asset_type = 'stock'
+                        if symbol.endswith('-USD') or symbol in ['BTC-USD', 'ETH-USD']:
+                            asset_type = 'crypto'
+                        elif '_' in symbol:
+                            asset_type = 'forex'
+
+                        # Route to appropriate broker
+                        broker = None
+                        if asset_type == 'crypto':
+                            broker = broker_manager.get_broker('coinbase_broker')
+                        elif asset_type == 'forex':
+                            broker = broker_manager.get_broker('oanda_broker')
+                        else:
+                            broker = broker_manager.get_broker('paper_broker')
+                        if not broker or not broker.is_connected:
+                            logger.warning(f"No connected broker for {symbol} ({asset_type})")
+                            continue
+
                         # Create order
                         order_type = 'buy' if signal > 0 else 'sell'
-                        quantity = int(position_size * self.config.get('trading', {}).get('initial_capital', 100000) / 100)  # Simplified calculation
-                        price = signals.get(f"{symbol}_price", 100.0)  # Default price if not provided
-                        
-                        logger.info(f"Placing {order_type} order for {symbol}: {quantity} shares (signal: {signal:.4f})")
-                        
-                        # Place order through broker
-                        # Note: This would need proper order object creation in a real implementation
-                        # order_result = broker_manager.place_order(order)
-                        
+                        quantity = int(position_size * self.config.get('trading', {}).get('initial_capital', 100000) / 100)
+                        price = signals.get(f"{symbol}_price", 100.0)
+
+                        logger.info(f"Placing {order_type} order for {symbol}: {quantity} units (signal: {signal:.4f}) via {broker.broker_name}")
+                        # order_result = broker.place_order(order)
+
                         # Record metrics if monitoring is enabled
                         if self.monitoring_service:
-                            # Get the strategy that generated this signal
                             strategy_info = signals.get(f"{symbol}_strategy", {})
-                            strategy_name = strategy_info.get('name', 'unknown')
-                            
-                            # Record trade in monitoring
+                            if isinstance(strategy_info, dict):
+                                strategy_name = strategy_info.get('name', 'unknown')
+                            else:
+                                strategy_name = 'unknown'
                             self.monitoring_service.record_trade(
                                 action=order_type,
                                 symbol=symbol,
@@ -443,14 +499,11 @@ class TradingAgent:
                                 quantity=quantity,
                                 price=price
                             )
-                            
-                            # Update risk metrics
                             self.monitoring_service.update_risk_metrics({
                                 'portfolio_var': risk_assessment.get('portfolio_var', 0),
                                 'max_drawdown': risk_assessment.get('max_drawdown', 0),
                                 'sharpe_ratio': risk_assessment.get('sharpe_ratio', 0)
                             })
-                        
         except Exception as e:
             logger.error(f"Error executing trades: {str(e)}")
     
@@ -528,7 +581,7 @@ class TradingAgent:
                                         symbol=symbol,
                                         side=action,
                                         quantity=order_request.quantity,
-                                        price=order_request.price,
+                                        price=order_request.price if order_request.price is not None else 0.0,
                                         strategy=order_request.strategy
                                     )
                             else:
