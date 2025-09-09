@@ -15,6 +15,53 @@ import json
 logger = logging.getLogger(__name__)
 
 class RealDataConnector:
+    # Circuit breaker state
+    _failure_count = 0
+    _failure_threshold = 5
+    _circuit_open = False
+    _circuit_reset_time = 300  # seconds
+    _last_failure_time = None
+
+    def _check_circuit_breaker(self):
+        if self._circuit_open:
+            if self._last_failure_time and (time.time() - self._last_failure_time > self._circuit_reset_time):
+                self._failure_count = 0
+                self._circuit_open = False
+                logger.info("Circuit breaker reset for RealDataConnector.")
+            else:
+                logger.warning("Circuit breaker is open. Using mock data.")
+                return True
+        return False
+
+    def _record_failure(self):
+        self._failure_count += 1
+        self._last_failure_time = time.time()
+        if self._failure_count >= self._failure_threshold:
+            self._circuit_open = True
+            logger.error("Circuit breaker triggered for RealDataConnector. Too many failures.")
+
+    def _retry_api_call(self, func, *args, **kwargs):
+        max_retries = self.config.get('max_retries', 3)
+        delay = 2
+        for attempt in range(max_retries):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                logger.warning(f"API call failed (attempt {attempt+1}/{max_retries}): {e}")
+                time.sleep(delay)
+        self._record_failure()
+        return None
+    def get_status(self) -> Dict[str, Any]:
+        """Return health/status info for RealDataConnector."""
+        return {
+            'alpha_vantage_key': bool(self.alpha_vantage_key),
+            'fmp_key': bool(self.fmp_key),
+            'finnhub_key': bool(self.finnhub_key),
+            'last_update': self.last_update,
+            'cache_size': len(self.cache),
+            'timestamp': datetime.now().isoformat(),
+            'status': 'ok' if (self.alpha_vantage_key or self.fmp_key or self.finnhub_key) else 'mock'
+        }
     """Real-time market data connector supporting multiple APIs"""
     
     def __init__(self, config: Dict[str, Any]):
@@ -31,27 +78,29 @@ class RealDataConnector:
             # Try Alpha Vantage first
             if self.alpha_vantage_key:
                 data = self._get_alpha_vantage_data(symbol)
-                if data:
-                    return data
-            
-            # Fallback to FMP
-            if self.fmp_key:
-                data = self._get_fmp_data(symbol)
-                if data:
-                    return data
-                    
-            # Fallback to Finnhub
-            if self.finnhub_key:
-                data = self._get_finnhub_data(symbol)
-                if data:
-                    return data
-            
-            logger.warning(f"No real data available for {symbol}, using mock data")
-            return self._generate_mock_data(symbol)
-            
-        except Exception as e:
-            logger.error(f"Error getting real data for {symbol}: {e}")
-            return self._generate_mock_data(symbol)
+                if self._check_circuit_breaker():
+                    return self._generate_mock_data(symbol)
+                # Try Alpha Vantage first
+                if self.alpha_vantage_key:
+                    data = self._retry_api_call(self._get_alpha_vantage_data, symbol)
+                    if data:
+                        self._failure_count = 0
+                        return data
+                # Fallback to FMP
+                if self.fmp_key:
+                    data = self._retry_api_call(self._get_fmp_data, symbol)
+                    if data:
+                        self._failure_count = 0
+                        return data
+                # Fallback to Finnhub
+                if self.finnhub_key:
+                    data = self._retry_api_call(self._get_finnhub_data, symbol)
+                    if data:
+                        self._failure_count = 0
+                        return data
+                logger.warning(f"No real data available for {symbol}, using mock data")
+                self._record_failure()
+                return self._generate_mock_data(symbol)
     
     def _get_alpha_vantage_data(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Get data from Alpha Vantage API"""
@@ -153,16 +202,21 @@ class RealDataConnector:
     
     def get_historical_data(self, symbol: str, days: int = 30) -> pd.DataFrame:
         """Get historical data for backtesting"""
-        try:
-            if self.alpha_vantage_key:
-                return self._get_alpha_vantage_historical(symbol, days)
-            elif self.fmp_key:
-                return self._get_fmp_historical(symbol, days)
-            else:
-                return self._generate_mock_historical(symbol, days)
-        except Exception as e:
-            logger.error(f"Error getting historical data for {symbol}: {e}")
+        if self._check_circuit_breaker():
             return self._generate_mock_historical(symbol, days)
+        # Try Alpha Vantage first
+        if self.alpha_vantage_key:
+            df = self._retry_api_call(self._get_alpha_vantage_historical, symbol, days)
+            if df is not None:
+                self._failure_count = 0
+                return df
+        elif self.fmp_key:
+            df = self._retry_api_call(self._get_fmp_historical, symbol, days)
+            if df is not None:
+                self._failure_count = 0
+                return df
+        self._record_failure()
+        return self._generate_mock_historical(symbol, days)
     
     def _get_alpha_vantage_historical(self, symbol: str, days: int) -> pd.DataFrame:
         """Get historical data from Alpha Vantage"""

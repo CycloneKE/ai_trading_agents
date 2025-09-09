@@ -197,21 +197,21 @@ class AutoMLOptimizer:
             # Define objective function
             def objective_func(trial):
                 try:
+                    # Ensure model_type is present
+                    if 'model_type' not in trial.params and model_type == 'auto':
+                        logger.error("Error in strategy optimization objective: 'model_type' missing in trial params.")
+                        return -np.inf
                     if model_type == 'auto':
                         # Automatic model selection
                         model_name = trial.suggest_categorical('model', list(self.models.keys()))
                     else:
                         model_name = model_type
-                    
                     # Get model class
                     model_class = self.models[model_name]
-                    
                     # Suggest hyperparameters based on model type
                     params = self._suggest_hyperparameters(trial, model_name)
-                    
                     # Feature scaling
                     scaler_type = trial.suggest_categorical('scaler', list(self.scalers.keys()))
-                    
                     # Prepare data
                     X_scaled = X.copy()
                     if scaler_type != 'none':
@@ -221,26 +221,20 @@ class AutoMLOptimizer:
                             columns=X_scaled.columns,
                             index=X_scaled.index
                         )
-                    
                     # Feature selection
                     n_features = trial.suggest_int('n_features', 
                                                  min(10, len(X_scaled.columns)), 
                                                  len(X_scaled.columns))
-                    
                     if n_features < len(X_scaled.columns):
                         selector = SelectKBest(score_func=f_regression, k=n_features)
                         X_selected = selector.fit_transform(X_scaled, y)
                         X_scaled = pd.DataFrame(X_selected, index=X_scaled.index)
-                    
                     # Create and train model
                     model = model_class(**params)
-                    
                     # Cross-validation
                     cv = TimeSeriesSplit(n_splits=self.cv_folds)
                     scores = cross_val_score(model, X_scaled, y, cv=cv, scoring='r2')
-                    
                     return np.mean(scores)
-                    
                 except Exception as e:
                     logger.error(f"Error in objective function: {str(e)}")
                     return -np.inf

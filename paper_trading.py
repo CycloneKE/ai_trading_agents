@@ -17,6 +17,16 @@ from base_broker import BaseBroker, OrderRequest, OrderResponse, Position, Accou
 logger = logging.getLogger(__name__)
 
 class PaperTradingBroker(BaseBroker):
+    def get_status(self) -> Dict[str, Any]:
+        """Return health/status info for PaperTradingBroker."""
+        return {
+            'broker_name': self.broker_name,
+            'is_connected': self.is_connected,
+            'is_paper_trading': self.is_paper_trading,
+            'cash': self.cash,
+            'timestamp': datetime.now().isoformat(),
+            'status': 'ok' if self.is_connected else 'not_connected'
+        }
     """
     Paper trading broker for simulated trading.
     """

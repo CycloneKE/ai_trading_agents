@@ -26,5 +26,5 @@ ENV TZ=America/New_York
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:8080/health')" || exit 1
 
-# Run the always-online agent
-CMD ["python", "always_online_agent.py"]
+# Run the API server via main.py for Cloud Run
+CMD ["python", "main.py"]

@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional
 from datetime import datetime
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+import os
 import threading
 import json
 
@@ -21,15 +22,15 @@ class TradingAPI:
         self.config = config
         self.app = Flask(__name__)
         CORS(self.app)  # Enable CORS for web interfaces
-        
+
         # API configuration
-        self.port = config.get('port', 5000)
+        self.port = int(os.environ.get('PORT', config.get('port', 8080)))
         self.host = config.get('host', '0.0.0.0')
         self.debug = config.get('debug', False)
-        
+
         # Setup routes
         self._setup_routes()
-        
+
         # Server thread
         self.server_thread = None
         self.running = False

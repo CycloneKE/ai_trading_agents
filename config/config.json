@@ -5,10 +5,28 @@
       "GOOGL",
       "MSFT",
       "TSLA",
-      "NVDA"
+      "NVDA",
+      "BTC-USD",
+      "ETH-USD",
+      "EUR_USD",
+      "USD_JPY"
     ],
     "update_interval": 60,
     "max_retries": 3,
+    "connectors": {
+      "yahoo_finance": {
+        "enabled": true,
+        "interval": "1d"
+      },
+      "coinbase": {
+        "enabled": true
+      },
+      "oanda": {
+        "enabled": true,
+        "api_key": "cf87c3c69c323de28aa987c2d29a601c-b4f9d98037df8f4d2bedafc88e8077f1",
+        "account_id": "101-004-37000210-001"
+      }
+    },
     "redis": {
       "host": "localhost",
       "port": 6379,
@@ -62,7 +80,19 @@
       "type": "paper",
       "initial_cash": 100000,
       "commission_per_trade": 1.0,
+      "primary": false
+    },
+    "coinbase_broker": {
+      "type": "coinbase",
+  "api_key": "${COINBASE_API_KEY}",
+  "api_secret": "${COINBASE_API_SECRET}",
+  "passphrase": "${COINBASE_PASSPHRASE}",
       "primary": true
+    },
+    "oanda_broker": {
+      "type": "oanda",
+  "api_key": "${OANDA_API_KEY}",
+  "account_id": "${OANDA_ACCOUNT_ID}"
     }
   },
   "trading": {

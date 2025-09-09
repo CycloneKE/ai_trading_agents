@@ -45,6 +45,45 @@ class BaseNewsConnector:
         }
 
 class NewsAPIConnector(BaseNewsConnector):
+    # Circuit breaker state
+    _failure_count = 0
+    _failure_threshold = 5
+    _circuit_open = False
+    _circuit_reset_time = 300  # seconds
+    _last_failure_time = None
+
+    def _check_circuit_breaker(self):
+        import time
+        if self._circuit_open:
+            if self._last_failure_time and (time.time() - self._last_failure_time > self._circuit_reset_time):
+                self._failure_count = 0
+                self._circuit_open = False
+                logger.info("Circuit breaker reset for NewsAPIConnector.")
+            else:
+                logger.warning("Circuit breaker is open. Using fallback data.")
+                return True
+        return False
+
+    def _record_failure(self):
+        import time
+        self._failure_count += 1
+        self._last_failure_time = time.time()
+        if self._failure_count >= self._failure_threshold:
+            self._circuit_open = True
+            logger.error("Circuit breaker triggered for NewsAPIConnector. Too many failures.")
+
+    def _retry_api_call(self, func, *args, **kwargs):
+        import time
+        max_retries = self.config.get('max_retries', 3)
+        delay = 2
+        for attempt in range(max_retries):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                logger.warning(f"API call failed (attempt {attempt+1}/{max_retries}): {e}")
+                time.sleep(delay)
+        self._record_failure()
+        return None
     """Connector for NewsAPI data."""
     
     def __init__(self, config: Dict[str, Any]):
