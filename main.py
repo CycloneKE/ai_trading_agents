@@ -355,6 +355,9 @@ class TradingAgent:
             self.api_server.start()
 
         logger.info("AI Trading Agent initialized successfully")
+        
+        # Start the main trading loop
+        self.run_main_loop()
 
     def _validate_secrets(self):
         """Check for required secrets and log warnings/errors."""
@@ -385,7 +388,7 @@ class TradingAgent:
                 if market_data:
                     # Generate trading signals
                     signals = self.components['strategy_manager'].generate_signals(market_data)
-                    if signals:
+                    if signals and any(isinstance(v, (int, float)) for v in signals.values()):
                         # Assess risk
                         risk_assessment = self.components['risk_calculator'].assess_portfolio_risk(
                             market_data, signals
@@ -453,7 +456,7 @@ class TradingAgent:
             broker_manager = self.components['broker_manager']
 
             for symbol, signal in signals.items():
-                if abs(signal) > 0.01:  # Minimum signal threshold
+                if isinstance(signal, (int, float)) and abs(signal) > 0.01:  # Minimum signal threshold
                     # Calculate position size based on risk assessment
                     position_size = risk_assessment.get('position_sizes', {}).get(symbol, 0)
 
@@ -782,7 +785,7 @@ def create_default_config():
         "api": {
             "enabled": True,
             "host": "0.0.0.0",
-            "port": 5000,
+            "port": 5001,
             "debug": False
         },
         "logging": {

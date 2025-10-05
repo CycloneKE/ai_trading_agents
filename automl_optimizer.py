@@ -117,9 +117,10 @@ class AutoMLOptimizer:
                 features['macd_histogram'] = features['macd'] - features['macd_signal']
                 
                 # RSI
-                delta = features['close'].diff()
-                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                # Use numeric dtype for RSI calculations to avoid object-dtype comparisons
+                delta = features['close'].diff().astype(float)
+                gain = (delta.where(delta > 0, 0.0)).rolling(window=14).mean()
+                loss = (-delta.where(delta < 0, 0.0)).rolling(window=14).mean()
                 rs = gain / loss
                 features['rsi'] = 100 - (100 / (1 + rs))
                 
@@ -197,17 +198,16 @@ class AutoMLOptimizer:
             # Define objective function
             def objective_func(trial):
                 try:
-                    # Ensure model_type is present
-                    if 'model_type' not in trial.params and model_type == 'auto':
-                        logger.error("Error in strategy optimization objective: 'model_type' missing in trial params.")
-                        return -np.inf
+                    # Automatic model selection when model_type == 'auto'
                     if model_type == 'auto':
-                        # Automatic model selection
                         model_name = trial.suggest_categorical('model', list(self.models.keys()))
                     else:
                         model_name = model_type
                     # Get model class
-                    model_class = self.models[model_name]
+                    model_class = self.models.get(model_name)
+                    if model_class is None:
+                        logger.error(f"Unknown model selected in AutoML: {model_name}")
+                        return -np.inf
                     # Suggest hyperparameters based on model type
                     params = self._suggest_hyperparameters(trial, model_name)
                     # Feature scaling
@@ -234,10 +234,10 @@ class AutoMLOptimizer:
                     # Cross-validation
                     cv = TimeSeriesSplit(n_splits=self.cv_folds)
                     scores = cross_val_score(model, X_scaled, y, cv=cv, scoring='r2')
-                    return np.mean(scores)
+                    return float(np.mean(scores))
                 except Exception as e:
-                    logger.error(f"Error in objective function: {str(e)}")
-                    return -np.inf
+                    logger.debug(f"Exception in objective function: {str(e)}")
+                    return float(-np.inf)
             
             # Optimize
             study.optimize(objective_func, n_trials=self.n_trials)
@@ -441,10 +441,24 @@ class AutoMLOptimizer:
                             )
                     
                     # Run strategy with parameters
-                    performance = strategy_func(market_data, params)
-                    
-                    # Return evaluation metric
-                    return performance.get(evaluation_metric, 0.0)
+                    # strategy_func is expected to accept (params, market_data)
+                    performance = strategy_func(params, market_data)
+
+                    # Accept both dict returns (with metric key) and numeric returns
+                    if performance is None:
+                        return float(-np.inf)
+
+                    # If performance is a numeric scalar (numpy or python), treat it as the metric
+                    if isinstance(performance, (int, float, np.floating, np.integer)):
+                        return float(performance)
+
+                    # Otherwise expect a mapping and try to .get() the metric
+                    try:
+                        return float(performance.get(evaluation_metric, 0.0))
+                    except Exception:
+                        # Not a mapping-like object; return -inf to indicate failure
+                        logger.debug("Strategy returned unexpected type during AutoML objective; expected dict or numeric.")
+                        return float(-np.inf)
                     
                 except Exception as e:
                     logger.error(f"Error in strategy optimization objective: {str(e)}")

@@ -41,6 +41,17 @@ except ImportError:
     REAL_DATA_AVAILABLE = False
     RealDataConnector = None
 
+try:
+    from src.fallback_data_generator import FallbackDataGenerator
+    FALLBACK_AVAILABLE = True
+except ImportError:
+    try:
+        from fallback_data_generator import FallbackDataGenerator
+        FALLBACK_AVAILABLE = True
+    except ImportError:
+        FALLBACK_AVAILABLE = False
+        FallbackDataGenerator = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -65,6 +76,12 @@ class DataManager:
         # Data storage
         self.latest_data = {}
         self.data_lock = threading.Lock()
+        
+        # Fallback data generator
+        self.fallback_generator = None
+        if FALLBACK_AVAILABLE and FallbackDataGenerator is not None:
+            self.fallback_generator = FallbackDataGenerator()
+            logger.info("Initialized fallback data generator")
         
         # Initialize Redis for real-time data storage
         if REDIS_AVAILABLE and redis is not None:
@@ -127,8 +144,10 @@ class DataManager:
                     logger.info("Initialized OANDA forex data connector")
                 except Exception as e:
                     logger.error(f"Failed to initialize OANDA connector: {str(e)}")
-        if not self.connectors:
-            logger.warning("No data connectors available. System will use mock data.")
+        if not self.connectors and not self.fallback_generator:
+            logger.warning("No data connectors or fallback generator available.")
+        elif not self.connectors:
+            logger.info("No API connectors available. Using fallback data generator.")
     
     def _init_redis(self):
         """
@@ -162,13 +181,21 @@ class DataManager:
         
         logger.info("Starting data manager...")
         
-        # Connect all connectors
+        # Connect all connectors (only if they expose a connect method)
         for name, connector in self.connectors.items():
             try:
-                if connector.connect():
-                    logger.info(f"Connected {name}")
+                if hasattr(connector, 'connect') and callable(getattr(connector, 'connect')):
+                    try:
+                        connected = connector.connect()
+                        if connected:
+                            logger.info(f"Connected {name}")
+                        else:
+                            logger.error(f"Failed to connect {name}")
+                    except TypeError:
+                        # Some connectors may have connect() without return value
+                        logger.info(f"Called connect() on {name}")
                 else:
-                    logger.error(f"Failed to connect {name}")
+                    logger.debug(f"Connector {name} does not have a connect() method; skipping explicit connect call")
             except Exception as e:
                 logger.error(f"Error connecting {name}: {str(e)}")
         
@@ -263,6 +290,7 @@ class DataManager:
                     futures.append((connector_name, future))
         
         # Collect results
+        data_collected = False
         for connector_name, future in futures:
             try:
                 data = future.result(timeout=30)
@@ -273,8 +301,36 @@ class DataManager:
                         'data': data,
                         'timestamp': datetime.utcnow().isoformat()
                     })
+                    data_collected = True
             except Exception as e:
                 logger.error(f"Error collecting market data from {connector_name}: {str(e)}")
+        
+        # Use fallback data if no real data was collected
+        if not data_collected and self.fallback_generator:
+            try:
+                fallback_data = {}
+                for symbol in symbols:
+                    prices = self.fallback_generator.get_latest_prices()
+                    if symbol in prices:
+                        fallback_data[symbol] = {
+                            'close': prices[symbol]['price'],
+                            'open': prices[symbol]['price'] * 0.99,
+                            'high': prices[symbol]['price'] * 1.01,
+                            'low': prices[symbol]['price'] * 0.98,
+                            'volume': prices[symbol]['volume'],
+                            'timestamp': datetime.utcnow().isoformat()
+                        }
+                
+                if fallback_data:
+                    self.data_queue.put({
+                        'type': 'market_data',
+                        'source': 'fallback',
+                        'data': fallback_data,
+                        'timestamp': datetime.utcnow().isoformat()
+                    })
+                    logger.debug("Used fallback data for market data")
+            except Exception as e:
+                logger.error(f"Error generating fallback market data: {str(e)}")
     
     def _collect_news_data(self, symbols: List[str]):
         """

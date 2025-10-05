@@ -11,7 +11,7 @@
       "EUR_USD",
       "USD_JPY"
     ],
-    "update_interval": 60,
+    "update_interval": 30,
     "max_retries": 3,
     "connectors": {
       "yahoo_finance": {
@@ -38,21 +38,21 @@
       "type": "supervised_learning",
       "enabled": true,
       "lookback_period": 20,
-      "threshold": 0.02,
-      "weight": 1.0
+      "threshold": 0.001,
+      "weight": 1.5
     },
     "mean_reversion": {
       "type": "supervised_learning",
       "enabled": true,
       "lookback_period": 10,
       "z_score_threshold": 2.0,
-      "weight": 1.0
+      "weight": 1.2
     },
     "sentiment": {
       "type": "nlp",
       "enabled": true,
-      "sentiment_threshold": 0.6,
-      "weight": 0.8
+      "sentiment_threshold": 0.3,
+      "weight": 0.6
     },
     "reinforcement": {
       "type": "dqn",
@@ -60,39 +60,39 @@
       "lookback_period": 30,
       "learning_rate": 0.001,
       "exploration_rate": 0.1,
-      "weight": 1.0
+      "weight": 0.8
     }
   },
   "risk_management": {
     "var_confidence": 0.95,
-    "max_position_size": 0.1,
-    "max_portfolio_var": 0.02,
-    "max_drawdown": 0.2,
-    "max_daily_loss": 0.02
+    "max_position_size": 0.08,
+    "max_portfolio_var": 0.015,
+    "max_drawdown": 0.15,
+    "max_daily_loss": 0.015
   },
   "risk_limits": {
-    "max_portfolio_var": 0.05,
-    "max_position_size": 0.1,
-    "max_drawdown": 0.2
+    "max_portfolio_var": 0.03,
+    "max_position_size": 0.08,
+    "max_drawdown": 0.15
   },
   "brokers": {
     "paper_broker": {
       "type": "paper",
       "initial_cash": 100000,
       "commission_per_trade": 1.0,
-      "primary": false
+      "primary": true
     },
     "coinbase_broker": {
       "type": "coinbase",
-  "api_key": "${COINBASE_API_KEY}",
-  "api_secret": "${COINBASE_API_SECRET}",
-  "passphrase": "${COINBASE_PASSPHRASE}",
-      "primary": true
+      "api_key": "${COINBASE_API_KEY}",
+      "api_secret": "${COINBASE_API_SECRET}",
+      "passphrase": "${COINBASE_PASSPHRASE}",
+      "primary": false
     },
     "oanda_broker": {
       "type": "oanda",
-  "api_key": "${OANDA_API_KEY}",
-  "account_id": "${OANDA_ACCOUNT_ID}"
+      "api_key": "${OANDA_API_KEY}",
+      "account_id": "${OANDA_ACCOUNT_ID}"
     }
   },
   "trading": {
@@ -100,7 +100,7 @@
     "commission": 0.001,
     "slippage": 0.0005
   },
-  "trading_loop_interval": 60,
+  "trading_loop_interval": 15,
   "nlp": {
     "sentiment_model": "vader",
     "text_processing": {

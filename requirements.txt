@@ -22,9 +22,12 @@ websocket-client>=1.3.0
 # Monitoring (updated for security)
 prometheus-client>=0.12.0
 flask>=2.3.0
+flask-cors>=4.0.0
+gunicorn>=21.2.0
 
 # Machine Learning and RL
 tensorflow>=2.13.0
+torch>=2.0.0
 optuna>=3.0.0
 psutil>=5.9.0
 
