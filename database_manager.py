@@ -10,12 +10,12 @@ import json
 
 try:
     import psycopg2
-    from psycopg2 import pool
+    from psycopg2 import pool as psycopg2_pool
     PSYCOPG2_AVAILABLE = True
 except ImportError:
     PSYCOPG2_AVAILABLE = False
     psycopg2 = None
-    pool = None
+    psycopg2_pool = None
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class DatabaseManager:
             return
             
         try:
-            self.connection_pool = psycopg2.pool.SimpleConnectionPool(
+            self.connection_pool = psycopg2_pool.SimpleConnectionPool(
                 1, 20,
                 host=self.config['host'],
                 port=self.config['port'],
@@ -56,11 +56,14 @@ class DatabaseManager:
     
     def get_connection(self):
         """Get connection from pool"""
+        if not self.connection_pool:
+            return None
         return self.connection_pool.getconn()
     
     def return_connection(self, conn):
         """Return connection to pool"""
-        self.connection_pool.putconn(conn)
+        if self.connection_pool and conn:
+            self.connection_pool.putconn(conn)
     
     def _create_tables(self):
         """Create necessary tables"""
@@ -68,6 +71,8 @@ class DatabaseManager:
             logger.info("Skipping table creation because database is not enabled or pool not initialized")
             return
 
+        conn = None
+        cursor = None
         try:
             conn = self.get_connection()
             if not conn:
@@ -126,24 +131,30 @@ class DatabaseManager:
             logger.info("Database tables created/verified")
             
         except Exception as e:
-            conn.rollback()
+            if conn:
+                conn.rollback()
             logger.error(f"Failed to create tables: {e}")
             raise
         finally:
-            try:
-                cursor.close()
-            except Exception:
-                pass
-            try:
-                self.return_connection(conn)
-            except Exception:
-                pass
+            if cursor:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+            if conn:
+                try:
+                    self.return_connection(conn)
+                except Exception:
+                    pass
     
     def store_market_data(self, symbol: str, data: Dict[str, Any]):
         """Store market data"""
         if not self.enabled:
             return
         conn = self.get_connection()
+        if not conn:
+            return
+        cursor = None
         try:
             cursor = conn.cursor()
             cursor.execute("""
@@ -166,7 +177,8 @@ class DatabaseManager:
             logger.error(f"Failed to store market data: {e}")
             raise
         finally:
-            cursor.close()
+            if cursor:
+                cursor.close()
             self.return_connection(conn)
     
     def store_trade(self, trade_data: Dict[str, Any]):
@@ -174,6 +186,9 @@ class DatabaseManager:
         if not self.enabled:
             return
         conn = self.get_connection()
+        if not conn:
+            return
+        cursor = None
         try:
             cursor = conn.cursor()
             cursor.execute("""
@@ -196,7 +211,8 @@ class DatabaseManager:
             logger.error(f"Failed to store trade: {e}")
             raise
         finally:
-            cursor.close()
+            if cursor:
+                cursor.close()
             self.return_connection(conn)
     
     def get_recent_market_data(self, symbol: str, limit: int = 100) -> List[Dict[str, Any]]:
@@ -204,6 +220,9 @@ class DatabaseManager:
         if not self.enabled:
             return []
         conn = self.get_connection()
+        if not conn:
+            return []
+        cursor = None
         try:
             cursor = conn.cursor()
             cursor.execute("""
@@ -220,7 +239,8 @@ class DatabaseManager:
             logger.error(f"Failed to get market data: {e}")
             return []
         finally:
-            cursor.close()
+            if cursor:
+                cursor.close()
             self.return_connection(conn)
     
     def store_performance_metrics(self, metrics: Dict[str, Any]):
@@ -228,6 +248,9 @@ class DatabaseManager:
         if not self.enabled:
             return
         conn = self.get_connection()
+        if not conn:
+            return
+        cursor = None
         try:
             cursor = conn.cursor()
             cursor.execute("""
@@ -248,5 +271,6 @@ class DatabaseManager:
             logger.error(f"Failed to store performance metrics: {e}")
             raise
         finally:
-            cursor.close()
+            if cursor:
+                cursor.close()
             self.return_connection(conn)

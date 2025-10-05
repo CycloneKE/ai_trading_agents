@@ -75,48 +75,38 @@ class RealDataConnector:
     def get_real_time_data(self, symbol: str) -> Dict[str, Any]:
         """Get real-time market data for symbol"""
         try:
-            # Try Alpha Vantage first
-            if self.alpha_vantage_key:
-                data = self._get_alpha_vantage_data(symbol)
-                if self._check_circuit_breaker():
-                    return self._generate_mock_data(symbol)
-                # Try Alpha Vantage first
-                if self.alpha_vantage_key:
-                    data = self._retry_api_call(self._get_alpha_vantage_data, symbol)
-                    if data:
-                        self._failure_count = 0
-                        return data
-                # Fallback to FMP
-                if self.fmp_key:
-                    data = self._retry_api_call(self._get_fmp_data, symbol)
-                    if data:
-                        self._failure_count = 0
-                        return data
-                # Fallback to Finnhub
-                if self.finnhub_key:
-                    data = self._retry_api_call(self._get_finnhub_data, symbol)
-                    if data:
-                        self._failure_count = 0
-                        return data
-                logger.warning(f"No real data available for {symbol}, using mock data")
-                self._record_failure()
+            if self._check_circuit_breaker():
                 return self._generate_mock_data(symbol)
+                
+            # Try Finnhub first (working API)
+            if self.finnhub_key:
+                data = self._retry_api_call(self._get_finnhub_data, symbol)
+                if data:
+                    self._failure_count = 0
+                    return data
+                    
+            # Fallback to Alpha Vantage (rate limited)
+            if self.alpha_vantage_key:
+                data = self._retry_api_call(self._get_alpha_vantage_data, symbol)
+                if data:
+                    self._failure_count = 0
+                    return data
+                    
+            # Skip FMP (403 error)
+            # if self.fmp_key:
+            #     data = self._retry_api_call(self._get_fmp_data, symbol)
+            #     if data:
+            #         self._failure_count = 0
+            #         return data
+                        
+            logger.warning(f"No real data available for {symbol}, using mock data")
+            self._record_failure()
+            return self._generate_mock_data(symbol)
+            
         except Exception as e:
             logger.error(f"Error in get_real_time_data for {symbol}: {e}")
             self._record_failure()
             return self._generate_mock_data(symbol)
-
-        # Final fallback (defensive): return mock data if any unexpected path occurs
-        try:
-            return self._generate_mock_data(symbol)
-        except Exception:
-            # As a last resort, return a minimal dict to satisfy the return type
-            return {
-                'symbol': symbol,
-                'price': 0.0,
-                'timestamp': datetime.now().isoformat(),
-                'source': 'mock'
-            }
     
     def _get_alpha_vantage_data(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Get data from Alpha Vantage API"""
@@ -129,13 +119,24 @@ class RealDataConnector:
             }
             
             response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
             data = response.json()
+            
+            # Check for API error messages
+            if 'Error Message' in data:
+                logger.error(f"Alpha Vantage API error for {symbol}: {data['Error Message']}")
+                return None
+                
+            if 'Note' in data:
+                logger.warning(f"Alpha Vantage rate limit for {symbol}: {data['Note']}")
+                return None
             
             if 'Global Quote' in data:
                 quote = data['Global Quote']
                 return {
                     'symbol': symbol,
                     'price': float(quote.get('05. price', 0)),
+                    'close': float(quote.get('05. price', 0)),
                     'open': float(quote.get('02. open', 0)),
                     'high': float(quote.get('03. high', 0)),
                     'low': float(quote.get('04. low', 0)),
@@ -181,12 +182,19 @@ class RealDataConnector:
             params = {'symbol': symbol, 'token': self.finnhub_key}
             
             response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
             data = response.json()
             
-            if 'c' in data:  # Current price
+            # Check for API error
+            if 'error' in data:
+                logger.error(f"Finnhub API error for {symbol}: {data['error']}")
+                return None
+            
+            if 'c' in data and data['c'] != 0:  # Current price exists and is not zero
                 return {
                     'symbol': symbol,
                     'price': float(data.get('c', 0)),
+                    'close': float(data.get('c', 0)),
                     'open': float(data.get('o', 0)),
                     'high': float(data.get('h', 0)),
                     'low': float(data.get('l', 0)),
@@ -220,17 +228,18 @@ class RealDataConnector:
         """Get historical data for backtesting"""
         if self._check_circuit_breaker():
             return self._generate_mock_historical(symbol, days)
-        # Try Alpha Vantage first
+        # Try Alpha Vantage for historical data (Finnhub doesn't have good historical endpoint)
         if self.alpha_vantage_key:
             df = self._retry_api_call(self._get_alpha_vantage_historical, symbol, days)
             if df is not None:
                 self._failure_count = 0
                 return df
-        elif self.fmp_key:
-            df = self._retry_api_call(self._get_fmp_historical, symbol, days)
-            if df is not None:
-                self._failure_count = 0
-                return df
+        # Skip FMP due to 403 errors
+        # elif self.fmp_key:
+        #     df = self._retry_api_call(self._get_fmp_historical, symbol, days)
+        #     if df is not None:
+        #         self._failure_count = 0
+        #         return df
         self._record_failure()
         return self._generate_mock_historical(symbol, days)
     
