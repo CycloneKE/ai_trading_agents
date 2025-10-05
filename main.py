@@ -380,32 +380,57 @@ class TradingAgent:
     def run_main_loop(self):
         logger.info("Starting main trading loop...")
         loop_interval = self.config.get('trading_loop_interval', 60)  # seconds
+        symbols = self.config.get('data_manager', {}).get('symbols', ['AAPL', 'GOOGL', 'MSFT', 'TSLA'])
+        
         while self.running:
             try:
                 loop_start_time = time.time()
                 # Get latest market data
                 market_data = self.components['data_manager'].get_latest_data()
+                
                 if market_data:
-                    # Generate trading signals
-                    signals = self.components['strategy_manager'].generate_signals(market_data)
-                    if signals and any(isinstance(v, (int, float)) for v in signals.values()):
-                        # Assess risk
+                    # Process each symbol individually
+                    all_signals = {}
+                    
+                    for symbol in symbols:
+                        try:
+                            # Extract symbol-specific data
+                            symbol_data = self._extract_symbol_data(market_data, symbol)
+                            
+                            if symbol_data:
+                                # Generate trading signals for this symbol
+                                symbol_signals = self.components['strategy_manager'].generate_signals(symbol_data)
+                                
+                                if symbol_signals and symbol_signals.get('action') != 'hold':
+                                    all_signals[symbol] = symbol_signals
+                                    
+                        except Exception as e:
+                            logger.error(f"Error processing symbol {symbol}: {str(e)}")
+                            continue
+                    
+                    # Process signals if any were generated
+                    if all_signals:
+                        # Assess risk for all signals
                         risk_assessment = self.components['risk_calculator'].assess_portfolio_risk(
-                            market_data, signals
+                            market_data, all_signals
                         )
+                        
                         # Check risk limits
                         if self._check_risk_limits(risk_assessment):
                             # Execute trades
-                            self._execute_trades(signals, risk_assessment)
+                            self._execute_trades(all_signals, risk_assessment)
                         else:
                             logger.warning("Risk limits exceeded, skipping trade execution")
+                    
                     # Update portfolio optimization
                     self._update_portfolio_optimization(market_data)
+                
                 # Calculate sleep time to maintain consistent loop interval
                 loop_duration = time.time() - loop_start_time
                 sleep_time = max(0, loop_interval - loop_duration)
                 if sleep_time > 0:
                     time.sleep(sleep_time)
+                    
             except Exception as e:
                 logger.error(f"Error in trading loop: {str(e)}")
                 time.sleep(loop_interval)  # Wait before retrying
@@ -448,19 +473,66 @@ class TradingAgent:
             logger.error(f"Error checking risk limits: {str(e)}")
             return False
     
-    def _execute_trades(self, signals: Dict[str, float], risk_assessment: Dict[str, Any]):
+    def _extract_symbol_data(self, market_data: Dict[str, Any], symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Extract data for a specific symbol from the market data.
+        
+        Args:
+            market_data: Full market data from data manager
+            symbol: Symbol to extract data for
+            
+        Returns:
+            Symbol-specific data or None if not found
+        """
+        try:
+            # Check different data sources
+            for data_type, sources in market_data.items():
+                if data_type == 'market_data':
+                    for source, source_data in sources.items():
+                        data = source_data.get('data', {})
+                        
+                        # Check if symbol data exists
+                        if symbol in data:
+                            symbol_data = data[symbol].copy()
+                            symbol_data['symbol'] = symbol
+                            symbol_data['source'] = source
+                            symbol_data['timestamp'] = source_data.get('timestamp')
+                            return symbol_data
+                        
+                        # Check if data is for this specific symbol
+                        if data.get('symbol') == symbol:
+                            symbol_data = data.copy()
+                            symbol_data['symbol'] = symbol
+                            symbol_data['source'] = source
+                            symbol_data['timestamp'] = source_data.get('timestamp')
+                            return symbol_data
+            
+            # If no data found, return None
+            logger.debug(f"No market data found for symbol {symbol}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error extracting data for symbol {symbol}: {str(e)}")
+            return None
+    
+    def _execute_trades(self, signals: Dict[str, Dict[str, Any]], risk_assessment: Dict[str, Any]):
         """
         Execute trades based on signals and risk assessment with unified order routing.
+        
+        Args:
+            signals: Dict of symbol -> signal data
+            risk_assessment: Risk assessment results
         """
         try:
             broker_manager = self.components['broker_manager']
 
-            for symbol, signal in signals.items():
-                if isinstance(signal, (int, float)) and abs(signal) > 0.01:  # Minimum signal threshold
-                    # Calculate position size based on risk assessment
-                    position_size = risk_assessment.get('position_sizes', {}).get(symbol, 0)
-
-                    if position_size > 0:
+            for symbol, signal_data in signals.items():
+                if isinstance(signal_data, dict):
+                    action = signal_data.get('action', 'hold')
+                    confidence = signal_data.get('confidence', 0.0)
+                    position_size = signal_data.get('position_size', 0.0)
+                    
+                    if action != 'hold' and confidence > 0.1 and position_size > 0:
                         # Determine asset type for routing
                         asset_type = 'stock'
                         if symbol.endswith('-USD') or symbol in ['BTC-USD', 'ETH-USD']:
@@ -476,27 +548,24 @@ class TradingAgent:
                             broker = broker_manager.get_broker('oanda_broker')
                         else:
                             broker = broker_manager.get_broker('paper_broker')
+                            
                         if not broker or not broker.is_connected:
                             logger.warning(f"No connected broker for {symbol} ({asset_type})")
                             continue
 
-                        # Create order
-                        order_type = 'buy' if signal > 0 else 'sell'
-                        quantity = int(position_size * self.config.get('trading', {}).get('initial_capital', 100000) / 100)
-                        price = signals.get(f"{symbol}_price", 100.0)
+                        # Calculate quantity
+                        initial_capital = self.config.get('trading', {}).get('initial_capital', 100000)
+                        quantity = int(position_size * initial_capital / 100)
+                        price = signal_data.get('price', 100.0)
 
-                        logger.info(f"Placing {order_type} order for {symbol}: {quantity} units (signal: {signal:.4f}) via {broker.broker_name}")
+                        logger.info(f"Placing {action} order for {symbol}: {quantity} units (confidence: {confidence:.4f}) via {broker.broker_name}")
                         # order_result = broker.place_order(order)
 
                         # Record metrics if monitoring is enabled
                         if self.monitoring_service:
-                            strategy_info = signals.get(f"{symbol}_strategy", {})
-                            if isinstance(strategy_info, dict):
-                                strategy_name = strategy_info.get('name', 'unknown')
-                            else:
-                                strategy_name = 'unknown'
+                            strategy_name = signal_data.get('strategy', 'ensemble')
                             self.monitoring_service.record_trade(
-                                action=order_type,
+                                action=action,
                                 symbol=symbol,
                                 strategy=strategy_name,
                                 quantity=quantity,
@@ -507,6 +576,7 @@ class TradingAgent:
                                 'max_drawdown': risk_assessment.get('max_drawdown', 0),
                                 'sharpe_ratio': risk_assessment.get('sharpe_ratio', 0)
                             })
+                            
         except Exception as e:
             logger.error(f"Error executing trades: {str(e)}")
     

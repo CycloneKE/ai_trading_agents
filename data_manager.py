@@ -500,10 +500,11 @@ class DataManager:
         for connector_name in connectors:
             if connector_name in self.connectors:
                 connector = self.connectors[connector_name]
-                if connector.is_connected:
+                # Real data connector doesn't have is_connected attribute
+                if connector_name == 'real_data' or (hasattr(connector, 'is_connected') and connector.is_connected):
                     try:
                         data = connector.get_historical_data(symbol, start_date, end_date)
-                        if data:
+                        if data is not None and not data.empty if hasattr(data, 'empty') else data:
                             historical_data[connector_name] = data
                     except Exception as e:
                         logger.error(f"Error getting historical data from {connector_name}: {str(e)}")
