@@ -1,0 +1,28 @@
+{
+  "name": "ai-trading-dashboard",
+  "version": "2.0.0",
+  "scripts": {
+    "dev": "next dev -p 3001",
+    "build": "next build",
+    "start": "next start -p 3001",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "^14.0.0",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0",
+    "recharts": "^2.8.0",
+    "axios": "^1.6.0",
+    "@heroicons/react": "^2.0.18",
+    "framer-motion": "^10.16.0",
+    "react-hot-toast": "^2.4.1",
+    "date-fns": "^2.30.0",
+    "lodash": "^4.17.21"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.3.0",
+    "autoprefixer": "^10.4.16",
+    "postcss": "^8.4.31",
+    "@types/lodash": "^4.14.200"
+  }
+}

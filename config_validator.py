@@ -22,10 +22,31 @@ def load_config(config_path: str) -> Dict[str, Any]:
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
-        
+
+        # Resolve environment variable placeholders of the form ${VAR_NAME}
+        import re
+        import os
+
+        pattern = re.compile(r"\$\{([^}]+)\}")
+
+        def _resolve(item):
+            if isinstance(item, dict):
+                return {k: _resolve(v) for k, v in item.items()}
+            if isinstance(item, list):
+                return [_resolve(v) for v in item]
+            if isinstance(item, str):
+                # Replace all ${VAR} with value from env (try direct name, then TRADING_ prefix)
+                def _repl(match):
+                    var = match.group(1)
+                    return os.getenv(var, os.getenv(f"TRADING_{var}", ""))
+                return pattern.sub(_repl, item)
+            return item
+
+        config = _resolve(config)
+
         logger.info(f"Loaded configuration from {config_path}")
         return config
-        
+
     except Exception as e:
         logger.error(f"Error loading configuration from {config_path}: {str(e)}")
         raise

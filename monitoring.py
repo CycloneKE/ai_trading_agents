@@ -411,6 +411,10 @@ class MonitoringService:
                         self._handle_prometheus_metrics()
                     elif path == '/status':
                         self._handle_status()
+                    elif path == '/portfolio':
+                        self._handle_portfolio()
+                    elif path == '/trades':
+                        self._handle_trades()
                     elif path == '/':
                         self._handle_index()
                     else:
@@ -588,6 +592,73 @@ class MonitoringService:
                 
                 self._send_json_response(status)
             
+            def _handle_portfolio(self):
+                """Handle portfolio endpoint."""
+                try:
+                    # Get paper trading state
+                    state_file = "data/paper_trading_state.json"
+                    portfolio_data = {
+                        'cash': 0,
+                        'positions': {},
+                        'market_prices': {},
+                        'trade_history': [],
+                        'total_value': 0,
+                        'last_updated': None
+                    }
+                    
+                    if os.path.exists(state_file):
+                        with open(state_file, 'r') as f:
+                            state = json.load(f)
+                        
+                        portfolio_data.update(state)
+                        
+                        # Calculate total portfolio value
+                        total_value = state.get('cash', 0)
+                        for symbol, position in state.get('positions', {}).items():
+                            if isinstance(position, dict):
+                                quantity = position.get('quantity', 0)
+                                current_price = state.get('market_prices', {}).get(symbol, position.get('avg_price', 0))
+                                total_value += quantity * current_price
+                        
+                        portfolio_data['total_value'] = total_value
+                    
+                    self._send_json_response(portfolio_data)
+                    
+                except Exception as e:
+                    self._send_json_response({'error': str(e)})
+            
+            def _handle_trades(self):
+                """Handle trades endpoint."""
+                try:
+                    # Get recent trades from monitoring service
+                    trades = monitoring_service.metrics['trading']['orders']
+                    
+                    # Also get trades from paper trading state
+                    state_file = "data/paper_trading_state.json"
+                    if os.path.exists(state_file):
+                        with open(state_file, 'r') as f:
+                            state = json.load(f)
+                        
+                        trade_history = state.get('trade_history', [])
+                        
+                        # Combine trades
+                        all_trades = {
+                            'recent_orders': trades,
+                            'trade_history': trade_history,
+                            'total_trades': len(trade_history)
+                        }
+                    else:
+                        all_trades = {
+                            'recent_orders': trades,
+                            'trade_history': [],
+                            'total_trades': 0
+                        }
+                    
+                    self._send_json_response(all_trades)
+                    
+                except Exception as e:
+                    self._send_json_response({'error': str(e)})
+            
             def _handle_index(self):
                 """Handle index page."""
                 html = """
@@ -596,23 +667,117 @@ class MonitoringService:
                 <head>
                     <title>AI Trading Agent Monitoring</title>
                     <style>
-                        body { font-family: Arial, sans-serif; margin: 20px; }
-                        h1 { color: #333; }
+                        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+                        .container { max-width: 1200px; margin: 0 auto; }
+                        h1 { color: #333; text-align: center; }
+                        .dashboard { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-top: 20px; }
+                        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                        .card h3 { margin-top: 0; color: #555; }
                         .endpoint { margin-bottom: 10px; }
                         .endpoint a { color: #0066cc; text-decoration: none; }
                         .endpoint a:hover { text-decoration: underline; }
+                        .status { padding: 5px 10px; border-radius: 4px; color: white; font-weight: bold; }
+                        .status.ok { background: #28a745; }
+                        .status.warning { background: #ffc107; color: #333; }
+                        .status.error { background: #dc3545; }
+                        #portfolio-data, #trades-data { margin-top: 10px; }
+                        .metric { display: flex; justify-content: space-between; margin: 5px 0; }
+                        .metric-value { font-weight: bold; }
                     </style>
+                    <script>
+                        async function loadPortfolio() {
+                            try {
+                                const response = await fetch('/portfolio');
+                                const data = await response.json();
+                                document.getElementById('portfolio-data').innerHTML = `
+                                    <div class="metric"><span>Cash:</span><span class="metric-value">$${data.cash?.toLocaleString() || 0}</span></div>
+                                    <div class="metric"><span>Total Value:</span><span class="metric-value">$${data.total_value?.toLocaleString() || 0}</span></div>
+                                    <div class="metric"><span>Positions:</span><span class="metric-value">${Object.keys(data.positions || {}).length}</span></div>
+                                    <div class="metric"><span>Last Updated:</span><span class="metric-value">${data.last_updated || 'Never'}</span></div>
+                                `;
+                            } catch (e) {
+                                document.getElementById('portfolio-data').innerHTML = '<div style="color: red;">Error loading portfolio</div>';
+                            }
+                        }
+                        
+                        async function loadTrades() {
+                            try {
+                                const response = await fetch('/trades');
+                                const data = await response.json();
+                                document.getElementById('trades-data').innerHTML = `
+                                    <div class="metric"><span>Total Trades:</span><span class="metric-value">${data.total_trades || 0}</span></div>
+                                    <div class="metric"><span>Recent Orders:</span><span class="metric-value">${data.recent_orders?.length || 0}</span></div>
+                                `;
+                            } catch (e) {
+                                document.getElementById('trades-data').innerHTML = '<div style="color: red;">Error loading trades</div>';
+                            }
+                        }
+                        
+                        async function loadHealth() {
+                            try {
+                                const response = await fetch('/health');
+                                const data = await response.json();
+                                const statusEl = document.getElementById('health-status');
+                                statusEl.className = `status ${data.status}`;
+                                statusEl.textContent = data.status.toUpperCase();
+                                
+                                const componentsEl = document.getElementById('components-count');
+                                componentsEl.textContent = Object.keys(data.checks || {}).length;
+                            } catch (e) {
+                                document.getElementById('health-status').innerHTML = '<span class="status error">ERROR</span>';
+                            }
+                        }
+                        
+                        // Load data on page load and refresh every 30 seconds
+                        window.onload = function() {
+                            loadPortfolio();
+                            loadTrades();
+                            loadHealth();
+                            setInterval(() => {
+                                loadPortfolio();
+                                loadTrades();
+                                loadHealth();
+                            }, 30000);
+                        };
+                    </script>
                 </head>
                 <body>
-                    <h1>AI Trading Agent Monitoring</h1>
-                    <div class="endpoint"><a href="/health">/health</a> - Health check status</div>
-                    <div class="endpoint"><a href="/metrics">/metrics</a> - All metrics</div>
-                    <div class="endpoint"><a href="/metrics?type=trading">/metrics?type=trading</a> - Trading metrics</div>
-                    <div class="endpoint"><a href="/metrics?type=risk">/metrics?type=risk</a> - Risk metrics</div>
-                    <div class="endpoint"><a href="/metrics?type=performance">/metrics?type=performance</a> - Performance metrics</div>
-                    <div class="endpoint"><a href="/metrics?type=system">/metrics?type=system</a> - System metrics</div>
-                    <div class="endpoint"><a href="/prometheus">/prometheus</a> - Prometheus metrics</div>
-                    <div class="endpoint"><a href="/status">/status</a> - System status</div>
+                    <div class="container">
+                        <h1>AI Trading Agent Dashboard</h1>
+                        
+                        <div class="dashboard">
+                            <div class="card">
+                                <h3>System Health</h3>
+                                <div class="metric">
+                                    <span>Status:</span>
+                                    <span id="health-status" class="status ok">Loading...</span>
+                                </div>
+                                <div class="metric">
+                                    <span>Components:</span>
+                                    <span class="metric-value" id="components-count">-</span>
+                                </div>
+                            </div>
+                            
+                            <div class="card">
+                                <h3>Paper Trading Portfolio</h3>
+                                <div id="portfolio-data">Loading...</div>
+                            </div>
+                            
+                            <div class="card">
+                                <h3>Trading Activity</h3>
+                                <div id="trades-data">Loading...</div>
+                            </div>
+                            
+                            <div class="card">
+                                <h3>API Endpoints</h3>
+                                <div class="endpoint"><a href="/health">/health</a> - Health check</div>
+                                <div class="endpoint"><a href="/portfolio">/portfolio</a> - Portfolio data</div>
+                                <div class="endpoint"><a href="/trades">/trades</a> - Trading history</div>
+                                <div class="endpoint"><a href="/metrics">/metrics</a> - All metrics</div>
+                                <div class="endpoint"><a href="/status">/status</a> - System status</div>
+                            </div>
+                        </div>
+                    </div>
                 </body>
                 </html>
                 """

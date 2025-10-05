@@ -388,12 +388,20 @@ class DQNStrategy(BaseStrategy):
             # Get latest data point
             latest = history[-1]
             
+            # Check if we have required price data
+            if 'close' not in latest and 'price' not in latest:
+                logger.error(f"No price data available for {symbol}")
+                return None
+            
+            # Use 'close' or fallback to 'price'
+            close_price = latest.get('close', latest.get('price', 0.0))
+            
             # Extract basic features
             features = []
             
             # Price features
             if 'close' in self.features:
-                features.append(latest.get('close', 0.0))
+                features.append(close_price)
             
             if 'open' in self.features:
                 features.append(latest.get('open', 0.0))
@@ -408,7 +416,17 @@ class DQNStrategy(BaseStrategy):
                 features.append(latest.get('volume', 0.0))
             
             # Calculate technical indicators
-            df = pd.DataFrame([h for h in history[-self.lookback_period:]])
+            # Ensure all data points have 'close' field
+            processed_history = []
+            for h in history[-self.lookback_period:]:
+                processed_h = h.copy()
+                if 'close' not in processed_h and 'price' in processed_h:
+                    processed_h['close'] = processed_h['price']
+                elif 'close' not in processed_h:
+                    processed_h['close'] = 100.0  # Default fallback
+                processed_history.append(processed_h)
+            
+            df = pd.DataFrame(processed_history)
             
             # RSI
             if 'rsi' in self.features:

@@ -64,8 +64,15 @@ class DatabaseManager:
     
     def _create_tables(self):
         """Create necessary tables"""
-        conn = self.get_connection()
+        if not self.enabled or not self.connection_pool:
+            logger.info("Skipping table creation because database is not enabled or pool not initialized")
+            return
+
         try:
+            conn = self.get_connection()
+            if not conn:
+                logger.error("No database connection available to create tables")
+                return
             cursor = conn.cursor()
             
             # Market data table
@@ -123,8 +130,14 @@ class DatabaseManager:
             logger.error(f"Failed to create tables: {e}")
             raise
         finally:
-            cursor.close()
-            self.return_connection(conn)
+            try:
+                cursor.close()
+            except Exception:
+                pass
+            try:
+                self.return_connection(conn)
+            except Exception:
+                pass
     
     def store_market_data(self, symbol: str, data: Dict[str, Any]):
         """Store market data"""

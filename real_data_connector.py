@@ -101,6 +101,22 @@ class RealDataConnector:
                 logger.warning(f"No real data available for {symbol}, using mock data")
                 self._record_failure()
                 return self._generate_mock_data(symbol)
+        except Exception as e:
+            logger.error(f"Error in get_real_time_data for {symbol}: {e}")
+            self._record_failure()
+            return self._generate_mock_data(symbol)
+
+        # Final fallback (defensive): return mock data if any unexpected path occurs
+        try:
+            return self._generate_mock_data(symbol)
+        except Exception:
+            # As a last resort, return a minimal dict to satisfy the return type
+            return {
+                'symbol': symbol,
+                'price': 0.0,
+                'timestamp': datetime.now().isoformat(),
+                'source': 'mock'
+            }
     
     def _get_alpha_vantage_data(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Get data from Alpha Vantage API"""
