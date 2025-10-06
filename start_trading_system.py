@@ -18,12 +18,14 @@ def start_api_server():
 def start_frontend():
     """Start the frontend dashboard."""
     print("🎨 Starting frontend dashboard...")
-    os.chdir("frontend")
-    subprocess.run(["npm", "run", "dev"], shell=True)
+    frontend_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
+    subprocess.run(["npm", "run", "dev"], shell=True, cwd=frontend_dir)
 
 def start_trading_bot():
     """Start the main trading bot."""
     print("🤖 Starting AI trading bot...")
+    # Change back to root directory before starting trading bot
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
     subprocess.run([sys.executable, "main.py"])
 
 def main():
