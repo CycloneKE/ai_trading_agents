@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import Dashboard from '../components/Dashboard';
+import AdvancedDashboard from '../components/AdvancedDashboard';
 import TradingControls from '../components/TradingControls';
 import AdvancedAnalytics from '../components/AdvancedAnalytics';
 import MarketData from '../components/MarketData';
@@ -97,13 +97,13 @@ export default function TradingDashboard() {
       {/* Tab Content */}
       <div style={{ padding: '24px' }}>
         {activeTab === 'dashboard' && (
-          <Dashboard theme={currentTheme} onThemeChange={setTheme} />
+          <AdvancedDashboard theme={theme} />
         )}
         
         {activeTab === 'trading' && (
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 400px', gap: '24px' }}>
             <div>
-              <Dashboard theme={currentTheme} onThemeChange={setTheme} />
+              <AdvancedDashboard theme={theme} />
             </div>
             <TradingControls theme={currentTheme} onAction={handleAction} />
           </div>
@@ -116,7 +116,7 @@ export default function TradingDashboard() {
         {activeTab === 'analytics' && (
           <div style={{ display: 'grid', gap: '24px' }}>
             <AdvancedAnalytics theme={currentTheme} data={data} />
-            <Dashboard theme={currentTheme} onThemeChange={setTheme} />
+            <AdvancedDashboard theme={theme} />
           </div>
         )}
         

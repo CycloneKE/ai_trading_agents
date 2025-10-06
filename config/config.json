@@ -4,12 +4,8 @@
       "AAPL",
       "GOOGL",
       "MSFT",
-      "TSLA",
-      "NVDA",
       "BTC-USD",
-      "ETH-USD",
-      "EUR_USD",
-      "USD_JPY"
+      "ETH-USD"
     ],
     "update_interval": 30,
     "max_retries": 3,
@@ -23,8 +19,8 @@
       },
       "oanda": {
         "enabled": true,
-        "api_key": "cf87c3c69c323de28aa987c2d29a601c-b4f9d98037df8f4d2bedafc88e8077f1",
-        "account_id": "101-004-37000210-001"
+        "api_key": "${OANDA_API_KEY}",
+        "account_id": "${OANDA_ACCOUNT_ID}"
       }
     },
     "redis": {
@@ -65,15 +61,17 @@
   },
   "risk_management": {
     "var_confidence": 0.95,
-    "max_position_size": 0.08,
+    "max_position_size": 0.05,
     "max_portfolio_var": 0.015,
-    "max_drawdown": 0.15,
-    "max_daily_loss": 0.015
+    "max_drawdown": 0.1,
+    "max_daily_loss": 0.02,
+    "stop_loss_percent": 0.02,
+    "emergency_drawdown": 0.08
   },
   "risk_limits": {
-    "max_portfolio_var": 0.03,
-    "max_position_size": 0.08,
-    "max_drawdown": 0.15
+    "max_portfolio_var": 0.02,
+    "max_position_size": 0.05,
+    "max_drawdown": 0.1
   },
   "brokers": {
     "paper_broker": {

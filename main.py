@@ -50,7 +50,7 @@ import signal
 import threading
 import time
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
