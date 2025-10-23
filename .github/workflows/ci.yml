@@ -5,6 +5,8 @@ on:
     branches: [ main, develop ]
   pull_request:
     branches: [ main, develop ]
+  # Allow manual runs for integration tests
+  workflow_dispatch:
 
 jobs:
   test:
@@ -21,11 +23,10 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
         
-    - name: Install dependencies
+    - name: Install test dependencies
       run: |
         python -m pip install --upgrade pip
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        pip install pytest pytest-cov pylint black
+        if [ -f requirements-test.txt ]; then pip install -r requirements-test.txt; fi
         
     - name: Lint with pylint
       run: |
@@ -37,7 +38,8 @@ jobs:
         
     - name: Test with pytest
       run: |
-        pytest --cov=. --cov-report=xml
+        # Run only unit tests in CI; integration tests (network/live) are marked with @pytest.mark.integration
+        pytest -m "not integration" --maxfail=1 -q --durations=10 --cov=. --cov-report=xml
         
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v3
@@ -45,10 +47,35 @@ jobs:
         file: ./coverage.xml
         fail_ci_if_error: false
 
+  backtest_sanity:
+    needs: test
+    # Lightweight deterministic backtest sanity check to catch optimizer/backtest regressions
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.10
+
+    - name: Install minimal backtest deps
+      run: |
+        python -m pip install --upgrade pip
+        # install minimal numerical deps required by the deterministic backtest
+        pip install numpy pandas
+        if [ -f requirements-test.txt ]; then pip install -r requirements-test.txt; fi
+
+    - name: Run backtest sanity test
+      run: |
+        # Run only the deterministic PoC backtest test
+        pytest tests/test_poc_backtest_integration.py -q
+
   build:
     needs: test
+    if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     
     steps:
     - uses: actions/checkout@v3
@@ -56,27 +83,42 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v2
       
-    - name: Login to DockerHub
+    - name: Conditionally login to DockerHub (if secrets present)
+      if: ${{ secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN }}
       uses: docker/login-action@v2
       with:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
-        
-    - name: Build and push Docker image
+
+    - name: Build Docker image (local, no push)
       uses: docker/build-push-action@v4
       with:
         context: .
-        push: true
+        push: false
         tags: |
-          ${{ secrets.DOCKERHUB_USERNAME }}/ai-trading-agent:latest
-          ${{ secrets.DOCKERHUB_USERNAME }}/ai-trading-agent:${{ github.sha }}
-        cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/ai-trading-agent:buildcache
-        cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/ai-trading-agent:buildcache,mode=max
+          ai-trading-agent:latest
+          ai-trading-agent:${{ github.sha }}
+
+    - name: Push image to DockerHub (only if credentials present)
+      if: ${{ secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN }}
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Push built image to DockerHub
+      if: ${{ secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN }}
+      run: |
+        docker tag ai-trading-agent:${{ github.sha }} ${{ secrets.DOCKERHUB_USERNAME }}/ai-trading-agent:${{ github.sha }}
+        docker tag ai-trading-agent:latest ${{ secrets.DOCKERHUB_USERNAME }}/ai-trading-agent:latest
+        docker push ${{ secrets.DOCKERHUB_USERNAME }}/ai-trading-agent:${{ github.sha }}
+        docker push ${{ secrets.DOCKERHUB_USERNAME }}/ai-trading-agent:latest
 
   deploy:
     needs: build
+    # Deploy only on pushes to main. The deploy step will check for required secrets before attempting to authenticate.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     # Add permissions for authenticating to GCP
     permissions:
@@ -84,19 +126,75 @@ jobs:
       id-token: 'write'
 
     steps:
-    - name: Authenticate to Google Cloud
+    - name: Authenticate to Google Cloud (requires GCP secrets)
       id: auth
+      if: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER && secrets.GCP_SERVICE_ACCOUNT && secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN }}
       uses: 'google-github-actions/auth@v1'
       with:
-        workload_identity_provider: '${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}'
-        service_account: '${{ secrets.GCP_SERVICE_ACCOUNT }}'
+        workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+        service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
-    - name: Deploy to Cloud Run
+
+  integration:
+    needs: test
+    # Run integration tests only when integration secrets are configured OR when manually dispatched
+    if: ${{ github.event_name == 'workflow_dispatch' || (secrets.TRADING_FMP_API_KEY && secrets.TRADING_FINNHUB_API_KEY && secrets.COINBASE_API_KEY) }}
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python for integration
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.10
+
+    - name: Install test dependencies (integration)
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements-test.txt ]; then pip install -r requirements-test.txt; fi
+        # If you need full runtime deps in integration, uncomment the next line in repo and ensure requirements-runtime.txt exists
+        # pip install -r requirements-runtime.txt
+
+    - name: Run integration tests
+      run: |
+        pytest -m integration -q --maxfail=1
+
+    - name: Deploy to Cloud Run (requires GCP + DockerHub secrets)
       id: deploy
+      if: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER && secrets.GCP_SERVICE_ACCOUNT && secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN }}
       uses: 'google-github-actions/deploy-cloudrun@v1'
       with:
-        service: 'ai-trading-agent' # Choose a name for your service
-        region: 'us-central1' # Choose a region for your service
-        image: 'docker.io/${{ secrets.DOCKERHUB_USERNAME }}/ai-trading-agent:${{ github.sha }}'
-        # Assign the service account to the Cloud Run service for runtime permissions
-        service_account: '${{ secrets.GCP_SERVICE_ACCOUNT }}'
+        service: 'ai-trading-agent'
+        region: 'us-central1'
+        image: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/ai-trading-agent:${{ github.sha }}
+
+  docker_image_build:
+    needs: test
+    runs-on: ubuntu-latest
+    # Manual runs are allowed via workflow_dispatch. Push step will require DockerHub secrets.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v2
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Login to DockerHub (optional)
+      if: ${{ secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN }}
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Build image (production target)
+      run: |
+        docker buildx build --platform linux/amd64 --tag ai-trading-agent:ci --load .
+
+    - name: Show image size
+      run: |
+        docker images ai-trading-agent:ci --format "{{.Repository}}:{{.Tag}} {{.Size}}"

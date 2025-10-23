@@ -1,0 +1,8 @@
+# ML / heavy requirements (install only when needed)
+tensorflow>=2.13.0
+torch>=2.0.0
+scikit-learn>=1.5.0
+xgboost>=1.7.0
+optuna>=3.0.0
+scipy>=1.9.0
+matplotlib>=3.5.0
