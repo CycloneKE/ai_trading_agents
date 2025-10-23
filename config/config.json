@@ -24,7 +24,7 @@
       }
     },
     "redis": {
-      "host": "localhost",
+      "host": "redis",
       "port": 6379,
       "db": 0
     }
@@ -120,6 +120,11 @@
     "port": 8080,
     "metrics_interval": 15,
     "system_metrics_enabled": true
+  },
+  "api": {
+    "host": "0.0.0.0",
+    "port": 8081,
+    "debug": false
   },
   "security": {
     "use_encryption": true,

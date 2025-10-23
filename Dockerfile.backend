@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libpq-dev curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy only runtime requirements and install
+COPY requirements-runtime.txt ./requirements-runtime.txt
+RUN pip install --no-cache-dir -r requirements-runtime.txt
+
+# Copy application code
+COPY . .
+
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8080 8081
+
+CMD ["python3", "main.py"]

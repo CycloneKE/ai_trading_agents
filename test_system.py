@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+import pytest
+
+# This test orchestrates the full system and may call external services; mark it integration
+pytestmark = pytest.mark.integration
 """
 Comprehensive Testing and Debugging System
 

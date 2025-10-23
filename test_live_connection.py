@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+import pytest
+
+# mark this file as integration since it connects to live brokers and expects real credentials
+pytestmark = pytest.mark.integration
 """
 Test live broker connections
 """
