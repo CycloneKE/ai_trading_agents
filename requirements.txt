@@ -12,6 +12,7 @@ python-dotenv>=0.19.0
 
 # Database
 psycopg2-binary>=2.9.0
+supabase>=2.3.0
 
 # Security
 cryptography>=3.4.8
@@ -49,3 +50,8 @@ numpy>=1.22.0
 # Enhanced Features
 scipy>=1.9.0
 matplotlib>=3.5.0
+
+# Authentication
+PyJWT>=2.8.0
+bcrypt>=4.0.1
+

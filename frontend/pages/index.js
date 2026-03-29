@@ -1,15 +1,20 @@
 import { useState, useEffect } from 'react';
+import Head from 'next/head';
 import AdvancedDashboard from '../components/AdvancedDashboard';
 import TradingControls from '../components/TradingControls';
 import AdvancedAnalytics from '../components/AdvancedAnalytics';
 import MarketData from '../components/MarketData';
 import Settings from '../components/Settings';
+import AgentActivity from '../components/AgentActivity';
+import supabase from '../src/utils/supabaseClient';
 
 export default function TradingDashboard() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [theme, setTheme] = useState('dark');
   const [data, setData] = useState({});
   const [mounted, setMounted] = useState(false);
+
+  const [activities, setActivities] = useState([]);
 
   // Theme colors
   const colors = {
@@ -31,6 +36,59 @@ export default function TradingDashboard() {
 
   useEffect(() => {
     setMounted(true);
+
+    if (supabase) {
+      // Fetch initial trades
+      const fetchInitialTrades = async () => {
+        const { data: initialTrades, error } = await supabase
+          .from('trades')
+          .select('*')
+          .order('timestamp', { ascending: false })
+          .limit(20);
+
+        if (error) {
+          console.error('Error fetching initial trades:', error);
+          return;
+        }
+
+        if (initialTrades) {
+          const formattedTrades = initialTrades.map(trade => ({
+            id: trade.id,
+            time: new Date(trade.timestamp).toLocaleTimeString(),
+            type: (trade.action || 'HOLD').toUpperCase(),
+            symbol: trade.symbol,
+            quantity: trade.quantity,
+            price: trade.price,
+            reason: trade.strategy || 'Trade execution',
+          }));
+          setActivities(formattedTrades);
+        }
+      };
+
+      fetchInitialTrades();
+
+      // Subscribe to real-time changes
+      const channel = supabase
+        .channel('realtime_trades')
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'trades' }, payload => {
+          const newTrade = payload.new;
+          const formattedTrade = {
+            id: newTrade.id,
+            time: new Date(newTrade.timestamp).toLocaleTimeString(),
+            type: (newTrade.action || 'HOLD').toUpperCase(),
+            symbol: newTrade.symbol,
+            quantity: newTrade.quantity,
+            price: newTrade.price,
+            reason: newTrade.strategy || 'Trade execution',
+          };
+          setActivities(prev => [formattedTrade, ...prev].slice(0, 50));
+        })
+        .subscribe();
+
+      return () => {
+        supabase.removeChannel(channel);
+      };
+    }
   }, []);
 
   const handleAction = async (action, data) => {
@@ -55,6 +113,15 @@ export default function TradingDashboard() {
       backgroundColor: currentTheme.bg,
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
     }}>
+      <Head>
+        <title>AI Trading Dashboard</title>
+        <link
+          rel="stylesheet"
+          href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css"
+          integrity="sha384-JcKb8q3iqJ61gNV9KGb8thSsNjpSL0n8PARn9HuZOnIxN0hoP+VmmDGMN5t9UJ0Z"
+          crossOrigin="anonymous"
+        />
+      </Head>
       {/* Navigation Tabs */}
       <nav style={{
         backgroundColor: currentTheme.bgSecondary,
@@ -97,7 +164,12 @@ export default function TradingDashboard() {
       {/* Tab Content */}
       <div style={{ padding: '24px' }}>
         {activeTab === 'dashboard' && (
-          <AdvancedDashboard theme={theme} />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 400px', gap: '24px' }}>
+            <div>
+              <AdvancedDashboard theme={theme} />
+            </div>
+            <AgentActivity theme={theme} activities={activities} />
+          </div>
         )}
         
         {activeTab === 'trading' && (

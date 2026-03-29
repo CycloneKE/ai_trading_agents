@@ -13,6 +13,7 @@ import time
 import random
 
 from base_broker import BaseBroker, OrderRequest, OrderResponse, Position, AccountInfo
+from real_price_feed import price_feed  # Import the new real price feed
 
 logger = logging.getLogger(__name__)
 
@@ -575,13 +576,15 @@ class PaperTradingBroker(BaseBroker):
             Current price or None if not available
         """
         # Check if we have a cached price
+        price = price_feed.get_price(symbol)
+        if price:
+            self.market_prices[symbol] = price
+            return price
+        
+        # If real price feed fails, fallback to last known if available
         if symbol in self.market_prices:
-            # Add small random price movement (0.1% in either direction)
             last_price = self.market_prices[symbol]
-            movement = random.uniform(-0.001, 0.001)
-            new_price = last_price * (1.0 + movement)
-            self.market_prices[symbol] = new_price
-            return new_price
+            return last_price
         
         # If no data source is configured, use dummy prices
         if self.data_source is None:

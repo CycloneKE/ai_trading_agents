@@ -1,38 +1,4 @@
-def validate_config(config: dict) -> bool:
-    """
-    Validate the configuration structure and required fields.
-    Returns True if valid, False otherwise. Logs errors for missing/invalid fields.
-    """
-    import logging
-    required_top_keys = [
-        'data_manager', 'strategies', 'risk_management', 'risk_limits',
-        'brokers', 'trading', 'monitoring', 'security', 'logging'
-    ]
-    valid = True
-    for key in required_top_keys:
-        if key not in config:
-            logging.error(f"Missing required config section: {key}")
-            valid = False
-    # Check critical subkeys
-    dm = config.get('data_manager', {})
-    if not dm.get('symbols') or not isinstance(dm['symbols'], list):
-        logging.error("data_manager.symbols must be a non-empty list")
-        valid = False
-    if not dm.get('connectors') or not isinstance(dm['connectors'], dict):
-        logging.error("data_manager.connectors must be a dict")
-        valid = False
-    brokers = config.get('brokers', {})
-    if not brokers or not isinstance(brokers, dict):
-        logging.error("brokers must be a dict with at least one broker defined")
-        valid = False
-    trading = config.get('trading', {})
-    if 'initial_capital' not in trading:
-        logging.error("trading.initial_capital is required")
-        valid = False
-    # Add more checks as needed for production
-    if not valid:
-        logging.error("Configuration validation failed. See errors above.")
-    return valid
+from config_validator import validate_config
 #!/usr/bin/env python3
 """
 AI Trading Agent - Main Application Entry Point
@@ -81,6 +47,12 @@ from broker_manager import BrokerManager
 from order_execution_engine import OrderExecutionEngine
 from realtime_risk_manager import RealTimeRiskManager
 from performance_analytics import PerformanceAnalytics
+from risk_calculator import RiskCalculator
+from portfolio_optimizer import PortfolioOptimizer
+from event_risk_manager import EventRiskManager
+from nlp_manager import NLPManager
+from automl_optimizer import AutoMLOptimizer
+
 try:
     from api_server import TradingAPI
     API_AVAILABLE = True
@@ -89,53 +61,7 @@ except ImportError:
     API_AVAILABLE = False
     TradingAPI = None
 
-# These modules need to be implemented
-class RiskCalculator:
-    def __init__(self, config):
-        self.config = config
-    
-    def assess_portfolio_risk(self, market_data, signals):
-        return {'portfolio_var': 0.01, 'position_sizes': {}, 'current_drawdown': 0.0}
-    
-    def get_status(self):
-        return {'status': 'ok'}
-
-class EventRiskManager:
-    def __init__(self, config):
-        self.config = config
-    
-    def start(self):
-        pass
-    
-    def stop(self):
-        pass
-    
-    def get_status(self):
-        return {'status': 'ok'}
-
-class NLPManager:
-    def __init__(self, config):
-        self.config = config
-    
-    def get_status(self):
-        return {'status': 'ok'}
-
-class AutoMLOptimizer:
-    def __init__(self, config):
-        self.config = config
-    
-    def get_status(self):
-        return {'status': 'ok'}
-
-class PortfolioOptimizer:
-    def __init__(self, config):
-        self.config = config
-    
-    def optimize_portfolio(self, market_data, optimization_method='mean_variance'):
-        return {'weights': {}, 'expected_return': 0.0, 'expected_risk': 0.0}
-    
-    def get_status(self):
-        return {'status': 'ok'}
+# Redundant mock classes removed. Using imported system components.
 
 
 
@@ -188,9 +114,13 @@ class TradingAgent:
             self.components['broker_manager'] = BrokerManager(self.config)
             
             # Data Management
-            self.components['data_manager'] = DataManager(
-                self.config.get('data_manager', {})
-            )
+            # Allow a top-level flag 'use_fallback_only' or 'test_mode' to be
+            # propagated into the DataManager sub-config so CI/tests can set it
+            # at the top level (or keep it under data_manager).
+            dm_cfg = dict(self.config.get('data_manager', {}))
+            if self.config.get('use_fallback_only') or self.config.get('test_mode'):
+                dm_cfg['use_fallback_only'] = True
+            self.components['data_manager'] = DataManager(dm_cfg)
             
             # Real-time Data Feed
             self.components['realtime_feed'] = RealTimeDataFeed(
@@ -244,6 +174,16 @@ class TradingAgent:
             # NLP Engine
             self.components['nlp_manager'] = NLPManager(
                 self.config.get('nlp', {})
+            )
+            
+            # AutoML Optimizer
+            self.components['automl_optimizer'] = AutoMLOptimizer(
+                self.config.get('automl', {})
+            )
+            
+            # Portfolio Optimizer
+            self.components['portfolio_optimizer'] = PortfolioOptimizer(
+                self.config.get('portfolio_optimization', {})
             )
             
             # Advanced Features
@@ -553,13 +493,40 @@ class TradingAgent:
                             logger.warning(f"No connected broker for {symbol} ({asset_type})")
                             continue
 
-                        # Calculate quantity
-                        initial_capital = self.config.get('trading', {}).get('initial_capital', 100000)
-                        quantity = int(position_size * initial_capital / 100)
-                        price = signal_data.get('price', 100.0)
+                        # Calculate quantity (Max 2% of portfolio per trade for safety)
+                        portfolio_value = broker.get_account_info().equity if broker.get_account_info() else 100000
+                        max_risk_per_trade = 0.02 # 2% Rule
+                        
+                        # Position value based on signal (confidence * position_size)
+                        target_pos_value = portfolio_value * min(position_size, max_risk_per_trade)
+                        
+                        # Fetch price
+                        from real_price_feed import price_feed
+                        price = signal_data.get('price') or price_feed.get_price(symbol) or 100.0
+                        quantity = target_pos_value / price if price > 0 else 0
+                        
+                        if quantity <= 0:
+                            logger.warning(f"Calculated zero quantity for {symbol}")
+                            continue
 
-                        logger.info(f"Placing {action} order for {symbol}: {quantity} units (confidence: {confidence:.4f}) via {broker.broker_name}")
-                        # order_result = broker.place_order(order)
+                        # Prepare Order Request
+                        from base_broker import OrderRequest
+                        order = OrderRequest(
+                            symbol=symbol,
+                            quantity=float(quantity),
+                            side=action,
+                            order_type='market',
+                            time_in_force='gtc'
+                        )
+
+                        logger.info(f"Placing {action} order for {symbol}: {quantity:.2f} units via {broker.broker_name}")
+                        
+                        # Record attempt in risk manager
+                        if hasattr(self, 'risk_manager') and self.risk_manager:
+                            self.risk_manager.record_trade_attempt()
+                            
+                        # PLACE THE REAL ORDER
+                        order_result = broker.place_order(order)
 
                         # Record metrics if monitoring is enabled
                         if self.monitoring_service:
@@ -576,6 +543,12 @@ class TradingAgent:
                                 'max_drawdown': risk_assessment.get('max_drawdown', 0),
                                 'sharpe_ratio': risk_assessment.get('sharpe_ratio', 0)
                             })
+                            # Record trade success metric
+                            try:
+                                if hasattr(self, 'risk_manager'):
+                                    self.risk_manager.record_trade_success(symbol)
+                            except Exception:
+                                pass
                             
         except Exception as e:
             logger.error(f"Error executing trades: {str(e)}")

@@ -14,7 +14,7 @@ import threading
 import queue
 import time
 
-from .risk_calculator import RiskCalculator
+from risk_calculator import RiskCalculator
 
 logger = logging.getLogger(__name__)
 

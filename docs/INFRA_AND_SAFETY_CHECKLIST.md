@@ -1,3 +1,55 @@
+# Infra & Safety Checklist (test/startup guidance)
+
+This file documents a few runtime flags and safe procedures to run the project locally and in CI without contacting external data providers.
+
+Key runtime flags
+
+- `data_manager.use_fallback_only` (boolean) — when set in the `data_manager` section of the config, the `DataManager` will skip initializing any external connectors and will use the internal fallback generator. Use this for smoke tests and CI.
+- `use_fallback_only` or `test_mode` (top-level boolean) — convenience flags that are propagated into `data_manager.use_fallback_only` by the `main` application. You can set this at the top-level of a config file instead of modifying `data_manager` directly.
+
+Recommended commands
+
+Run the smoke-startup test locally (uses fallback-only):
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_agent_smoke.py -q
+```
+
+Create a temporary config and run the agent locally with fallback-only enabled (manual run):
+
+```powershell
+# Create a copy of your config and add data_manager.use_fallback_only = true
+copy config\run_config.json config\run_fallback.json
+(Get-Content config\run_fallback.json) -replace '"monitoring"', '"monitoring"' | Set-Content config\run_fallback.json
+# (Edit config\run_fallback.json and add "data_manager": {"use_fallback_only": true} if needed)
+.\.venv\Scripts\python.exe main.py --config config\run_fallback.json
+```
+
+CI notes
+
+- The `tests/test_agent_smoke.py` test already sets `data_manager.use_fallback_only` on the temporary config it writes. The repository CI contains a manual-only (`workflow_dispatch`) smoke job that runs this test. This keeps CI safe from accidental network/API calls.
+- If you add new startup/integration tests that touch connectors, make sure to add a `use_fallback_only` switch in the test or mock the connectors.
+
+Troubleshooting
+
+- If pytest fails during collection with `ModuleNotFoundError` for optional test libraries (e.g., `bs4`, `responses`), install test dependencies with:
+
+```powershell
+pip install -r requirements-test.txt
+```
+
+- To run only the smoke/test-data-manager tests (fast):
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q -k "agent_smoke or data_manager_fallback"
+```
+
+Security & secrets
+
+- Do not enable real connectors in CI. Keep secrets out of CI or add them via repository secrets when necessary for gated integration tests.
+- For rotating or scrubbing secrets from history, coordinate a controlled history rewrite and rotation process — it is destructive and should be planned.
+
+If you want, I can add a short README section instead of this file. Pick which you prefer.
 # Infrastructure & Safety Checklist for ai_trading_agents
 
 This checklist collects the operational and safety items you should satisfy before enabling online RL, ML builds, or automated deployments. Follow these steps to reduce operational risk and ensure reproducible deployments.

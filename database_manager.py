@@ -17,6 +17,14 @@ except ImportError:
     psycopg2 = None
     psycopg2_pool = None
 
+try:
+    from supabase import create_client, Client
+    SUPABASE_AVAILABLE = True
+except ImportError:
+    SUPABASE_AVAILABLE = False
+    create_client = None
+    Client = None
+
 logger = logging.getLogger(__name__)
 
 class DatabaseManager:
@@ -26,13 +34,31 @@ class DatabaseManager:
         self.config = config
         self.connection_pool = None
         self.enabled = PSYCOPG2_AVAILABLE
+        self.supabase_client = None
         
-        if not self.enabled:
-            logger.warning("PostgreSQL not available. Install psycopg2-binary to enable database features.")
+        # Check if Supabase REST is configured
+        supabase_url = self.config.get('supabase_url')
+        supabase_key = self.config.get('supabase_key')
+        
+        if supabase_url and supabase_key:
+            if not SUPABASE_AVAILABLE:
+                logger.warning("Supabase configuration found, but 'supabase' package is not installed.")
+            else:
+                try:
+                    self.supabase_client = create_client(supabase_url, supabase_key)
+                    logger.info("Supabase REST client initialized successfully")
+                    self.enabled = True
+                except Exception as e:
+                    logger.error(f"Failed to initialize Supabase client: {e}")
+        
+        if not self.enabled and not self.supabase_client:
+            logger.warning("PostgreSQL not available and no Supabase config. Database disabled.")
             return
             
-        self._initialize_pool()
-        self._create_tables()
+        # Initialize Postgres pool only if basic host exists
+        if self.enabled and PSYCOPG2_AVAILABLE and self.config.get('host'):
+            self._initialize_pool()
+            self._create_tables()
     
     def _initialize_pool(self):
         """Initialize connection pool"""
@@ -151,6 +177,24 @@ class DatabaseManager:
         """Store market data"""
         if not self.enabled:
             return
+            
+        if self.supabase_client:
+            payload = {
+                'symbol': symbol,
+                'timestamp': datetime.utcnow().isoformat(),
+                'open_price': data.get('open'),
+                'high_price': data.get('high'),
+                'low_price': data.get('low'),
+                'close_price': data.get('close'),
+                'volume': data.get('volume'),
+                'data': data
+            }
+            try:
+                self.supabase_client.table('market_data').insert(payload).execute()
+            except Exception as e:
+                logger.error(f"Supabase store_market_data error: {e}")
+            return
+            
         conn = self.get_connection()
         if not conn:
             return
@@ -185,6 +229,24 @@ class DatabaseManager:
         """Store trade execution"""
         if not self.enabled:
             return
+            
+        if self.supabase_client:
+            payload = {
+                'symbol': trade_data['symbol'],
+                'timestamp': datetime.utcnow().isoformat(),
+                'action': trade_data['action'],
+                'quantity': trade_data['quantity'],
+                'price': trade_data['price'],
+                'strategy': trade_data.get('strategy'),
+                'confidence': trade_data.get('confidence'),
+                'metadata': trade_data.get('metadata', {})
+            }
+            try:
+                self.supabase_client.table('trades').insert(payload).execute()
+            except Exception as e:
+                logger.error(f"Supabase store_trade error: {e}")
+            return
+            
         conn = self.get_connection()
         if not conn:
             return
@@ -219,6 +281,15 @@ class DatabaseManager:
         """Get recent market data"""
         if not self.enabled:
             return []
+            
+        if self.supabase_client:
+            try:
+                response = self.supabase_client.table('market_data').select("*").eq('symbol', symbol).order('timestamp', desc=True).limit(limit).execute()
+                return response.data
+            except Exception as e:
+                logger.error(f"Supabase get_recent_market_data error: {e}")
+                return []
+                
         conn = self.get_connection()
         if not conn:
             return []
@@ -247,6 +318,22 @@ class DatabaseManager:
         """Store performance metrics"""
         if not self.enabled:
             return
+            
+        if self.supabase_client:
+            payload = {
+                'timestamp': datetime.utcnow().isoformat(),
+                'total_return': metrics.get('total_return'),
+                'sharpe_ratio': metrics.get('sharpe_ratio'),
+                'max_drawdown': metrics.get('max_drawdown'),
+                'win_rate': metrics.get('win_rate'),
+                'metrics': metrics
+            }
+            try:
+                self.supabase_client.table('performance_metrics').insert(payload).execute()
+            except Exception as e:
+                logger.error(f"Supabase store_performance_metrics error: {e}")
+            return
+            
         conn = self.get_connection()
         if not conn:
             return

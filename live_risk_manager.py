@@ -42,6 +42,21 @@ except Exception:
     kelly_fraction_gauge = _NoOp()
     trade_cooldown_counter = _NoOp()
     can_trade_gauge = _NoOp()
+    # Additional metrics for observability
+    trade_attempts_counter = _NoOp()
+    trade_success_counter = _NoOp()
+    connector_error_counter = _NoOp()
+
+try:
+    # If prometheus is available, ensure these names map to real metrics
+    from prometheus_client import Counter as _Counter, Gauge as _Gauge
+    trade_attempts_counter = _Counter('live_trade_attempts_total', 'Total trade attempts')
+    trade_success_counter = _Counter('live_trade_success_total', 'Total successful trades')
+    # Keep connector errors in the risk manager namespace for now
+    connector_error_counter = _Counter('connector_errors_total', 'Total connector errors encountered')
+except Exception:
+    # ignore if prometheus not available
+    pass
 
 class LiveRiskManager:
     def __init__(self, config: Dict[str, Any]):
@@ -153,30 +168,50 @@ class LiveRiskManager:
         ts = timestamp if timestamp is not None else time.time()
         self._last_exit_ts[symbol] = float(ts)
 
-    def can_trade(self, symbol: str, timestamp: float = None) -> bool:
-        """Return True if the symbol is allowed to be traded (not in cooldown)."""
-        ts = timestamp if timestamp is not None else time.time()
-        last = self._last_exit_ts.get(symbol)
-        if last is None:
-            try:
-                can_trade_gauge.set(1)
-            except Exception:
-                pass
-            return True
-        if (ts - last) < float(self.trade_cooldown_seconds):
-            logger.info(f"Symbol {symbol} in cooldown: {ts-last:.1f}s < {self.trade_cooldown_seconds}s")
-            try:
-                trade_cooldown_counter.inc()
-            except Exception:
-                pass
-            try:
-                can_trade_gauge.set(0)
-            except Exception:
-                pass
-            return False
+    def record_trade_attempt(self, symbol: str) -> None:
+        """Record a trade attempt for metrics."""
         try:
-            can_trade_gauge.set(1)
+            trade_attempts_counter.inc()
         except Exception:
             pass
-        return True
-        return True
+
+    def record_trade_success(self, symbol: str) -> None:
+        """Record a successful trade for metrics."""
+        try:
+            trade_success_counter.inc()
+        except Exception:
+            pass
+
+    def pre_trade_risk_check(self, symbol: str, side: str, quantity: int, price: float, portfolio_value: float, pnl: float, peak_portfolio_value: float) -> (bool, str, int):
+        """Perform pre-trade risk checks.
+        
+        Returns:
+            (approved, reason, adjusted_quantity)
+        """
+        # Check portfolio stop-loss
+        if not self.check_portfolio_stop_loss(peak_portfolio_value, portfolio_value):
+            return False, "PORTFOLIO_STOP_LOSS", 0
+        
+        # Check daily loss
+        if not self.check_daily_loss(pnl, portfolio_value):
+            return False, "DAILY_LOSS_LIMIT", 0
+            
+        # Check position size
+        if not self.check_position_size(symbol, quantity, price, portfolio_value):
+            # Reduce quantity to meet position size limit
+            adjusted_quantity = floor((self.max_position_size * portfolio_value) / price)
+            if adjusted_quantity > 0:
+                return True, "ADJUSTED_QUANTITY", adjusted_quantity
+            else:
+                return False, "POSITION_SIZE_TOO_LARGE", 0
+        
+        return True, "OK", quantity
+        
+    def get_status(self) -> Dict[str, Any]:
+        """Return current status of the risk manager."""
+        return {
+            "max_position_size": self.max_position_size,
+            "max_daily_loss": self.max_daily_loss,
+            "portfolio_stop_loss": self.portfolio_stop_loss,
+            "last_exit_timestamps": self._last_exit_ts
+        }

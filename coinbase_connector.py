@@ -5,7 +5,7 @@ import requests
 import time
 from typing import Dict, Any, List
 from datetime import datetime
-from .base_connector import BaseConnector
+from base_connector import BaseConnector
 
 class CoinbaseConnector(BaseConnector):
     # Circuit breaker state

@@ -42,6 +42,13 @@ except ImportError:
     RealDataConnector = None
 
 try:
+    from mocked_connector import MockedConnector
+    MOCK_AVAILABLE = True
+except Exception:
+    MockedConnector = None
+    MOCK_AVAILABLE = False
+
+try:
     from src.fallback_data_generator import FallbackDataGenerator
     FALLBACK_AVAILABLE = True
 except ImportError:
@@ -62,6 +69,9 @@ class DataManager:
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
+        # If set, force use of the internal fallback generator and skip external connectors.
+        # Useful for tests and CI to avoid polling external APIs.
+        self.use_fallback_only = bool(self.config.get('use_fallback_only', False) or self.config.get('test_mode', False))
         self.connectors = {}
         self.is_running = False
         self.data_queue = queue.Queue()
@@ -92,15 +102,35 @@ class DataManager:
     
     def _init_connectors(self):
         """Initialize data connectors"""
+        # If explicitly requested, skip initializing any external connectors and rely
+        # on the fallback data generator. This prevents background polling of
+        # external APIs during tests or smoke runs when credentials are not set.
+        if self.use_fallback_only:
+            logger.info("use_fallback_only/test_mode enabled: skipping external connector initialization")
+            if not self.fallback_generator:
+                logger.warning("Fallback generator not available; no data sources initialized.")
+            return
         # Initialize real data connector (priority)
-        if REAL_DATA_AVAILABLE and RealDataConnector is not None:
+        # Mock connector can be requested via config (use_mock_connector) or env var
+        use_mock = bool(self.config.get('use_mock_connector', False) or __import__('os').environ.get('USE_MOCK_CONNECTOR', '').lower() in ('1', 'true', 'yes'))
+        if use_mock and MOCK_AVAILABLE and MockedConnector is not None:
             try:
-                self.connectors['real_data'] = RealDataConnector(self.config)
-                logger.info("Initialized real data connector")
+                # Register mock as 'real_data' so callers that expect a real_data connector will work
+                self.connectors['real_data'] = MockedConnector(self.config)
+                logger.info("Initialized MockedConnector as real_data")
                 if hasattr(self.connectors['real_data'], 'connect'):
                     self.connectors['real_data'].connect()
             except Exception as e:
-                logger.warning(f"Failed to initialize real data connector: {str(e)}")
+                logger.warning(f"Failed to initialize MockedConnector: {str(e)}")
+        else:
+            if REAL_DATA_AVAILABLE and RealDataConnector is not None:
+                try:
+                    self.connectors['real_data'] = RealDataConnector(self.config)
+                    logger.info("Initialized real data connector")
+                    if hasattr(self.connectors['real_data'], 'connect'):
+                        self.connectors['real_data'].connect()
+                except Exception as e:
+                    logger.warning(f"Failed to initialize real data connector: {str(e)}")
         
         # Initialize legacy connectors as backup
         if CONNECTORS_AVAILABLE:

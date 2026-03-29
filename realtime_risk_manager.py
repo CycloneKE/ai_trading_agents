@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 import numpy as np
 from enum import Enum
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,15 @@ class RealTimeRiskManager:
         # Emergency controls
         self.emergency_stop = False
         self.risk_alerts = []
+        # Prometheus counters (optional)
+        try:
+            from prometheus_client import Counter
+            self.trade_attempts_counter = Counter('trade_attempts_total', 'Total trade attempts')
+            self.trade_success_counter = Counter('trade_success_total', 'Total successful trades')
+        except Exception:
+            # prometheus_client not installed or failed to import; use no-op placeholders
+            self.trade_attempts_counter = None
+            self.trade_success_counter = None
         
     def _initialize_risk_limits(self) -> List[RiskLimit]:
         """Initialize risk limits from configuration"""
@@ -175,6 +185,27 @@ class RealTimeRiskManager:
             
         except Exception as e:
             logger.error(f"Post-trade risk update error: {e}")
+
+    def record_trade_attempt(self) -> None:
+        """Record that a trade was attempted (increments Prometheus counter if available)."""
+        try:
+            counter = getattr(self, 'trade_attempts_counter', None)
+            inc = getattr(counter, 'inc', None)
+            if callable(inc):
+                inc()
+        except Exception:
+            # Safe no-op on any failure
+            pass
+
+    def record_trade_success(self) -> None:
+        """Record that a trade completed successfully (increments Prometheus counter if available)."""
+        try:
+            counter = getattr(self, 'trade_success_counter', None)
+            inc = getattr(counter, 'inc', None)
+            if callable(inc):
+                inc()
+        except Exception:
+            pass
     
     def _calculate_projected_var(self, symbol: str, side: str, quantity: float, price: float) -> float:
         """Calculate projected portfolio VaR after trade"""
@@ -466,7 +497,7 @@ class RealTimeRiskManager:
     
     def get_status(self) -> Dict[str, Any]:
         """Get risk manager status"""
-        return {
+        status = {
             'emergency_stop': self.emergency_stop,
             'active_positions': len([p for p in self.positions.values() if p['quantity'] > 0]),
             'portfolio_value': self.portfolio_value,
@@ -476,3 +507,20 @@ class RealTimeRiskManager:
             'current_var': self.current_metrics.portfolio_var,
             'current_leverage': self.current_metrics.leverage
         }
+
+        # Expose simple counters if available (safe to call)
+        try:
+            if getattr(self, 'trade_attempts_counter', None) is not None:
+                # prometheus client Counter has _value.get() internals; access safely if present
+                status['trade_attempts'] = float(getattr(self.trade_attempts_counter, '_value').get())
+        except Exception:
+            # best-effort; ignore if internals differ
+            pass
+
+        try:
+            if getattr(self, 'trade_success_counter', None) is not None:
+                status['trade_successes'] = float(getattr(self.trade_success_counter, '_value').get())
+        except Exception:
+            pass
+
+        return status

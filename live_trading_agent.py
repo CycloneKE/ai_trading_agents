@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from live_coinbase_broker import LiveCoinbaseBroker
 from live_risk_manager import LiveRiskManager
+from metrics import start_metrics_server
 
 load_dotenv()
 
@@ -29,6 +30,11 @@ class LiveTradingAgent:
         # Track portfolio peak/current values for portfolio stop-loss
         self.peak_portfolio_value = 0.0
         self.current_portfolio_value = 0.0
+        # Optionally start Prometheus metrics server (enabled via PROMETHEUS_ENABLED)
+        try:
+            start_metrics_server()
+        except Exception:
+            logger.debug("Metrics server not started")
         
     def connect_brokers(self):
         """Connect to all brokers"""

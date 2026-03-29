@@ -16,14 +16,15 @@ logger = logging.getLogger(__name__)
 
 # Fix relative imports
 try:
-    from base_strategy import BaseStrategy
     from reinforcement_learning import DQNStrategy
     from supervised_learning import SupervisedLearningStrategy
+    from technical_strategy import TechnicalStrategy
 except ImportError as e:
     logger.warning(f"Strategy import error: {e}")
     BaseStrategy = None
     DQNStrategy = None
     SupervisedLearningStrategy = None
+    TechnicalStrategy = None
 
 class MockStrategy:
     """Simple mock strategy for testing."""
@@ -107,10 +108,16 @@ class StrategyManager:
                         strategy = DQNStrategy(strategy_name, strategy_config)
                     elif strategy_type == 'supervised_learning' and SupervisedLearningStrategy:
                         strategy = SupervisedLearningStrategy(strategy_name, strategy_config)
+                    elif strategy_type == 'technical' and TechnicalStrategy:
+                        strategy = TechnicalStrategy(strategy_name, strategy_config)
                     else:
-                        # Create a simple mock strategy for now
-                        strategy = MockStrategy(strategy_name, strategy_config)
-                        logger.info(f"Using mock strategy for {strategy_name} ({strategy_type})")
+                        # Fallback to technical if unknown or supervised/reinforcement not ready
+                        if TechnicalStrategy:
+                            strategy = TechnicalStrategy(strategy_name, strategy_config)
+                            logger.info(f"Using technical strategy fallback for {strategy_name}")
+                        else:
+                            strategy = MockStrategy(strategy_name, strategy_config)
+                            logger.info(f"Using mock strategy for {strategy_name} ({strategy_type})")
                     
                     self.strategies[strategy_name] = strategy
                     self.strategy_weights[strategy_name] = strategy_config.get('weight', 1.0)

@@ -14,6 +14,16 @@ import json
 
 logger = logging.getLogger(__name__)
 
+# Prometheus connector error counter (optional)
+try:
+    from prometheus_client import Counter as _Counter
+    connector_error_counter = _Counter('connector_errors_total', 'Total connector errors encountered')
+except Exception:
+    class _NoOpC:
+        def inc(self, *a, **k):
+            return None
+    connector_error_counter = _NoOpC()
+
 class RealDataConnector:
     # Circuit breaker state
     _failure_count = 0
@@ -105,6 +115,10 @@ class RealDataConnector:
             
         except Exception as e:
             logger.error(f"Error in get_real_time_data for {symbol}: {e}")
+            try:
+                connector_error_counter.inc()
+            except Exception:
+                pass
             self._record_failure()
             return self._generate_mock_data(symbol)
     
@@ -205,6 +219,10 @@ class RealDataConnector:
                 }
         except Exception as e:
             logger.error(f"Finnhub error for {symbol}: {e}")
+            try:
+                connector_error_counter.inc()
+            except Exception:
+                pass
         return None
     
     def _generate_mock_data(self, symbol: str) -> Dict[str, Any]:

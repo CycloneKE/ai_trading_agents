@@ -47,43 +47,23 @@ class TradingAPI:
         def get_performance():
             """Get performance metrics."""
             try:
-                # Mock performance data for now
-                performance = {
-                    'total_pnl': 1250.75,
-                    'win_rate': 0.68,
-                    'sharpe_ratio': 1.45,
-                    'max_drawdown': 0.08,
-                    'total_trades': 156
-                }
-                return jsonify(performance)
+                period = request.args.get('period', '1M')
+                report = self.trading_agent.performance_analytics.generate_performance_report(period)
+                return jsonify(report)
             except Exception as e:
+                logger.error(f"Error getting performance: {e}")
                 return jsonify({'error': str(e)}), 500
         
         @self.app.route('/api/trades', methods=['GET'])
         def get_trades():
             """Get recent trades."""
             try:
-                # Mock trade data for now
-                trades = [
-                    {
-                        'timestamp': datetime.now().isoformat(),
-                        'symbol': 'AAPL',
-                        'side': 'buy',
-                        'quantity': 100,
-                        'price': 175.50,
-                        'strategy': 'momentum'
-                    },
-                    {
-                        'timestamp': datetime.now().isoformat(),
-                        'symbol': 'GOOGL',
-                        'side': 'sell',
-                        'quantity': 50,
-                        'price': 2850.25,
-                        'strategy': 'mean_reversion'
-                    }
-                ]
-                return jsonify(trades)
+                offset = int(request.args.get('offset', 0))
+                limit = int(request.args.get('limit', 100))
+                trades = self.trading_agent.performance_analytics.trades_history
+                return jsonify(trades[offset:offset+limit])
             except Exception as e:
+                logger.error(f"Error getting trades: {e}")
                 return jsonify({'error': str(e)}), 500
     
     def start(self):

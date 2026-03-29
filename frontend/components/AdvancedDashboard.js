@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, Heatmap, ScatterChart, Scatter } from 'recharts';
+import AgentActivity from './AgentActivity';
 
 const AdvancedDashboard = ({ theme = 'dark' }) => {
   const [activeTab, setActiveTab] = useState('overview');
   const [data, setData] = useState({
     status: {}, performance: {}, positions: [], alerts: [], news: [], 
     orderBook: {}, riskMetrics: {}, modelPerf: {}, strategies: [], 
-    correlations: [], heatmap: [], calendar: [], systemHealth: {}
+    correlations: [], heatmap: [], calendar: [], systemHealth: {}, agentActivity: []
   });
   const [isConnected, setIsConnected] = useState(false);
   const [selectedSymbol, setSelectedSymbol] = useState('AAPL');
@@ -27,7 +28,7 @@ const AdvancedDashboard = ({ theme = 'dark' }) => {
       const endpoints = [
         'status', 'performance', 'positions', 'alerts', 'news-feed', 
         'risk-metrics', 'model-performance', 'strategy-performance',
-        'correlation-matrix', 'market-heatmap', 'economic-calendar', 'system-health'
+        'correlation-matrix', 'market-heatmap', 'economic-calendar', 'system-health', 'agent-activity'
       ];
       
       const responses = await Promise.all(
@@ -40,7 +41,8 @@ const AdvancedDashboard = ({ theme = 'dark' }) => {
         status: responses[0], performance: responses[1], positions: responses[2],
         alerts: responses[3], news: responses[4], riskMetrics: responses[5],
         modelPerf: responses[6], strategies: responses[7], correlations: responses[8],
-        heatmap: responses[9], calendar: responses[10], systemHealth: responses[11]
+        heatmap: responses[9], calendar: responses[10], systemHealth: responses[11],
+        agentActivity: responses[12]
       });
       setIsConnected(true);
     } catch (error) {
@@ -197,38 +199,43 @@ const AdvancedDashboard = ({ theme = 'dark' }) => {
         </div>
       </div>
 
-      {/* Positions Table */}
-      <div style={{ backgroundColor: currentTheme.bgSecondary, border: `1px solid ${currentTheme.border}`, borderRadius: '8px', padding: '16px' }}>
-        <h3 style={{ margin: '0 0 16px 0', fontSize: '16px' }}>Current Positions</h3>
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ borderBottom: `1px solid ${currentTheme.border}` }}>
-                {['Symbol', 'Quantity', 'Avg Price', 'Current Price', 'P&L', 'P&L %', 'Market Value'].map(header => (
-                  <th key={header} style={{ textAlign: 'left', padding: '8px', fontSize: '12px', color: currentTheme.textMuted }}>
-                    {header}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {data.positions.map((pos, i) => (
-                <tr key={i} style={{ borderBottom: `1px solid ${currentTheme.border}` }}>
-                  <td style={{ padding: '8px', fontWeight: 'bold' }}>{pos.symbol}</td>
-                  <td style={{ padding: '8px' }}>{pos.quantity}</td>
-                  <td style={{ padding: '8px' }}>${pos.avg_price?.toFixed(2)}</td>
-                  <td style={{ padding: '8px' }}>${pos.current_price?.toFixed(2)}</td>
-                  <td style={{ padding: '8px', color: pos.pnl > 0 ? currentTheme.success : currentTheme.danger }}>
-                    ${pos.pnl?.toFixed(2)}
-                  </td>
-                  <td style={{ padding: '8px', color: pos.pnl_percent > 0 ? currentTheme.success : currentTheme.danger }}>
-                    {pos.pnl_percent?.toFixed(2)}%
-                  </td>
-                  <td style={{ padding: '8px' }}>${pos.market_value?.toLocaleString()}</td>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+        {/* Agent Activity */}
+        <AgentActivity theme={theme} activities={data.agentActivity} />
+
+        {/* Positions Table */}
+        <div style={{ backgroundColor: currentTheme.bgSecondary, border: `1px solid ${currentTheme.border}`, borderRadius: '8px', padding: '16px' }}>
+          <h3 style={{ margin: '0 0 16px 0', fontSize: '16px' }}>Current Positions</h3>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${currentTheme.border}` }}>
+                  {['Symbol', 'Quantity', 'Avg Price', 'Current Price', 'P&L', 'P&L %', 'Market Value'].map(header => (
+                    <th key={header} style={{ textAlign: 'left', padding: '8px', fontSize: '12px', color: currentTheme.textMuted }}>
+                      {header}
+                    </th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {data.positions.map((pos, i) => (
+                  <tr key={i} style={{ borderBottom: `1px solid ${currentTheme.border}` }}>
+                    <td style={{ padding: '8px', fontWeight: 'bold' }}>{pos.symbol}</td>
+                    <td style={{ padding: '8px' }}>{pos.quantity}</td>
+                    <td style={{ padding: '8px' }}>${pos.avg_price?.toFixed(2)}</td>
+                    <td style={{ padding: '8px' }}>${pos.current_price?.toFixed(2)}</td>
+                    <td style={{ padding: '8px', color: pos.pnl > 0 ? currentTheme.success : currentTheme.danger }}>
+                      ${pos.pnl?.toFixed(2)}
+                    </td>
+                    <td style={{ padding: '8px', color: pos.pnl_percent > 0 ? currentTheme.success : currentTheme.danger }}>
+                      {pos.pnl_percent?.toFixed(2)}%
+                    </td>
+                    <td style={{ padding: '8px' }}>${pos.market_value?.toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>

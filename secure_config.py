@@ -54,6 +54,8 @@ class SecureConfigManager:
     def get_database_config(self) -> Dict[str, Any]:
         """Get database configuration"""
         return {
+            'supabase_url': os.getenv('SUPABASE_URL'),
+            'supabase_key': os.getenv('SUPABASE_KEY'),
             'host': os.getenv('DB_HOST', 'localhost'),
             'port': int(os.getenv('DB_PORT', '5432')),
             'database': os.getenv('DB_NAME', 'trading_agent'),

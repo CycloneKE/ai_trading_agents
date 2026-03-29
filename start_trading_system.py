@@ -10,6 +10,15 @@ import time
 import webbrowser
 from threading import Thread
 
+# Fix for Windows encoding issues with emojis
+if sys.platform == 'win32':
+    import codecs
+    try:
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.detach())
+        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.detach())
+    except:
+        pass
+
 def start_api_server():
     """Start the API server."""
     print("🚀 Starting API server...")
@@ -19,7 +28,10 @@ def start_frontend():
     """Start the frontend dashboard."""
     print("🎨 Starting frontend dashboard...")
     frontend_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
-    subprocess.run(["npm", "run", "dev"], shell=True, cwd=frontend_dir)
+    # On Windows, npm is often npm.cmd
+    npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
+    # Using 'dev' script since 'next' is present in node_modules
+    subprocess.run([npm_cmd, "run", "dev"], shell=True, cwd=frontend_dir)
 
 def start_trading_bot():
     """Start the main trading bot."""
@@ -43,7 +55,8 @@ def main():
     
     # Kill any existing Node.js processes
     try:
-        subprocess.run(["taskkill", "/F", "/IM", "node.exe"], capture_output=True, shell=True)
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/IM", "node.exe"], capture_output=True, shell=True)
         time.sleep(2)
     except:
         pass
@@ -53,14 +66,14 @@ def main():
     frontend_thread.start()
     
     # Wait for frontend to start
-    time.sleep(5)
+    time.sleep(10)
     
     # Open browser to dashboard
     print("🌐 Opening dashboard in browser...")
-    webbrowser.open("http://localhost:3001")
+    webbrowser.open("http://localhost:3000")
     
     print("\n✅ System Status:")
-    print("   📊 Dashboard: http://localhost:3001")
+    print("   📊 Dashboard: http://localhost:3000")
     print("   🔌 API Server: http://localhost:5001")
     print("   🤖 Trading Bot: Starting...")
     print("\n⚠️  Press Ctrl+C to stop all services")

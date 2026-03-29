@@ -1,77 +1,67 @@
 {
   "data_manager": {
     "symbols": [
-      "AAPL",
-      "GOOGL",
-      "MSFT",
-      "BTC-USD",
-      "ETH-USD"
+      "AAPL", "GOOGL", "MSFT", "TSLA", "NVDA", "AMZN", "META",
+      "SCOM.NR", "EABL.NR", "EQTY.NR", "KCB.NR",
+      "BTC-USD", "ETH-USD", "SOL-USD"
     ],
-    "update_interval": 30,
+    "update_interval": 60,
     "max_retries": 3,
-    "connectors": {
-      "yahoo_finance": {
-        "enabled": true,
-        "interval": "1d"
-      },
-      "coinbase": {
-        "enabled": true
-      },
-      "oanda": {
-        "enabled": true,
-        "api_key": "${OANDA_API_KEY}",
-        "account_id": "${OANDA_ACCOUNT_ID}"
-      }
-    },
     "redis": {
-      "host": "redis",
+      "host": "localhost",
       "port": 6379,
       "db": 0
+    },
+    "connectors": {
+      "fmp": {
+        "enabled": true,
+        "api_key": "${TRADING_FMP_API_KEY}"
+      },
+      "alpha_vantage": {
+        "enabled": true,
+        "api_key": "${TRADING_ALPHA_VANTAGE_API_KEY}"
+      }
     }
   },
   "strategies": {
     "momentum": {
-      "type": "supervised_learning",
+      "type": "technical",
       "enabled": true,
-      "lookback_period": 20,
-      "threshold": 0.001,
-      "weight": 1.5
+      "lookback_period": 50,
+      "threshold": 0.02,
+      "weight": 1.0,
+      "max_position_size": 0.05
     },
     "mean_reversion": {
-      "type": "supervised_learning",
+      "type": "technical",
       "enabled": true,
-      "lookback_period": 10,
-      "z_score_threshold": 2.0,
-      "weight": 1.2
+      "lookback_period": 20,
+      "weight": 1.0,
+      "max_position_size": 0.05
     },
-    "sentiment": {
-      "type": "nlp",
+    "rsi_strategy": {
+      "type": "technical",
       "enabled": true,
-      "sentiment_threshold": 0.3,
-      "weight": 0.6
-    },
-    "reinforcement": {
-      "type": "dqn",
-      "enabled": true,
-      "lookback_period": 30,
-      "learning_rate": 0.001,
-      "exploration_rate": 0.1,
-      "weight": 0.8
+      "rsi_period": 14,
+      "rsi_overbought": 70,
+      "rsi_oversold": 30,
+      "weight": 0.8,
+      "max_position_size": 0.05
     }
   },
   "risk_management": {
     "var_confidence": 0.95,
     "max_position_size": 0.05,
-    "max_portfolio_var": 0.015,
-    "max_drawdown": 0.1,
-    "max_daily_loss": 0.02,
-    "stop_loss_percent": 0.02,
-    "emergency_drawdown": 0.08
+    "max_portfolio_var": 0.02,
+    "max_drawdown": 0.10,
+    "max_daily_loss": 0.03
   },
   "risk_limits": {
     "max_portfolio_var": 0.02,
     "max_position_size": 0.05,
-    "max_drawdown": 0.1
+    "max_drawdown": 0.10,
+    "stop_loss_pct": 0.05,
+    "trailing_stop_pct": 0.03
   },
   "brokers": {
     "paper_broker": {
@@ -83,14 +73,9 @@
     "coinbase_broker": {
       "type": "coinbase",
       "api_key": "${COINBASE_API_KEY}",
-      "api_secret": "${COINBASE_API_SECRET}",
+      "secret": "${COINBASE_API_SECRET}",
       "passphrase": "${COINBASE_PASSPHRASE}",
-      "primary": false
-    },
-    "oanda_broker": {
-      "type": "oanda",
-      "api_key": "${OANDA_API_KEY}",
-      "account_id": "${OANDA_ACCOUNT_ID}"
+      "is_paper": true
     }
   },
   "trading": {
@@ -98,7 +83,7 @@
     "commission": 0.001,
     "slippage": 0.0005
   },
-  "trading_loop_interval": 15,
+  "trading_loop_interval": 60,
   "nlp": {
     "sentiment_model": "vader",
     "text_processing": {
@@ -121,14 +106,29 @@
     "metrics_interval": 15,
     "system_metrics_enabled": true
   },
-  "api": {
-    "host": "0.0.0.0",
-    "port": 8081,
-    "debug": false
-  },
   "security": {
     "use_encryption": true,
     "api_key_rotation_days": 90
+  },
+  "execution": {
+    "max_slippage": 0.005,
+    "max_order_size": 10000,
+    "min_order_size": 100,
+    "use_twap": true,
+    "twap_duration": 300,
+    "slice_size": 0.1
+  },
+  "analytics": {
+    "benchmark": "SPY",
+    "risk_free_rate": 0.02,
+    "max_history_days": 365,
+    "max_trades_history": 10000
+  },
+  "api": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 5001,
+    "debug": false
   },
   "logging": {
     "level": "INFO",
