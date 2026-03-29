@@ -9,6 +9,7 @@ import logging
 import socket
 import os
 import platform
+import base64
 from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -101,8 +102,11 @@ class MonitoringService:
             self.port = port
         
         try:
+            # Get bind address — default to 127.0.0.1 for security
+            bind_address = self.config.get('host', '127.0.0.1')
+            
             # Start HTTP server
-            self.server = HTTPServer(('0.0.0.0', self.port), self._create_request_handler())
+            self.server = HTTPServer((bind_address, self.port), self._create_request_handler())
             self.server_thread = threading.Thread(target=self._run_server, daemon=True)
             self.server_thread.start()
             
@@ -393,7 +397,12 @@ class MonitoringService:
                 logger.debug(format % args)
             
             def do_GET(self):
+                """Handle GET requests with authentication."""
                 try:
+                    # Authentication check
+                    if not self._authenticate():
+                        return
+
                     # Parse URL
                     parsed_url = urlparse(self.path)
                     path = parsed_url.path
@@ -787,6 +796,37 @@ class MonitoringService:
                 self.end_headers()
                 self.wfile.write(html.encode())
             
+            def _authenticate(self) -> bool:
+                """Perform basic authentication check."""
+                # Get the password from env - fallback to SECRET_KEY
+                expected_password = os.environ.get('MONITORING_PASSWORD', os.environ.get('SECRET_KEY'))
+                
+                # If no password is set at all, allow access (insecure but better than hardcoded default)
+                if not expected_password:
+                    logger.warning("No password set for monitoring. Access is unprotected.")
+                    return True
+
+                auth_header = self.headers.get('Authorization')
+                
+                if auth_header and auth_header.startswith('Basic '):
+                    try:
+                        encoded = auth_header.split(' ')[1]
+                        decoded = base64.b64decode(encoded).decode('utf-8')
+                        user, password = decoded.split(':', 1)
+                        # We only check the password
+                        if password == expected_password:
+                            return True
+                    except Exception as e:
+                        logger.error(f"Auth error: {e}")
+
+                # Send 401 Unauthorized if auth fails
+                self.send_response(401)
+                self.send_header('WWW-Authenticate', 'Basic realm="AI Trading Agent Monitoring"')
+                self.send_header('Content-Type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b"Unauthorized - Password Required")
+                return False
+
             def _send_json_response(self, data):
                 """Send JSON response."""
                 self.send_response(200)

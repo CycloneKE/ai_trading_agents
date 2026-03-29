@@ -584,17 +584,13 @@ class PaperTradingBroker(BaseBroker):
         # If real price feed fails, fallback to last known if available
         if symbol in self.market_prices:
             last_price = self.market_prices[symbol]
+            logger.warning(f"Using cached price for {symbol}: {last_price}")
             return last_price
         
-        # If no data source is configured, use dummy prices
-        if self.data_source is None:
-            # Generate random initial price between $10 and $1000
-            price = random.uniform(10.0, 1000.0)
-            self.market_prices[symbol] = price
-            return price
-        
-        # Try to get price from data source (not implemented in this example)
-        return 100.0  # Default price
+        # SAFETY: Do NOT generate random prices or use hardcoded defaults.
+        # Returning None prevents orders from executing at wrong prices.
+        logger.error(f"No price data available for {symbol} — order will be skipped")
+        return None
     
     def _save_state(self):
         """Save paper trading state to file."""

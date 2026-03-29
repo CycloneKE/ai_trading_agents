@@ -1,0 +1,24 @@
+{
+  "model_type": "xgboost",
+  "threshold": 0.01,
+  "features": [
+    "close",
+    "volume",
+    "rsi",
+    "macd",
+    "ema_12",
+    "ema_26",
+    "atr"
+  ],
+  "stop_loss_atr_multiplier": 2.0,
+  "trailing_stop_enabled": true,
+  "trend_following_enabled": true,
+  "symbols": [
+    "AAPL",
+    "MSFT"
+  ],
+  "initial_capital": 100000,
+  "max_positions": 2,
+  "check_interval": 60,
+  "bias_threshold": 0.15
+}

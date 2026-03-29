@@ -186,14 +186,7 @@ class TradingAgent:
                 self.config.get('portfolio_optimization', {})
             )
             
-            # Advanced Features
-            self.components['automl_optimizer'] = AutoMLOptimizer(
-                self.config.get('automl', {})
-            )
-            
-            self.components['portfolio_optimizer'] = PortfolioOptimizer(
-                self.config.get('portfolio_optimization', {})
-            )
+            # (AutoML and Portfolio optimizers already initialized above)
             
             # Register health checks with monitoring service
             if self.monitoring_service:
@@ -321,6 +314,11 @@ class TradingAgent:
         logger.info("Starting main trading loop...")
         loop_interval = self.config.get('trading_loop_interval', 60)  # seconds
         symbols = self.config.get('data_manager', {}).get('symbols', ['AAPL', 'GOOGL', 'MSFT', 'TSLA'])
+        self._last_optimization_date = None  # Track daily optimization
+        
+        # Stop-loss configuration
+        stop_loss_pct = self.config.get('risk_limits', {}).get('stop_loss_pct', 0.05)
+        trailing_stop_pct = self.config.get('risk_limits', {}).get('trailing_stop_pct', 0.03)
         
         while self.running:
             try:
@@ -329,6 +327,9 @@ class TradingAgent:
                 market_data = self.components['data_manager'].get_latest_data()
                 
                 if market_data:
+                    # --- Stop-loss enforcement ---
+                    self._enforce_stop_losses(stop_loss_pct, trailing_stop_pct)
+                    
                     # Process each symbol individually
                     all_signals = {}
                     
@@ -362,7 +363,7 @@ class TradingAgent:
                         else:
                             logger.warning("Risk limits exceeded, skipping trade execution")
                     
-                    # Update portfolio optimization
+                    # Update portfolio optimization (once daily, not every loop)
                     self._update_portfolio_optimization(market_data)
                 
                 # Calculate sleep time to maintain consistent loop interval
@@ -502,8 +503,11 @@ class TradingAgent:
                         
                         # Fetch price
                         from real_price_feed import price_feed
-                        price = signal_data.get('price') or price_feed.get_price(symbol) or 100.0
-                        quantity = target_pos_value / price if price > 0 else 0
+                        price = signal_data.get('price') or price_feed.get_price(symbol)
+                        if not price or price <= 0:
+                            logger.warning(f"No valid price for {symbol} — skipping order")
+                            continue
+                        quantity = target_pos_value / price
                         
                         if quantity <= 0:
                             logger.warning(f"Calculated zero quantity for {symbol}")
@@ -636,33 +640,98 @@ class TradingAgent:
         except Exception as e:
             logger.error(f"Enhanced trade execution error: {e}")
     
+    def _enforce_stop_losses(self, stop_loss_pct: float, trailing_stop_pct: float):
+        """
+        Enforce stop-loss and trailing stop rules on all open positions.
+        
+        Args:
+            stop_loss_pct: Maximum loss percentage before auto-close (e.g. 0.05 = 5%)
+            trailing_stop_pct: Trailing stop percentage (e.g. 0.03 = 3%)
+        """
+        try:
+            broker_manager = self.components.get('broker_manager')
+            if not broker_manager:
+                return
+            
+            primary_broker = broker_manager.get_broker()
+            if not primary_broker or not primary_broker.is_connected:
+                return
+            
+            positions = primary_broker.get_positions()
+            if not positions:
+                return
+            
+            for position in positions:
+                try:
+                    if position.quantity == 0 or position.cost_basis <= 0:
+                        continue
+                    
+                    unrealized_pl_pct = position.unrealized_pl / position.cost_basis
+                    
+                    # Hard stop-loss
+                    if unrealized_pl_pct <= -stop_loss_pct:
+                        logger.warning(
+                            f"STOP-LOSS triggered for {position.symbol}: "
+                            f"loss={unrealized_pl_pct:.2%} exceeds limit={-stop_loss_pct:.2%}"
+                        )
+                        from base_broker import OrderRequest
+                        close_order = OrderRequest(
+                            symbol=position.symbol,
+                            quantity=abs(position.quantity),
+                            side='sell' if position.quantity > 0 else 'buy',
+                            order_type='market',
+                            time_in_force='gtc'
+                        )
+                        result = primary_broker.place_order(close_order)
+                        if result:
+                            logger.info(f"Stop-loss order placed for {position.symbol}: {result.order_id}")
+                            if self.monitoring_service:
+                                self.monitoring_service.record_trade(
+                                    action='stop_loss_sell',
+                                    symbol=position.symbol,
+                                    strategy='stop_loss',
+                                    quantity=abs(position.quantity),
+                                    price=position.current_price or 0
+                                )
+                                
+                except Exception as e:
+                    logger.error(f"Error enforcing stop-loss for {position.symbol}: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Error in stop-loss enforcement: {str(e)}")
+
     def _update_portfolio_optimization(self, market_data):
         """
         Update portfolio optimization based on current market conditions.
+        Runs at most once per calendar day.
         
         Args:
             market_data: Current market data
         """
         try:
-            # Run portfolio optimization periodically
-            optimization_frequency = self.config.get('portfolio_optimization', {}).get('frequency', 'daily')
+            today = datetime.now().date()
             
-            if optimization_frequency == 'daily':
-                # Check if we should run optimization (e.g., once per day)
-                current_hour = datetime.now().hour
-                if current_hour == 9:  # Run at market open
-                    logger.info("Running daily portfolio optimization...")
-                    
-                    optimizer = self.components['portfolio_optimizer']
-                    optimization_result = optimizer.optimize_portfolio(
-                        market_data,
-                        optimization_method='mean_variance'
-                    )
-                    
-                    if optimization_result:
-                        logger.info("Portfolio optimization completed successfully")
-                        # Store results for later use
-                        self._store_optimization_results(optimization_result)
+            # Only run once per day
+            if hasattr(self, '_last_optimization_date') and self._last_optimization_date == today:
+                return
+            
+            # Only run during market hours (9 AM)
+            current_hour = datetime.now().hour
+            if current_hour != 9:
+                return
+            
+            logger.info("Running daily portfolio optimization...")
+            self._last_optimization_date = today
+            
+            optimizer = self.components['portfolio_optimizer']
+            optimization_result = optimizer.optimize_portfolio(
+                market_data,
+                optimization_method='mean_variance'
+            )
+            
+            if optimization_result:
+                logger.info("Portfolio optimization completed successfully")
+                self._store_optimization_results(optimization_result)
             
         except Exception as e:
             logger.error(f"Error updating portfolio optimization: {str(e)}")

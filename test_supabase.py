@@ -37,18 +37,18 @@ def test_supabase():
         print(f"Query executed successfully! Found {len(res)} records.")
 
         # Test trade insertion
-        print("Testing trade insertion...")
+        print("Testing real-time trade insertion...")
         trade_payload = {
-            'symbol': 'BTC-USD',
+            'symbol': 'SUPA_LIVE',
             'action': 'buy',
-            'quantity': 0.5,
-            'price': 65000.0,
-            'strategy': 'TEST_REALTIME_SUPABASE',
-            'confidence': 0.95,
-            'metadata': {'test': True}
+            'quantity': 100.0,
+            'price': 250.0,
+            'strategy': 'SUPABASE_REALTIME_VERIFICATION',
+            'confidence': 1.0,
+            'metadata': {'test_id': 'final_verification'}
         }
         db.store_trade(trade_payload)
-        print("Trade insertion completed without error.")
+        print("Final verification trade inserted successfully!")
         
     except Exception as e:
         print(f"Exception caught during test: {e}")

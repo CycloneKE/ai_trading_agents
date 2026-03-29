@@ -11,7 +11,9 @@ import os
 from datetime import datetime, timedelta
 
 # Configuration
-SECRET_KEY = os.environ.get('SECRET_KEY', 'your-default-secret-key')
+SECRET_KEY = os.environ.get('SECRET_KEY')
+if not SECRET_KEY:
+    raise RuntimeError("CRITICAL: SECRET_KEY environment variable is not set. Cannot start without JWT secret.")
 USERS_FILE = 'users.json'
 
 def hash_password(password: str) -> str:
