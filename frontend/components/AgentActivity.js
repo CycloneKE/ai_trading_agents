@@ -1,29 +1,33 @@
 import React from 'react';
 
-const AgentActivity = ({ theme, activities }) => {
+const AgentActivity = ({ theme = 'dark', activities = [] }) => {
 
   const colors = {
-    dark: { bg: '#1a1a2e', text: '#e2e8f0', border: '#334155', buy: '#10b981', sell: '#ef4444', hold: '#f59e0b' },
-    light: { bg: '#f8fafc', text: '#1e293b', border: '#e2e8f0', buy: '#059669', sell: '#dc2626', hold: '#d97706' }
+    dark: { bg: 'rgba(30, 41, 59, 0.5)', text: '#f8fafc', border: 'rgba(255,255,255,0.1)', buy: '#10b981', sell: '#ef4444', hold: '#f59e0b' },
+    light: { bg: '#ffffff', text: '#1e293b', border: '#e2e8f0', buy: '#059669', sell: '#dc2626', hold: '#d97706' }
   };
-  const currentTheme = colors[theme];
+  
+  // Handle case where theme might be an object or a string
+  const themeKey = typeof theme === 'string' ? theme : 'dark';
+  const currentTheme = colors[themeKey] || colors.dark;
 
   const getTypeStyle = (type) => {
     const baseStyle = {
-      padding: '2px 8px',
-      borderRadius: '4px',
-      fontWeight: '600',
-      fontSize: '12px',
+      padding: '4px 10px',
+      borderRadius: '6px',
+      fontWeight: '800',
+      fontSize: '11px',
+      letterSpacing: '0.5px'
     };
-    if (type === 'BUY') return { ...baseStyle, backgroundColor: currentTheme.buy, color: 'white' };
-    if (type === 'SELL') return { ...baseStyle, backgroundColor: currentTheme.sell, color: 'white' };
-    if (type === 'HOLD') return { ...baseStyle, backgroundColor: currentTheme.hold, color: 'white' };
-    return {};
+    if (type === 'BUY') return { ...baseStyle, backgroundColor: `${currentTheme.buy}20`, color: currentTheme.buy, border: `1px solid ${currentTheme.buy}40` };
+    if (type === 'SELL') return { ...baseStyle, backgroundColor: `${currentTheme.sell}20`, color: currentTheme.sell, border: `1px solid ${currentTheme.sell}40` };
+    if (type === 'HOLD') return { ...baseStyle, backgroundColor: `${currentTheme.hold}20`, color: currentTheme.hold, border: `1px solid ${currentTheme.hold}40` };
+    return baseStyle;
   };
 
   return (
-    <div style={{ backgroundColor: currentTheme.bg, padding: '24px', borderRadius: '8px' }}>
-      <h3 style={{ color: currentTheme.text, marginBottom: '16px', fontSize: '18px', fontWeight: '600' }}>Agent Activity</h3>
+    <div style={{ backgroundColor: currentTheme.bg, padding: '24px', borderRadius: '12px', border: `1px solid ${currentTheme.border}`, backdropFilter: 'blur(10px)' }}>
+      <h3 style={{ color: '#fff', marginBottom: '20px', fontSize: '16px', fontWeight: '800', textTransform: 'uppercase', letterSpacing: '1px' }}>Agent Activity</h3>
       <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
         {activities.map(activity => (
           <div key={activity.id} style={{ 

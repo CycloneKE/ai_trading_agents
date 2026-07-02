@@ -12,10 +12,9 @@ services:
       - REDIS_HOST=redis
     ports:
       - "8080:8080" # monitoring
-      - "8081:8081" # api (configured via config.json)
-    command: ["python3", "main.py"]
+      - "5001:5001" # api (config.json api.port)
+    command: ["python3", "-m", "src.agent.main"]
     depends_on:
-      - postgres
       - redis
     networks:
       - ai_trading_net
@@ -36,29 +35,10 @@ services:
       - ai_trading_net
     restart: unless-stopped
 
-  postgres:
-    image: postgres:15-alpine
-    container_name: trading-postgres
-    environment:
-      POSTGRES_DB: ${DB_NAME:-trading_agent}
-      POSTGRES_USER: ${DB_USER:-trading_user}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-    # Ports NOT exposed to host — only accessible within Docker network
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - ai_trading_net
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-trading_user}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   redis:
     image: redis:7-alpine
     container_name: trading-redis
-    command: redis-server --requirepass ${REDIS_PASSWORD}
-    # Ports NOT exposed to host — only accessible within Docker network
+    command: redis-server --requirepass ${REDIS_PASSWORD:-@Sylvester214}
     volumes:
       - redis_data:/data
     networks:
@@ -70,7 +50,6 @@ services:
       retries: 5
 
 volumes:
-  postgres_data: {}
   redis_data: {}
 
 networks:

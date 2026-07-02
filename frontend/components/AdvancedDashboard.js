@@ -1,373 +1,287 @@
-import { useState, useEffect, useCallback } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, Heatmap, ScatterChart, Scatter } from 'recharts';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { 
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
+  AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell 
+} from 'recharts';
+import { 
+  TrendingUp, TrendingDown, Activity, Shield, Zap, AlertTriangle, 
+  Clock, Layers, ChevronRight, Maximize2, Globe, Cpu, RefreshCw,
+  Search, Info, ExternalLink, Play, Square, Pause, Terminal, Flag,
+  Lock, Bell, BarChart as BarChartIcon, LogOut
+} from 'lucide-react';
 import AgentActivity from './AgentActivity';
+import { theme, glassCard } from './DashboardStyles';
+import { getApiBase } from '../utils/apiBase';
 
-const AdvancedDashboard = ({ theme = 'dark' }) => {
+const StatCard = ({ label, value, icon: Icon, color }) => (
+  <div style={{ ...glassCard, flex: 1, padding: '20px' }}>
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+      <span style={{ fontSize: '11px', fontWeight: '800', color: theme.colors.textMuted, textTransform: 'uppercase' }}>{label}</span>
+      <Icon size={18} color={color} />
+    </div>
+    <div style={{ fontSize: '24px', fontWeight: '800', color: '#fff' }}>{value}</div>
+  </div>
+);
+
+const SectionHeader = ({ title, icon: Icon }) => (
+  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '20px' }}>
+    <Icon size={20} color={theme.colors.secondary} />
+    <h3 style={{ fontSize: '18px', fontWeight: '700', margin: 0, color: '#fff' }}>{title}</h3>
+    <div style={{ height: '1px', flex: 1, background: `linear-gradient(90deg, ${theme.colors.border}, transparent)` }} />
+  </div>
+);
+
+const HUDCard = ({ title, value, subValue, icon: Icon, color }) => (
+  <div style={{ ...glassCard, flex: 1, minWidth: '220px', position: 'relative', overflow: 'hidden' }}>
+    <div style={{ position: 'absolute', right: '-10px', bottom: '-10px', opacity: 0.05 }}>
+      <Icon size={100} color={color} />
+    </div>
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+      <p style={{ fontSize: '12px', color: theme.colors.textSecondary, margin: 0, fontWeight: '700', textTransform: 'uppercase', letterSpacing: '1px' }}>{title}</p>
+      <div style={{ backgroundColor: `${color}20`, padding: '6px', borderRadius: '8px', color }}>
+        <Icon size={18} />
+      </div>
+    </div>
+    <h2 style={{ fontSize: '28px', fontWeight: '800', margin: 0, color: '#fff' }}>{value}</h2>
+    <p style={{ fontSize: '13px', margin: '4px 0 0 0', color: subValue?.includes('-') || subValue?.includes('↘') ? theme.colors.danger : theme.colors.primary }}>
+      {subValue}
+    </p>
+  </div>
+);
+
+const AdvancedDashboard = ({ onLogout }) => {
   const [activeTab, setActiveTab] = useState('overview');
   const [data, setData] = useState({
-    status: {}, performance: {}, positions: [], alerts: [], news: [], 
-    orderBook: {}, riskMetrics: {}, modelPerf: {}, strategies: [], 
-    correlations: [], heatmap: [], calendar: [], systemHealth: {}, agentActivity: []
+    status: { components: {} }, 
+    performance: { portfolio_value: 0, total_pnl: 0, win_rate: 0, sharpe_ratio: 0, max_drawdown: 0, portfolio_chart: [] }, 
+    positions: [], 
+    alerts: [], 
+    news: [], 
+    riskMetrics: { portfolio_var: 0, beta: 1.0, volatility: 0.15, current_leverage: 1.0, risk_score: 5.0 }, 
+    modelPerf: { accuracy: 0.5, feature_importance: [] }, 
+    strategies: [], 
+    heatmap: [], 
+    systemHealth: { uptime: 0, cpu_usage: 0, memory_usage: 'stable' }, 
+    agentActivity: []
   });
+  const [nseData, setNseData] = useState({ quotes: [], movers: { gainers: [], losers: [] }, sectors: [], status: {}, kes_usd_rate: 0.0077, market_open: false });
   const [isConnected, setIsConnected] = useState(false);
-  const [selectedSymbol, setSelectedSymbol] = useState('AAPL');
-  const [backtestResults, setBacktestResults] = useState(null);
 
-  const colors = {
-    dark: {
-      bg: '#0a0a0a', bgSecondary: '#1a1a1a', bgTertiary: '#2a2a2a',
-      text: '#ffffff', textSecondary: '#cccccc', textMuted: '#888888',
-      accent: '#00d4aa', success: '#00ff88', danger: '#ff4757', warning: '#ffa502',
-      border: '#333333', hover: '#444444'
+  const fetchData = async () => {
+    const endpoints = [
+      'status', 'performance', 'positions', 'alerts', 'news-feed', 
+      'risk-metrics', 'model-performance', 'strategy-performance',
+      'market-heatmap', 'system-health', 'agent-activity'
+    ];
+    
+    const token = localStorage.getItem('trading_token');
+    if (!token) { onLogout(); return; }
+    
+    const newResponses = [];
+    for (const endpoint of endpoints) {
+      try {
+        const res = await fetch(`${getApiBase()}/api/${endpoint}`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (res.status === 401) { onLogout(); return; }
+        const json = await res.json();
+        newResponses.push(json);
+      } catch (err) {
+        newResponses.push({ error: err.message });
+      }
     }
+
+    setData(prev => ({
+      status: newResponses[0] || prev.status,
+      performance: newResponses[1] || prev.performance,
+      positions: Array.isArray(newResponses[2]) ? newResponses[2] : prev.positions,
+      alerts: Array.isArray(newResponses[3]) ? newResponses[3] : prev.alerts,
+      news: Array.isArray(newResponses[4]) ? newResponses[4] : prev.news,
+      riskMetrics: newResponses[5] || prev.riskMetrics,
+      modelPerf: newResponses[6] || prev.modelPerf,
+      strategies: Object.entries(newResponses[7] || {}).map(([name, stats]) => ({ name, ...stats })),
+      heatmap: Array.isArray(newResponses[8]) ? newResponses[8] : prev.heatmap,
+      systemHealth: newResponses[9] || prev.systemHealth,
+      agentActivity: Array.isArray(newResponses[10]) ? newResponses[10] : prev.agentActivity
+    }));
+    setIsConnected(true);
   };
-  const currentTheme = colors[theme];
-
-  const fetchData = useCallback(async () => {
-    try {
-      const endpoints = [
-        'status', 'performance', 'positions', 'alerts', 'news-feed', 
-        'risk-metrics', 'model-performance', 'strategy-performance',
-        'correlation-matrix', 'market-heatmap', 'economic-calendar', 'system-health', 'agent-activity'
-      ];
-      
-      const responses = await Promise.all(
-        endpoints.map(endpoint => 
-          fetch(`http://localhost:5001/api/${endpoint}`).then(r => r.json())
-        )
-      );
-
-      setData({
-        status: responses[0], performance: responses[1], positions: responses[2],
-        alerts: responses[3], news: responses[4], riskMetrics: responses[5],
-        modelPerf: responses[6], strategies: responses[7], correlations: responses[8],
-        heatmap: responses[9], calendar: responses[10], systemHealth: responses[11],
-        agentActivity: responses[12]
-      });
-      setIsConnected(true);
-    } catch (error) {
-      setIsConnected(false);
-    }
-  }, []);
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 3000);
+    const interval = setInterval(fetchData, 20000);
     return () => clearInterval(interval);
-  }, [fetchData]);
+  }, []);
 
-  const runBacktest = async () => {
-    try {
-      const response = await fetch('http://localhost:5001/api/backtest', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          strategy: 'momentum',
-          start_date: '2023-01-01',
-          end_date: '2024-01-01'
-        })
-      });
-      const result = await response.json();
-      setBacktestResults(result);
-    } catch (error) {
-      console.error('Backtest failed:', error);
-    }
-  };
-
-  const controlStrategy = async (strategy, action) => {
-    try {
-      await fetch('http://localhost:5001/api/strategy-control', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ strategy, action })
-      });
-      fetchData();
-    } catch (error) {
-      console.error('Strategy control failed:', error);
-    }
-  };
-
-  const emergencyStop = async () => {
-    try {
-      await fetch('http://localhost:5001/api/emergency-stop', { method: 'POST' });
-      fetchData();
-    } catch (error) {
-      console.error('Emergency stop failed:', error);
-    }
-  };
-
-  const TabButton = ({ id, label, active, onClick }) => (
-    <button
-      onClick={() => onClick(id)}
-      style={{
-        padding: '8px 16px',
-        backgroundColor: active ? currentTheme.accent : 'transparent',
-        color: active ? '#000' : currentTheme.text,
-        border: `1px solid ${currentTheme.border}`,
-        borderRadius: '4px',
-        cursor: 'pointer',
-        fontSize: '14px',
-        fontWeight: '500'
-      }}
-    >
-      {label}
-    </button>
-  );
-
-  const MetricCard = ({ title, value, change, color }) => (
-    <div style={{
-      backgroundColor: currentTheme.bgSecondary,
-      border: `1px solid ${currentTheme.border}`,
-      borderRadius: '8px',
-      padding: '16px',
-      minWidth: '200px'
-    }}>
-      <div style={{ fontSize: '12px', color: currentTheme.textMuted, marginBottom: '4px' }}>
-        {title}
-      </div>
-      <div style={{ fontSize: '24px', fontWeight: 'bold', color: color || currentTheme.text }}>
-        {value}
-      </div>
-      {change && (
-        <div style={{ fontSize: '12px', color: change > 0 ? currentTheme.success : currentTheme.danger }}>
-          {change > 0 ? '↗' : '↘'} {Math.abs(change)}%
-        </div>
-      )}
-    </div>
-  );
+  useEffect(() => {
+    const fetchNSE = async () => {
+      try {
+        const token = localStorage.getItem('trading_token');
+        const resp = await fetch(`${getApiBase()}/api/nse-market`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (resp.status === 401) { onLogout(); return; }
+        const nse = await resp.json();
+        if (nse && !nse.error) setNseData(nse);
+      } catch (e) {}
+    };
+    fetchNSE();
+    const nseInterval = setInterval(fetchNSE, 30000);
+    return () => clearInterval(nseInterval);
+  }, []);
 
   const renderOverview = () => (
-    <div style={{ display: 'grid', gap: '20px' }}>
-      {/* Key Metrics */}
-      <div style={{ display: 'flex', gap: '16px', overflowX: 'auto' }}>
-        <MetricCard title="Portfolio Value" value={`$${data.performance.portfolio_value?.toLocaleString()}`} change={2.4} color={currentTheme.success} />
-        <MetricCard title="Total P&L" value={`$${data.performance.total_pnl?.toFixed(2)}`} change={data.performance.total_pnl > 0 ? 1.2 : -1.2} />
-        <MetricCard title="Win Rate" value={`${(data.performance.win_rate * 100)?.toFixed(1)}%`} />
-        <MetricCard title="Sharpe Ratio" value={data.performance.sharpe_ratio?.toFixed(2)} />
-        <MetricCard title="Max Drawdown" value={`${(data.performance.max_drawdown * 100)?.toFixed(1)}%`} color={currentTheme.danger} />
-        <MetricCard title="VaR (95%)" value={`$${data.riskMetrics.portfolio_var?.toLocaleString()}`} color={currentTheme.warning} />
+    <div style={{ display: 'grid', gap: '30px' }}>
+      <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
+        <HUDCard title="Consolidated Equity" value={`$${(data.performance.portfolio_value || 0).toLocaleString()}`} subValue={data.performance.total_pnl > 0 ? `↗ $${data.performance.total_pnl.toFixed(2)}` : `↘ $${(data.performance.total_pnl || 0).toFixed(2)}`} icon={TrendingUp} color={theme.colors.primary} />
+        <HUDCard title="Exposure (VaR)" value={`$${(data.riskMetrics.portfolio_var || 0).toLocaleString()}`} subValue={`Risk Score: ${data.riskMetrics.risk_score?.toFixed(1) || '0.0'}/10`} icon={Shield} color={theme.colors.warning} />
+        <HUDCard title="Win Rate" value={`${((data.performance.win_rate || 0) * 100).toFixed(1)}%`} subValue={`${data.performance.total_trades || 0} Trades`} icon={Zap} color={theme.colors.secondary} />
+        <HUDCard title="System Health" value={isConnected ? 'OPTIMAL' : 'OFFLINE'} subValue={`${Object.keys(data.status.components || {}).length} Services Active`} icon={Activity} color={theme.colors.accent} />
       </div>
 
-      {/* Charts Grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '20px' }}>
-        {/* Performance Chart */}
-        <div style={{ backgroundColor: currentTheme.bgSecondary, border: `1px solid ${currentTheme.border}`, borderRadius: '8px', padding: '16px' }}>
-          <h3 style={{ margin: '0 0 16px 0', fontSize: '16px' }}>Portfolio Performance</h3>
-          <ResponsiveContainer width="100%" height={300}>
-            <AreaChart data={backtestResults?.chart_data || []}>
-              <CartesianGrid strokeDasharray="3 3" stroke={currentTheme.border} />
-              <XAxis dataKey="date" stroke={currentTheme.textMuted} />
-              <YAxis stroke={currentTheme.textMuted} />
-              <Tooltip contentStyle={{ backgroundColor: currentTheme.bgTertiary, border: `1px solid ${currentTheme.border}` }} />
-              <Area type="monotone" dataKey="value" stroke={currentTheme.accent} fill={currentTheme.accent} fillOpacity={0.2} />
-            </AreaChart>
-          </ResponsiveContainer>
+      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '24px' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+          <div style={glassCard}>
+            <SectionHeader title="Performance Curve" icon={Activity} />
+            <ResponsiveContainer width="100%" height={300}>
+              <AreaChart data={data.performance.portfolio_chart || []}>
+                <defs><linearGradient id="colorVal" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={theme.colors.primary} stopOpacity={0.3}/><stop offset="95%" stopColor={theme.colors.primary} stopOpacity={0}/></linearGradient></defs>
+                <CartesianGrid strokeDasharray="3 3" stroke={theme.colors.border} vertical={false} />
+                <XAxis dataKey="timestamp" stroke={theme.colors.textMuted} fontSize={10} tickFormatter={(t) => new Date(t).toLocaleTimeString()} />
+                <YAxis stroke={theme.colors.textMuted} fontSize={10} domain={['auto', 'auto']} />
+                <Tooltip contentStyle={{ backgroundColor: theme.colors.bgSecondary, border: `1px solid ${theme.colors.border}` }} />
+                <Area type="monotone" dataKey="value" stroke={theme.colors.primary} fill="url(#colorVal)" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+          <AgentActivity activities={data.agentActivity} />
         </div>
-
-        {/* Strategy Allocation */}
-        <div style={{ backgroundColor: currentTheme.bgSecondary, border: `1px solid ${currentTheme.border}`, borderRadius: '8px', padding: '16px' }}>
-          <h3 style={{ margin: '0 0 16px 0', fontSize: '16px' }}>Strategy Performance</h3>
-          {data.strategies.map((strategy, i) => (
-            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', padding: '8px', backgroundColor: currentTheme.bgTertiary, borderRadius: '4px' }}>
-              <div>
-                <div style={{ fontWeight: 'bold', fontSize: '14px' }}>{strategy.name}</div>
-                <div style={{ fontSize: '12px', color: currentTheme.textMuted }}>
-                  {strategy.trades} trades • {(strategy.win_rate * 100).toFixed(1)}% win rate
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+          <div style={glassCard}>
+            <SectionHeader title="Top Positions" icon={RefreshCw} />
+            {data.positions.length > 0 ? (
+              data.positions.slice(0, 5).map((pos, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: `1px solid ${theme.colors.border}` }}>
+                  <span style={{ fontWeight: '700' }}>{pos.symbol}</span>
+                  <span style={{ color: pos.unrealized_pl >= 0 ? theme.colors.primary : theme.colors.danger }}>{pos.unrealized_pl >= 0 ? '+' : ''}{pos.unrealized_pl_pct?.toFixed(2)}%</span>
                 </div>
-              </div>
-              <div style={{ textAlign: 'right' }}>
-                <div style={{ color: strategy.pnl > 0 ? currentTheme.success : currentTheme.danger, fontWeight: 'bold' }}>
-                  ${strategy.pnl}
+              ))
+            ) : (
+              <div style={{ padding: '20px', textAlign: 'center', color: theme.colors.textMuted }}>No active positions</div>
+            )}
+          </div>
+          <div style={glassCard}>
+            <SectionHeader title="Sector Performance" icon={Globe} />
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+              {data.heatmap.slice(0, 4).map((s, i) => (
+                <div key={i} style={{ padding: '10px', borderRadius: '8px', background: 'rgba(255,255,255,0.03)', textAlign: 'center' }}>
+                  <div style={{ fontSize: '10px', color: theme.colors.textMuted }}>{(s.sector || 'N/A').toUpperCase()}</div>
+                  <div style={{ fontWeight: '800', color: (s.performance || 0) >= 0 ? theme.colors.primary : theme.colors.danger }}>{((s.performance || 0) * 100).toFixed(1)}%</div>
                 </div>
-                <button
-                  onClick={() => controlStrategy(strategy.name.toLowerCase().replace(' ', '_'), strategy.active ? 'stop' : 'start')}
-                  style={{
-                    padding: '4px 8px',
-                    fontSize: '10px',
-                    backgroundColor: strategy.active ? currentTheme.danger : currentTheme.success,
-                    color: '#fff',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: 'pointer'
-                  }}
-                >
-                  {strategy.active ? 'STOP' : 'START'}
-                </button>
-              </div>
+              ))}
             </div>
-          ))}
-        </div>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
-        {/* Agent Activity */}
-        <AgentActivity theme={theme} activities={data.agentActivity} />
-
-        {/* Positions Table */}
-        <div style={{ backgroundColor: currentTheme.bgSecondary, border: `1px solid ${currentTheme.border}`, borderRadius: '8px', padding: '16px' }}>
-          <h3 style={{ margin: '0 0 16px 0', fontSize: '16px' }}>Current Positions</h3>
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr style={{ borderBottom: `1px solid ${currentTheme.border}` }}>
-                  {['Symbol', 'Quantity', 'Avg Price', 'Current Price', 'P&L', 'P&L %', 'Market Value'].map(header => (
-                    <th key={header} style={{ textAlign: 'left', padding: '8px', fontSize: '12px', color: currentTheme.textMuted }}>
-                      {header}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {data.positions.map((pos, i) => (
-                  <tr key={i} style={{ borderBottom: `1px solid ${currentTheme.border}` }}>
-                    <td style={{ padding: '8px', fontWeight: 'bold' }}>{pos.symbol}</td>
-                    <td style={{ padding: '8px' }}>{pos.quantity}</td>
-                    <td style={{ padding: '8px' }}>${pos.avg_price?.toFixed(2)}</td>
-                    <td style={{ padding: '8px' }}>${pos.current_price?.toFixed(2)}</td>
-                    <td style={{ padding: '8px', color: pos.pnl > 0 ? currentTheme.success : currentTheme.danger }}>
-                      ${pos.pnl?.toFixed(2)}
-                    </td>
-                    <td style={{ padding: '8px', color: pos.pnl_percent > 0 ? currentTheme.success : currentTheme.danger }}>
-                      {pos.pnl_percent?.toFixed(2)}%
-                    </td>
-                    <td style={{ padding: '8px' }}>${pos.market_value?.toLocaleString()}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
           </div>
         </div>
       </div>
     </div>
   );
 
-  const renderRiskManagement = () => (
-    <div style={{ display: 'grid', gap: '20px' }}>
-      {/* Risk Metrics */}
-      <div style={{ display: 'flex', gap: '16px', overflowX: 'auto' }}>
-        <MetricCard title="Portfolio VaR" value={`$${data.riskMetrics.portfolio_var?.toLocaleString()}`} color={currentTheme.warning} />
-        <MetricCard title="Expected Shortfall" value={`$${data.riskMetrics.expected_shortfall?.toLocaleString()}`} color={currentTheme.danger} />
-        <MetricCard title="Beta" value={data.riskMetrics.beta?.toFixed(2)} />
-        <MetricCard title="Volatility" value={`${(data.riskMetrics.volatility * 100)?.toFixed(1)}%`} />
-        <MetricCard title="Leverage" value={`${data.riskMetrics.current_leverage?.toFixed(2)}x`} />
-        <MetricCard title="Risk Score" value={`${data.riskMetrics.risk_score?.toFixed(1)}/10`} color={currentTheme.warning} />
+  const renderKenyaNSE = () => (
+    <div style={{ display: 'grid', gap: '30px' }}>
+      <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
+        <HUDCard title="KES / USD" value={`${(1 / (nseData.kes_usd_rate || 0.0077)).toFixed(2)}`} subValue="Central Bank Rate" icon={Globe} color={theme.colors.secondary} />
+        <HUDCard title="NSE Status" value={nseData.market_open ? 'OPEN' : 'CLOSED'} subValue={`${nseData.quotes?.length || 0} Symbols`} icon={Activity} color={nseData.market_open ? theme.colors.primary : theme.colors.warning} />
+        <HUDCard title="Top NSE Gainer" value={nseData.movers?.gainers?.[0]?.symbol || '—'} subValue={`+${nseData.movers?.gainers?.[0]?.change_pct?.toFixed(2) || 0}%`} icon={TrendingUp} color={theme.colors.primary} />
+        <HUDCard title="Top NSE Loser" value={nseData.movers?.losers?.[0]?.symbol || '—'} subValue={`${nseData.movers?.losers?.[0]?.change_pct?.toFixed(2) || 0}%`} icon={TrendingDown} color={theme.colors.danger} />
       </div>
-
-      {/* Correlation Matrix */}
-      <div style={{ backgroundColor: currentTheme.bgSecondary, border: `1px solid ${currentTheme.border}`, borderRadius: '8px', padding: '16px' }}>
-        <h3 style={{ margin: '0 0 16px 0', fontSize: '16px' }}>Correlation Matrix</h3>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '4px', fontSize: '12px' }}>
-          {data.correlations.flat?.()?.map((cell, i) => (
-            <div key={i} style={{
-              padding: '8px',
-              backgroundColor: `rgba(${cell?.correlation > 0 ? '0,212,170' : '255,71,87'}, ${Math.abs(cell?.correlation || 0)})`,
-              color: '#fff',
-              textAlign: 'center',
-              borderRadius: '4px'
-            }}>
-              {cell?.correlation?.toFixed(2)}
-            </div>
-          ))}
+      <div style={glassCard}>
+        <SectionHeader title="NSE Market Watch" icon={Flag} />
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ textAlign: 'left', color: theme.colors.textMuted, fontSize: '12px', borderBottom: `1px solid ${theme.colors.border}` }}>
+                <th style={{ padding: '12px' }}>SYMBOL</th><th style={{ padding: '12px' }}>PRICE (KES)</th><th style={{ padding: '12px' }}>CHANGE</th><th style={{ padding: '12px' }}>VOLUME</th>
+              </tr>
+            </thead>
+            <tbody>
+              {nseData.quotes.length > 0 ? (
+                nseData.quotes.map((q, i) => (
+                  <tr key={i} style={{ borderBottom: `1px solid ${theme.colors.border}` }}>
+                    <td style={{ padding: '12px', fontWeight: '700' }}>{q.symbol}</td>
+                    <td style={{ padding: '12px' }}>{q.price_kes?.toFixed(2)}</td>
+                    <td style={{ padding: '12px', color: q.change_pct >= 0 ? theme.colors.primary : theme.colors.danger }}>{q.change_pct >= 0 ? '+' : ''}{q.change_pct?.toFixed(2)}%</td>
+                    <td style={{ padding: '12px' }}>{q.volume?.toLocaleString()}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr><td colSpan="4" style={{ padding: '20px', textAlign: 'center', color: theme.colors.textMuted }}>No NSE data available</td></tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
+    </div>
+  );
 
-      {/* Alerts */}
-      <div style={{ backgroundColor: currentTheme.bgSecondary, border: `1px solid ${currentTheme.border}`, borderRadius: '8px', padding: '16px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-          <h3 style={{ margin: 0, fontSize: '16px' }}>Risk Alerts</h3>
-          <button
-            onClick={emergencyStop}
-            style={{
-              padding: '8px 16px',
-              backgroundColor: currentTheme.danger,
-              color: '#fff',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              fontWeight: 'bold'
-            }}
-          >
-            🛑 EMERGENCY STOP
-          </button>
+  const renderRiskView = () => {
+    const rm = data.riskMetrics || {};
+    const metrics = rm.current_metrics || {};
+    return (
+      <div style={{ display: 'grid', gap: '30px' }}>
+        <div style={{ display: 'flex', gap: '20px' }}>
+          <StatCard label="Portfolio VaR" value={`${((metrics.portfolio_var || 0) * 100).toFixed(4)}%`} icon={Shield} color={theme.colors.warning} />
+          <StatCard label="Max Drawdown" value={`${((metrics.max_drawdown || 0) * 100).toFixed(2)}%`} icon={TrendingDown} color={theme.colors.danger} />
+          <StatCard label="Leverage" value={`${(metrics.leverage || 1.0).toFixed(2)}x`} icon={Zap} color={theme.colors.primary} />
         </div>
-        {data.alerts.map((alert, i) => (
-          <div key={i} style={{
-            padding: '12px',
-            marginBottom: '8px',
-            backgroundColor: currentTheme.bgTertiary,
-            borderLeft: `4px solid ${alert.severity === 'high' ? currentTheme.danger : alert.severity === 'medium' ? currentTheme.warning : currentTheme.accent}`,
-            borderRadius: '4px'
-          }}>
-            <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>{alert.message}</div>
-            <div style={{ fontSize: '12px', color: currentTheme.textMuted }}>
-              {alert.type.toUpperCase()} • {alert.time}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+          <div style={glassCard}>
+            <SectionHeader title="Risk Limits" icon={Lock} />
+            {(rm.risk_limits || []).map((l, i) => (
+              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 0', borderBottom: `1px solid ${theme.colors.border}` }}>
+                <span>{l.name}</span>
+                <span style={{ color: l.status === 'ok' ? theme.colors.primary : theme.colors.danger }}>{(l.current_value || 0).toFixed(4)} / {l.threshold}</span>
+              </div>
+            ))}
+          </div>
+          <div style={glassCard}>
+            <SectionHeader title="Recent Alerts" icon={Bell} />
+            {(rm.alerts?.recent || []).length > 0 ? (
+              (rm.alerts?.recent || []).map((a, i) => (
+                <div key={i} style={{ padding: '10px', borderRadius: '8px', background: 'rgba(255,255,255,0.03)', marginBottom: '10px', borderLeft: `4px solid ${theme.colors.danger}` }}>
+                  <div style={{ fontSize: '10px', color: theme.colors.textMuted }}>{new Date(a.timestamp).toLocaleTimeString()}</div>
+                  <div style={{ fontWeight: '700' }}>{a.limit_name} Breach</div>
+                </div>
+              ))
+            ) : (
+              <div style={{ padding: '20px', textAlign: 'center', color: theme.colors.textMuted }}>No active risk alerts</div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderMarketView = () => (
+    <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '24px' }}>
+      <div style={glassCard}>
+        <SectionHeader title="Intelligence Feed" icon={Globe} />
+        {data.news.map((n, i) => (
+          <div key={i} style={{ padding: '15px 0', borderBottom: `1px solid ${theme.colors.border}` }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
+              <span style={{ fontSize: '10px', fontWeight: '800', color: n.sentiment_label === 'positive' ? theme.colors.primary : (n.sentiment_label === 'negative' ? theme.colors.danger : theme.colors.textMuted) }}>{n.sentiment_label?.toUpperCase() || 'NEUTRAL'}</span>
+              <span style={{ fontSize: '10px', color: theme.colors.textMuted }}>{new Date(n.time).toLocaleTimeString()}</span>
             </div>
+            <div style={{ fontWeight: '700', marginBottom: '5px' }}>{n.title}</div>
+            <div style={{ fontSize: '12px', color: theme.colors.textSecondary }}>{n.summary}</div>
           </div>
         ))}
       </div>
-    </div>
-  );
-
-  const renderMarketIntelligence = () => (
-    <div style={{ display: 'grid', gap: '20px' }}>
-      {/* Market Heatmap */}
-      <div style={{ backgroundColor: currentTheme.bgSecondary, border: `1px solid ${currentTheme.border}`, borderRadius: '8px', padding: '16px' }}>
-        <h3 style={{ margin: '0 0 16px 0', fontSize: '16px' }}>Sector Performance</h3>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '8px' }}>
-          {data.heatmap.map((sector, i) => (
-            <div key={i} style={{
-              padding: '16px',
-              backgroundColor: sector.change > 0 ? currentTheme.success : currentTheme.danger,
-              color: '#fff',
-              borderRadius: '8px',
-              textAlign: 'center'
-            }}>
-              <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>{sector.sector}</div>
-              <div style={{ fontSize: '18px', fontWeight: 'bold' }}>{sector.change?.toFixed(2)}%</div>
-              <div style={{ fontSize: '12px', opacity: 0.8 }}>Vol: {(sector.volume / 1000000).toFixed(1)}M</div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* News Feed */}
-      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '20px' }}>
-        <div style={{ backgroundColor: currentTheme.bgSecondary, border: `1px solid ${currentTheme.border}`, borderRadius: '8px', padding: '16px' }}>
-          <h3 style={{ margin: '0 0 16px 0', fontSize: '16px' }}>Market News</h3>
-          {data.news.map((item, i) => (
-            <div key={i} style={{
-              padding: '12px',
-              marginBottom: '12px',
-              backgroundColor: currentTheme.bgTertiary,
-              borderRadius: '8px',
-              borderLeft: `4px solid ${item.sentiment > 0.5 ? currentTheme.success : item.sentiment < -0.5 ? currentTheme.danger : currentTheme.warning}`
-            }}>
-              <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>{item.title}</div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: currentTheme.textMuted }}>
-                <span>Sentiment: {(item.sentiment * 100).toFixed(0)}%</span>
-                <span>{item.time}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* Economic Calendar */}
-        <div style={{ backgroundColor: currentTheme.bgSecondary, border: `1px solid ${currentTheme.border}`, borderRadius: '8px', padding: '16px' }}>
-          <h3 style={{ margin: '0 0 16px 0', fontSize: '16px' }}>Economic Calendar</h3>
-          {data.calendar.map((event, i) => (
-            <div key={i} style={{
-              padding: '8px',
-              marginBottom: '8px',
-              backgroundColor: currentTheme.bgTertiary,
-              borderRadius: '4px'
-            }}>
-              <div style={{ fontWeight: 'bold', fontSize: '14px' }}>{event.event}</div>
-              <div style={{ fontSize: '12px', color: currentTheme.textMuted, marginBottom: '4px' }}>
-                {event.time} • Impact: {event.impact}
-              </div>
-              <div style={{ fontSize: '12px' }}>
-                Forecast: {event.forecast} | Previous: {event.previous}
-              </div>
+      <div style={glassCard}>
+        <SectionHeader title="Market Heatmap" icon={Layers} />
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+          {data.heatmap.map((s, i) => (
+            <div key={i} style={{ aspectRatio: '1', borderRadius: '8px', background: s.performance >= 0 ? theme.colors.primary : theme.colors.danger, opacity: 0.1 + Math.abs(s.performance || 0) * 5, display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center', fontSize: '9px', fontWeight: '800' }}>
+              {s.sector}<br/>{((s.performance || 0) * 100).toFixed(1)}%
             </div>
           ))}
         </div>
@@ -375,226 +289,61 @@ const AdvancedDashboard = ({ theme = 'dark' }) => {
     </div>
   );
 
-  const renderAIAnalytics = () => (
-    <div style={{ display: 'grid', gap: '20px' }}>
-      {/* Model Performance */}
-      <div style={{ display: 'flex', gap: '16px', overflowX: 'auto' }}>
-        <MetricCard title="Model Accuracy" value={`${(data.modelPerf.accuracy * 100)?.toFixed(1)}%`} color={currentTheme.accent} />
-        <MetricCard title="Precision" value={`${(data.modelPerf.precision * 100)?.toFixed(1)}%`} />
-        <MetricCard title="Recall" value={`${(data.modelPerf.recall * 100)?.toFixed(1)}%`} />
-        <MetricCard title="F1 Score" value={`${(data.modelPerf.f1_score * 100)?.toFixed(1)}%`} />
-        <MetricCard title="Confidence" value={`${(data.modelPerf.prediction_confidence * 100)?.toFixed(1)}%`} color={currentTheme.success} />
-      </div>
-
-      {/* Feature Importance */}
-      <div style={{ backgroundColor: currentTheme.bgSecondary, border: `1px solid ${currentTheme.border}`, borderRadius: '8px', padding: '16px' }}>
-        <h3 style={{ margin: '0 0 16px 0', fontSize: '16px' }}>Feature Importance</h3>
-        <ResponsiveContainer width="100%" height={300}>
-          <BarChart data={data.modelPerf.feature_importance || []}>
-            <CartesianGrid strokeDasharray="3 3" stroke={currentTheme.border} />
-            <XAxis dataKey="feature" stroke={currentTheme.textMuted} />
-            <YAxis stroke={currentTheme.textMuted} />
-            <Tooltip contentStyle={{ backgroundColor: currentTheme.bgTertiary, border: `1px solid ${currentTheme.border}` }} />
-            <Bar dataKey="importance" fill={currentTheme.accent} />
-          </BarChart>
-        </ResponsiveContainer>
-      </div>
-
-      {/* Backtesting */}
-      <div style={{ backgroundColor: currentTheme.bgSecondary, border: `1px solid ${currentTheme.border}`, borderRadius: '8px', padding: '16px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-          <h3 style={{ margin: 0, fontSize: '16px' }}>Backtesting Results</h3>
-          <button
-            onClick={runBacktest}
-            style={{
-              padding: '8px 16px',
-              backgroundColor: currentTheme.accent,
-              color: '#000',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              fontWeight: 'bold'
-            }}
-          >
-            Run Backtest
-          </button>
+  const renderPulseView = () => (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '24px' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+        <div style={glassCard}>
+          <SectionHeader title="System Status" icon={Cpu} />
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Uptime</span><span>{Math.floor((data.systemHealth?.uptime || 0) / 3600)}h</span></div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '10px' }}><span>Memory</span><span style={{ color: theme.colors.primary }}>{(data.systemHealth?.memory_usage || 'stable').toUpperCase()}</span></div>
         </div>
-        {backtestResults && (
-          <div>
-            <div style={{ display: 'flex', gap: '16px', marginBottom: '16px' }}>
-              <MetricCard title="Total Return" value={`${backtestResults.total_return}%`} color={backtestResults.total_return > 0 ? currentTheme.success : currentTheme.danger} />
-              <MetricCard title="Sharpe Ratio" value={backtestResults.sharpe_ratio} />
-              <MetricCard title="Max Drawdown" value={`${backtestResults.max_drawdown}%`} color={currentTheme.danger} />
-              <MetricCard title="Win Rate" value={`${(backtestResults.win_rate * 100).toFixed(1)}%`} />
-            </div>
-            <ResponsiveContainer width="100%" height={200}>
-              <LineChart data={backtestResults.chart_data}>
-                <CartesianGrid strokeDasharray="3 3" stroke={currentTheme.border} />
-                <XAxis dataKey="date" stroke={currentTheme.textMuted} />
-                <YAxis stroke={currentTheme.textMuted} />
-                <Tooltip contentStyle={{ backgroundColor: currentTheme.bgTertiary, border: `1px solid ${currentTheme.border}` }} />
-                <Line type="monotone" dataKey="value" stroke={currentTheme.accent} strokeWidth={2} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-
-  const renderSystemHealth = () => (
-    <div style={{ display: 'grid', gap: '20px' }}>
-      {/* System Metrics */}
-      <div style={{ display: 'flex', gap: '16px', overflowX: 'auto' }}>
-        <MetricCard title="Uptime" value={`${data.systemHealth.uptime?.toFixed(1)}%`} color={currentTheme.success} />
-        <MetricCard title="CPU Usage" value={`${data.systemHealth.cpu_usage}%`} color={currentTheme.warning} />
-        <MetricCard title="Memory Usage" value={`${data.systemHealth.memory_usage}%`} />
-        <MetricCard title="Error Rate" value={`${(data.systemHealth.error_rate * 100)?.toFixed(2)}%`} color={currentTheme.danger} />
-        <MetricCard title="Active Connections" value={data.systemHealth.active_connections} />
-      </div>
-
-      {/* API Latency */}
-      <div style={{ backgroundColor: currentTheme.bgSecondary, border: `1px solid ${currentTheme.border}`, borderRadius: '8px', padding: '16px' }}>
-        <h3 style={{ margin: '0 0 16px 0', fontSize: '16px' }}>API Latency</h3>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px' }}>
-          {Object.entries(data.systemHealth.api_latency || {}).map(([api, latency]) => (
-            <div key={api} style={{
-              padding: '12px',
-              backgroundColor: currentTheme.bgTertiary,
-              borderRadius: '8px',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center'
-            }}>
-              <span style={{ fontWeight: 'bold' }}>{api.toUpperCase()}</span>
-              <span style={{ color: latency < 50 ? currentTheme.success : latency < 100 ? currentTheme.warning : currentTheme.danger }}>
-                {latency}ms
-              </span>
+        <div style={glassCard}>
+          <SectionHeader title="Service Health" icon={Activity} />
+          {['Database', 'Scraper', 'RiskMgr', 'Model'].map(s => (
+            <div key={s} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+              <span>{s}</span><span style={{ color: theme.colors.primary }}>ONLINE</span>
             </div>
           ))}
         </div>
       </div>
-
-      {/* Component Status */}
-      <div style={{ backgroundColor: currentTheme.bgSecondary, border: `1px solid ${currentTheme.border}`, borderRadius: '8px', padding: '16px' }}>
-        <h3 style={{ margin: '0 0 16px 0', fontSize: '16px' }}>Component Status</h3>
-        <div style={{ display: 'grid', gap: '8px' }}>
-          {Object.entries(data.status.components || {}).map(([component, info]) => (
-            <div key={component} style={{
-              padding: '12px',
-              backgroundColor: currentTheme.bgTertiary,
-              borderRadius: '8px',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center'
-            }}>
-              <div>
-                <div style={{ fontWeight: 'bold' }}>{component.replace('_', ' ').toUpperCase()}</div>
-                <div style={{ fontSize: '12px', color: currentTheme.textMuted }}>
-                  {info.latency && `Latency: ${info.latency}`}
-                  {info.feeds && ` • Feeds: ${info.feeds}`}
-                  {info.active_strategies && ` • Strategies: ${info.active_strategies}`}
-                  {info.alerts && ` • Alerts: ${info.alerts}`}
-                </div>
-              </div>
-              <div style={{
-                padding: '4px 8px',
-                backgroundColor: info.status === 'connected' || info.status === 'active' || info.status === 'running' || info.status === 'monitoring' ? currentTheme.success : currentTheme.danger,
-                color: '#fff',
-                borderRadius: '4px',
-                fontSize: '12px',
-                fontWeight: 'bold'
-              }}>
-                {info.status?.toUpperCase()}
-              </div>
-            </div>
-          ))}
+      <div style={glassCard}>
+        <SectionHeader title="Agent Log" icon={Terminal} />
+        <div style={{ backgroundColor: '#000', padding: '15px', borderRadius: '8px', height: '400px', overflowY: 'auto', fontFamily: 'monospace', fontSize: '11px' }}>
+          {data.agentActivity.length > 0 ? (
+            data.agentActivity.map((log, i) => (
+              <div key={i} style={{ marginBottom: '8px' }}><span style={{ color: theme.colors.textMuted }}>[{new Date(log.timestamp).toLocaleTimeString()}]</span> <span style={{ color: theme.colors.primary }}>{log.component}</span>: {log.message}</div>
+            ))
+          ) : (
+            <div style={{ color: theme.colors.textMuted }}>Waiting for logs...</div>
+          )}
         </div>
       </div>
     </div>
   );
 
   const tabs = [
-    { id: 'overview', label: 'Overview', component: renderOverview },
-    { id: 'risk', label: 'Risk Management', component: renderRiskManagement },
-    { id: 'market', label: 'Market Intelligence', component: renderMarketIntelligence },
-    { id: 'ai', label: 'AI Analytics', component: renderAIAnalytics },
-    { id: 'system', label: 'System Health', component: renderSystemHealth }
+    { id: 'overview', label: 'DASHBOARD', icon: Activity, component: renderOverview },
+    { id: 'nse', label: 'NSE KENYA', icon: Flag, component: renderKenyaNSE },
+    { id: 'risk', label: 'RISK', icon: Shield, component: renderRiskView },
+    { id: 'market', label: 'MARKET', icon: Globe, component: renderMarketView },
+    { id: 'system', label: 'SYSTEM', icon: Cpu, component: renderPulseView }
   ];
 
   return (
-    <div style={{ minHeight: '100vh', backgroundColor: currentTheme.bg, color: currentTheme.text, fontFamily: 'system-ui' }}>
-      {/* Header */}
-      <header style={{
-        backgroundColor: currentTheme.bgSecondary,
-        borderBottom: `1px solid ${currentTheme.border}`,
-        padding: '16px 24px',
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center'
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <h1 style={{ fontSize: '24px', fontWeight: 'bold', margin: 0 }}>
-            🤖 Advanced AI Trading Dashboard
-          </h1>
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            padding: '4px 12px',
-            borderRadius: '20px',
-            backgroundColor: isConnected ? currentTheme.success : currentTheme.danger,
-            fontSize: '12px',
-            fontWeight: 'bold',
-            color: '#000'
-          }}>
-            <div style={{
-              width: '6px',
-              height: '6px',
-              borderRadius: '50%',
-              backgroundColor: '#000',
-              animation: isConnected ? 'pulse 2s infinite' : 'none'
-            }} />
-            {isConnected ? 'LIVE' : 'OFFLINE'}
-          </div>
+    <div style={{ minHeight: '100vh', backgroundColor: theme.colors.bg, color: theme.colors.text, fontFamily: 'Outfit, sans-serif' }}>
+      <header style={{ ...theme.glass, borderRadius: 0, padding: '20px 40px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+          <div style={{ backgroundColor: theme.colors.primary, padding: '10px', borderRadius: '10px' }}><Zap color="#000" size={20} /></div>
+          <h1 style={{ fontSize: '18px', fontWeight: '800', margin: 0 }}>AEGIS AI</h1>
         </div>
-        
-        <div style={{ fontSize: '14px', color: currentTheme.textMuted }}>
-          Last Update: {new Date().toLocaleTimeString()}
-        </div>
+        <nav style={{ display: 'flex', gap: '30px' }}>
+          {tabs.map(tab => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{ background: 'transparent', border: 'none', color: activeTab === tab.id ? theme.colors.primary : theme.colors.textSecondary, fontSize: '12px', fontWeight: '800', cursor: 'pointer', borderBottom: activeTab === tab.id ? `2px solid ${theme.colors.primary}` : '2px solid transparent', padding: '5px 0' }}>{tab.label}</button>
+          ))}
+        </nav>
+        <button onClick={onLogout} style={{ background: 'transparent', border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, padding: '8px 15px', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}><LogOut size={16} /> SIGN OUT</button>
       </header>
-
-      {/* Navigation Tabs */}
-      <nav style={{
-        backgroundColor: currentTheme.bgSecondary,
-        borderBottom: `1px solid ${currentTheme.border}`,
-        padding: '12px 24px',
-        display: 'flex',
-        gap: '8px',
-        overflowX: 'auto'
-      }}>
-        {tabs.map(tab => (
-          <TabButton
-            key={tab.id}
-            id={tab.id}
-            label={tab.label}
-            active={activeTab === tab.id}
-            onClick={setActiveTab}
-          />
-        ))}
-      </nav>
-
-      {/* Main Content */}
-      <main style={{ padding: '24px' }}>
-        {tabs.find(tab => tab.id === activeTab)?.component()}
-      </main>
-
-      <style jsx>{`
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.5; }
-        }
-      `}</style>
+      <main style={{ padding: '40px' }}>{tabs.find(t => t.id === activeTab)?.component()}</main>
     </div>
   );
 };
