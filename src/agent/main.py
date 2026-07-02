@@ -107,6 +107,7 @@ class TradingAgent:
         self._validate_secrets()
         self.running = False
         self.components = {}
+        self.order_journal = None  # initialized in start() after brokers connect
         self.secure_config = SecureConfigManager()
         # Initialize database (optional)
         try:
@@ -272,6 +273,12 @@ class TradingAgent:
                 self.components['event_risk_manager'].stop()
         except Exception as e:
             logger.warning(f"Error stopping components: {e}")
+        # Close the order journal so the SQLite handle is released cleanly.
+        try:
+            if getattr(self, 'order_journal', None):
+                self.order_journal.close()
+        except Exception as e:
+            logger.warning(f"Error closing order journal: {e}")
         # Stop the monitoring service (HTTP server + metrics threads) so the
         # port is released and background threads don't outlive the agent.
         try:
@@ -312,6 +319,20 @@ class TradingAgent:
                         logger.warning(f"Could not seed history from {broker_name}: {e}")
             else:
                 logger.error(f"✗ Failed to connect to {broker_name}")
+
+        # Reconcile the order journal BEFORE any trading decision: every
+        # order whose outcome is unknown (crash between submit and ack) is
+        # resolved against the broker, so the loop never starts blind to
+        # in-flight state and never re-submits a decision it already made.
+        try:
+            from src.agent.order_journal import OrderJournal
+            self.order_journal = OrderJournal()
+            primary = broker_manager.get_broker()
+            if primary and primary.is_connected:
+                self.order_journal.reconcile(primary)
+        except Exception as e:
+            logger.error(f"Order journal init/reconcile failed: {e}")
+            self.order_journal = None
 
         # Health check loop (threaded)
         def broker_health_loop():
@@ -662,6 +683,21 @@ class TradingAgent:
                             logger.warning(f"Calculated zero quantity for {symbol}")
                             continue
 
+                        # Idempotency: one deterministic id per decision
+                        # (strategy, symbol, side, loop cycle). The journal
+                        # blocks re-submission after a crash/retry, and the
+                        # broker deduplicates on the same id server-side.
+                        from src.agent.order_journal import make_client_order_id
+                        strategy_name = signal_data.get('strategy', 'ensemble')
+                        cycle = int(time.time() // self.config.get('trading_loop_interval', 60))
+                        client_order_id = make_client_order_id(strategy_name, symbol, action, cycle)
+
+                        if self.order_journal and not self.order_journal.record_intent(
+                                client_order_id, symbol, action, float(quantity),
+                                'market', strategy=strategy_name):
+                            logger.warning(f"Skipping duplicate order decision: {client_order_id}")
+                            continue
+
                         # Prepare Order Request
                         from src.connectors.base_broker import OrderRequest
                         order = OrderRequest(
@@ -669,17 +705,27 @@ class TradingAgent:
                             quantity=float(quantity),
                             side=action,
                             order_type='market',
-                            time_in_force='gtc'
+                            time_in_force='gtc',
+                            client_order_id=client_order_id
                         )
 
-                        logger.info(f"Placing {action} order for {symbol}: {quantity:.2f} units via {broker.broker_name}")
-                        
+                        logger.info(f"Placing {action} order for {symbol}: {quantity:.2f} units via {broker.broker_name} ({client_order_id})")
+
                         # Record attempt in risk manager
                         if hasattr(self, 'risk_manager') and self.risk_manager:
                             self.risk_manager.record_trade_attempt()
-                            
+
                         # PLACE THE REAL ORDER
                         order_result = broker.place_order(order)
+                        if self.order_journal:
+                            if order_result:
+                                self.order_journal.mark_submitted(
+                                    client_order_id, order_result.order_id, order_result.status)
+                            else:
+                                # May or may not have reached the broker; the id
+                                # stays burned and reconcile resolves it at restart.
+                                self.order_journal.mark_failed(
+                                    client_order_id, 'place_order returned no response')
 
                         # Record metrics if monitoring is enabled
                         if self.monitoring_service:
@@ -789,6 +835,18 @@ class TradingAgent:
         except Exception as e:
             logger.error(f"Enhanced trade execution error: {e}")
     
+    def _has_open_close_order(self, broker, symbol: str, side: str) -> bool:
+        """True if the broker already has an open order that would close
+        this position — placing another would stack duplicate closes."""
+        try:
+            for o in broker.get_orders(symbol) or []:
+                if o.symbol == symbol and o.side == side and \
+                        str(o.status) not in ('filled', 'canceled', 'cancelled', 'rejected', 'expired'):
+                    return True
+        except Exception as e:
+            logger.warning(f"Open-order check failed for {symbol}: {e}")
+        return False
+
     def _enforce_stop_losses(self, stop_loss_pct: float, trailing_stop_pct: float):
         """
         Enforce stop-loss and trailing stop rules on all open positions.
@@ -819,19 +877,44 @@ class TradingAgent:
                     
                     # Hard stop-loss
                     if unrealized_pl_pct <= -stop_loss_pct:
+                        close_side = 'sell' if position.quantity > 0 else 'buy'
+
+                        # A pending close order makes another one redundant —
+                        # the position still shows until the first fills, so
+                        # without this check every 60s loop stacks a new order.
+                        if self._has_open_close_order(primary_broker, position.symbol, close_side):
+                            logger.info(f"Stop-loss close already pending for {position.symbol}; skipping")
+                            continue
+
                         logger.warning(
                             f"STOP-LOSS triggered for {position.symbol}: "
                             f"loss={unrealized_pl_pct:.2%} exceeds limit={-stop_loss_pct:.2%}"
                         )
                         from src.connectors.base_broker import OrderRequest
+                        from src.agent.order_journal import make_client_order_id
+                        # 5-minute cycle: dedups rapid re-triggers while still
+                        # allowing a later re-close if the position re-opens.
+                        coid = make_client_order_id('stoploss', position.symbol,
+                                                    close_side, int(time.time() // 300))
+                        if self.order_journal and not self.order_journal.record_intent(
+                                coid, position.symbol, close_side,
+                                abs(position.quantity), 'market', strategy='stop_loss'):
+                            logger.info(f"Stop-loss close already journaled ({coid}); skipping")
+                            continue
                         close_order = OrderRequest(
                             symbol=position.symbol,
                             quantity=abs(position.quantity),
-                            side='sell' if position.quantity > 0 else 'buy',
+                            side=close_side,
                             order_type='market',
-                            time_in_force='gtc'
+                            time_in_force='gtc',
+                            client_order_id=coid
                         )
                         result = primary_broker.place_order(close_order)
+                        if self.order_journal:
+                            if result:
+                                self.order_journal.mark_submitted(coid, result.order_id, result.status)
+                            else:
+                                self.order_journal.mark_failed(coid, 'place_order returned no response')
                         if result:
                             logger.info(f"Stop-loss order placed for {position.symbol}: {result.order_id}")
                             if self.monitoring_service:
@@ -848,14 +931,32 @@ class TradingAgent:
                         trailing_stops = self.risk_manager.check_trailing_stops(trailing_stop_pct)
                         for ts in trailing_stops:
                             if ts['symbol'] == position.symbol:
+                                from src.connectors.base_broker import OrderRequest
+                                from src.agent.order_journal import make_client_order_id
+                                if self._has_open_close_order(primary_broker, position.symbol, 'sell'):
+                                    logger.info(f"Trailing-stop close already pending for {position.symbol}; skipping")
+                                    continue
+                                coid = make_client_order_id('trailstop', position.symbol,
+                                                            'sell', int(time.time() // 300))
+                                if self.order_journal and not self.order_journal.record_intent(
+                                        coid, position.symbol, 'sell',
+                                        abs(position.quantity), 'market', strategy='trailing_stop'):
+                                    logger.info(f"Trailing-stop close already journaled ({coid}); skipping")
+                                    continue
                                 close_order = OrderRequest(
                                     symbol=position.symbol,
                                     quantity=abs(position.quantity),
                                     side='sell',
                                     order_type='market',
-                                    time_in_force='gtc'
+                                    time_in_force='gtc',
+                                    client_order_id=coid
                                 )
                                 result = primary_broker.place_order(close_order)
+                                if self.order_journal:
+                                    if result:
+                                        self.order_journal.mark_submitted(coid, result.order_id, result.status)
+                                    else:
+                                        self.order_journal.mark_failed(coid, 'place_order returned no response')
                                 if result:
                                     logger.info(f"Trailing stop-loss order placed for {position.symbol}: {result.order_id}")
                                     if self.monitoring_service:
