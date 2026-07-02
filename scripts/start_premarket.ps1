@@ -38,6 +38,13 @@ if (-not $SkipBuild) {
     Pop-Location
 }
 
+Write-Host "Running preflight checks..." -ForegroundColor Cyan
+& "$root\.venv\Scripts\python.exe" "$root\scripts\preflight.py"
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Preflight failed - fix the blocking issues above, then rerun."
+    exit 1
+}
+
 Write-Host "Starting backend (config: $Config)..." -ForegroundColor Cyan
 Start-Process -FilePath "$root\.venv\Scripts\python.exe" `
     -ArgumentList "-m", "src.agent.main", "--config", $Config `

@@ -10,6 +10,11 @@ dashboard against the paper-trading backend — e.g. during US premarket
   logging in with their own username/password (JWT, 24-hour expiry).
 - Live view of portfolio, positions, performance, risk metrics, news
   sentiment, and NSE (Kenya) market data.
+- A **market session clock** in the header (ET time, premarket/open/after-hours
+  state, countdown to the next transition) and a **Getting Started guide**
+  that opens automatically on first login — tab overview, metric glossary
+  (VaR, Sharpe, drawdown...), and session ground rules. Reopenable via the
+  `?` header button.
 - **No real money is at risk**: the configured brokers are the internal paper
   broker and Alpaca with `"paper": true`. Coinbase is disabled. Verify this in
   `config/config.json` → `brokers` before every session.
@@ -43,6 +48,20 @@ Each account gets a random 16-character password, printed **once** — hand them
 out privately. `--list` shows existing users, `--reset <name>` regenerates a
 password. Accounts live in `users.json` (bcrypt hashes only).
 
+## Preflight (automatic, or run it yourself)
+
+`start_premarket.ps1` runs `scripts/preflight.py` before starting anything and
+aborts on blocking failures. You can also run it directly:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\preflight.py          # static checks
+.\.venv\Scripts\python.exe scripts\preflight.py --live   # + probe running stack
+```
+
+It verifies env keys, config sanity, **that every enabled broker is
+paper-mode**, trader accounts, the frontend build, and (with `--live`) API and
+monitoring health.
+
 ## Start a session
 
 ```powershell
@@ -60,6 +79,19 @@ Traders then browse to `http://<host-ip>:3001` and log in.
 > The dashboard calls the API on the **same hostname it was loaded from**,
 > port 5001 (see `frontend/utils/apiBase.js`). To point it elsewhere — e.g. a
 > reverse proxy — set `NEXT_PUBLIC_API_URL` before `npm run build`.
+
+### Automated startup (no 4 AM ops)
+
+Register a Windows scheduled task so the stack is already running when
+traders arrive (times are local machine time — 4:00 AM ET premarket is
+11:00 AM in Nairobi during EDT):
+
+```powershell
+# from an elevated PowerShell
+powershell -ExecutionPolicy Bypass -File scripts\schedule_premarket.ps1 -At 10:45
+powershell ... schedule_premarket.ps1 -Status    # check next/last run
+powershell ... schedule_premarket.ps1 -Remove    # unregister
+```
 
 ### Docker alternative
 
