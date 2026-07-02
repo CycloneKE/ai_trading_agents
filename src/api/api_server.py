@@ -225,7 +225,8 @@ class TradingAPI:
                             'account': {
                                 'cash': account.cash if account else 0,
                                 'equity': account.equity if account else 0,
-                                'currency': account.currency if account else 'USD'
+                                # AccountInfo has no currency field; Alpaca accounts are USD
+                                'currency': getattr(account, 'currency', 'USD') or 'USD'
                             },
                             'positions': [
                                 {
