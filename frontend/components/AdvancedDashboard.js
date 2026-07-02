@@ -10,6 +10,8 @@ import {
   Lock, Bell, BarChart as BarChartIcon, LogOut
 } from 'lucide-react';
 import AgentActivity from './AgentActivity';
+import MarketClock from './MarketClock';
+import HelpPanel from './HelpPanel';
 import { theme, glassCard } from './DashboardStyles';
 import { getApiBase } from '../utils/apiBase';
 
@@ -66,6 +68,15 @@ const AdvancedDashboard = ({ onLogout }) => {
   });
   const [nseData, setNseData] = useState({ quotes: [], movers: { gainers: [], losers: [] }, sectors: [], status: {}, kes_usd_rate: 0.0077, market_open: false });
   const [isConnected, setIsConnected] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+
+  // First login: open the getting-started guide automatically.
+  useEffect(() => {
+    if (!localStorage.getItem('aegis_help_seen')) {
+      setShowHelp(true);
+      localStorage.setItem('aegis_help_seen', '1');
+    }
+  }, []);
 
   const fetchData = async () => {
     const endpoints = [
@@ -341,9 +352,14 @@ const AdvancedDashboard = ({ onLogout }) => {
             <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{ background: 'transparent', border: 'none', color: activeTab === tab.id ? theme.colors.primary : theme.colors.textSecondary, fontSize: '12px', fontWeight: '800', cursor: 'pointer', borderBottom: activeTab === tab.id ? `2px solid ${theme.colors.primary}` : '2px solid transparent', padding: '5px 0' }}>{tab.label}</button>
           ))}
         </nav>
-        <button onClick={onLogout} style={{ background: 'transparent', border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, padding: '8px 15px', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}><LogOut size={16} /> SIGN OUT</button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+          <MarketClock />
+          <button onClick={() => setShowHelp(true)} title="Getting started guide" style={{ background: 'transparent', border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, width: '34px', height: '34px', borderRadius: '8px', cursor: 'pointer', fontSize: '14px', fontWeight: 800 }}>?</button>
+          <button onClick={onLogout} style={{ background: 'transparent', border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, padding: '8px 15px', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}><LogOut size={16} /> SIGN OUT</button>
+        </div>
       </header>
       <main style={{ padding: '40px' }}>{tabs.find(t => t.id === activeTab)?.component()}</main>
+      {showHelp && <HelpPanel onClose={() => setShowHelp(false)} />}
     </div>
   );
 };
