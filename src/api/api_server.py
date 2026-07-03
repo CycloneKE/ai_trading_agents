@@ -290,6 +290,44 @@ class TradingAPI:
                 logger.error(f"Error getting risk metrics: {e}")
                 return jsonify({'error': str(e)}), 500
 
+        @self.app.route('/api/trading/halt', methods=['POST'])
+        @require_rate_limit
+        @token_required
+        def halt_trading():
+            """Kill switch: stop all new orders; optionally flatten the book.
+
+            Body: {"confirm": true, "flatten": false}
+            """
+            try:
+                data = request.get_json(silent=True) or {}
+                if data.get('confirm') is not True:
+                    return jsonify({'error': 'confirmation required: pass {"confirm": true}'}), 400
+                flatten = bool(data.get('flatten', False))
+                result = self.trading_agent.halt_trading(
+                    flatten=flatten,
+                    reason=f"API request (flatten={flatten})")
+                logger.warning(f"Kill switch engaged via API: {result}")
+                return jsonify(result)
+            except Exception as e:
+                logger.error(f"Error engaging kill switch: {e}")
+                return jsonify({'error': str(e)}), 500
+
+        @self.app.route('/api/trading/resume', methods=['POST'])
+        @require_rate_limit
+        @token_required
+        def resume_trading():
+            """Release the kill switch."""
+            try:
+                data = request.get_json(silent=True) or {}
+                if data.get('confirm') is not True:
+                    return jsonify({'error': 'confirmation required: pass {"confirm": true}'}), 400
+                result = self.trading_agent.resume_trading()
+                logger.warning("Kill switch released via API")
+                return jsonify(result)
+            except Exception as e:
+                logger.error(f"Error resuming trading: {e}")
+                return jsonify({'error': str(e)}), 500
+
         @self.app.route('/api/alerts', methods=['GET'])
         @require_rate_limit
         @token_required

@@ -106,6 +106,7 @@ class TradingAgent:
         # derives the required env vars from the enabled config (self.config).
         self._validate_secrets()
         self.running = False
+        self.trading_halted = False  # kill switch: blocks all NEW orders when True
         self.components = {}
         self.order_journal = None  # initialized in start() after brokers connect
         self.secure_config = SecureConfigManager()
@@ -508,6 +509,12 @@ class TradingAgent:
                             logger.error(f"Error processing symbol {symbol}: {str(e)}")
                             continue
                     
+                    # Kill switch: observe the market but submit nothing
+                    if self.trading_halted:
+                        if all_signals:
+                            logger.info(f"Trading halted; dropping signals for {list(all_signals)}")
+                        all_signals = {}
+
                     # Process signals if any were generated
                     if all_signals:
                         # Assess risk for all signals
@@ -683,6 +690,15 @@ class TradingAgent:
                             logger.warning(f"Calculated zero quantity for {symbol}")
                             continue
 
+                        if self.trading_halted:
+                            logger.info(f"Trading halted; skipping {action} {symbol}")
+                            continue
+
+                        # Small-account protection: don't let an automated
+                        # exit trip the pattern-day-trader rule.
+                        if self._pdt_blocks_order(broker, symbol, action):
+                            continue
+
                         # Idempotency: one deterministic id per decision
                         # (strategy, symbol, side, loop cycle). The journal
                         # blocks re-submission after a crash/retry, and the
@@ -835,6 +851,125 @@ class TradingAgent:
         except Exception as e:
             logger.error(f"Enhanced trade execution error: {e}")
     
+    def halt_trading(self, flatten: bool = False, reason: str = 'operator request') -> Dict[str, Any]:
+        """Kill switch: stop all NEW order submission immediately.
+
+        With ``flatten=True`` also cancels every open order and closes every
+        position with marketable extended-hours limit orders (falling back to
+        market orders when no price is available), so it works premarket too.
+        """
+        self.trading_halted = True
+        logger.warning(f"KILL SWITCH ENGAGED ({reason}); flatten={flatten}")
+        result = {'halted': True, 'canceled_orders': 0, 'close_orders': 0, 'errors': []}
+        if not flatten:
+            return result
+
+        try:
+            broker_manager = self.components.get('broker_manager')
+            broker = broker_manager.get_broker() if broker_manager else None
+            if not broker or not broker.is_connected:
+                result['errors'].append('no connected broker')
+                return result
+
+            for o in broker.get_orders() or []:
+                try:
+                    if broker.cancel_order(o.order_id):
+                        result['canceled_orders'] += 1
+                except Exception as e:
+                    result['errors'].append(f'cancel {o.symbol}: {e}')
+
+            from src.connectors.base_broker import OrderRequest
+            from src.agent.order_journal import make_client_order_id
+            data_manager = self.components.get('data_manager')
+            real = data_manager.connectors.get('real_data') if data_manager else None
+
+            for p in broker.get_positions() or []:
+                if not p.quantity:
+                    continue
+                side = 'sell' if p.quantity > 0 else 'buy'
+                coid = make_client_order_id('killswitch', p.symbol, side,
+                                            int(time.time() // 300))
+                if self.order_journal and not self.order_journal.record_intent(
+                        coid, p.symbol, side, abs(p.quantity), 'limit',
+                        strategy='kill_switch'):
+                    continue
+                # Marketable extended-hours limit so flattening also works
+                # pre/after-market; market GTC as last resort.
+                price = None
+                try:
+                    quote = real.get_real_time_data(p.symbol) if real else None
+                    price = (quote or {}).get('price') or p.current_price
+                except Exception:
+                    price = p.current_price
+                if price:
+                    limit = round(price * (0.995 if side == 'sell' else 1.005), 2)
+                    order = OrderRequest(symbol=p.symbol, quantity=abs(p.quantity),
+                                         side=side, order_type='limit',
+                                         time_in_force='day', limit_price=limit,
+                                         extended_hours=True, client_order_id=coid)
+                else:
+                    order = OrderRequest(symbol=p.symbol, quantity=abs(p.quantity),
+                                         side=side, order_type='market',
+                                         time_in_force='gtc', client_order_id=coid)
+                resp = broker.place_order(order)
+                if self.order_journal:
+                    if resp:
+                        self.order_journal.mark_submitted(coid, resp.order_id, resp.status)
+                    else:
+                        self.order_journal.mark_failed(coid, 'flatten order got no response')
+                if resp:
+                    result['close_orders'] += 1
+                    logger.warning(f"Kill switch: closing {p.quantity} {p.symbol} ({coid})")
+                else:
+                    result['errors'].append(f'close {p.symbol}: no response')
+        except Exception as e:
+            logger.error(f"Kill switch flatten error: {e}")
+            result['errors'].append(str(e))
+        return result
+
+    def resume_trading(self) -> Dict[str, Any]:
+        """Release the kill switch; the loop resumes submitting orders."""
+        self.trading_halted = False
+        logger.warning("Kill switch released; trading resumed")
+        return {'halted': False}
+
+    PDT_EQUITY_THRESHOLD = 25_000
+    PDT_MAX_DAY_TRADES = 3
+
+    def _pdt_blocks_order(self, broker, symbol: str, side: str) -> bool:
+        """US pattern-day-trader guard for small accounts.
+
+        A margin account under $25k equity is limited to 3 day trades per 5
+        business days. Selling a position bought TODAY is a day trade — block
+        it when the account is already at the limit. Conservative by design:
+        a blocked exit still happens tomorrow; a PDT flag freezes the account
+        for 90 days.
+        """
+        try:
+            if side != 'sell' or not self.order_journal:
+                return False
+            acct = broker.get_account_info()
+            if not acct or acct.equity >= self.PDT_EQUITY_THRESHOLD:
+                return False
+            if acct.day_trade_count < self.PDT_MAX_DAY_TRADES:
+                return False
+            today = datetime.utcnow().date().isoformat()
+            bought_today = any(
+                r['symbol'] == symbol and r['side'] == 'buy'
+                and r['status'] in ('submitted', 'filled')
+                and r['created_at'][:10] == today
+                for r in self.order_journal.recent(200))
+            if bought_today:
+                logger.warning(
+                    f"PDT guard: blocking sell of {symbol} bought today — "
+                    f"account ${acct.equity:,.0f} < $25k already has "
+                    f"{acct.day_trade_count} day trades")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"PDT check error for {symbol}: {e}")
+            return False
+
     def _has_open_close_order(self, broker, symbol: str, side: str) -> bool:
         """True if the broker already has an open order that would close
         this position — placing another would stack duplicate closes."""
@@ -1041,6 +1176,7 @@ class TradingAgent:
         try:
             status = {
                 'running': self.running,
+                'trading_halted': getattr(self, 'trading_halted', False),
                 'timestamp': datetime.now().isoformat(),
                 'components': {}
             }

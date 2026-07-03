@@ -78,6 +78,25 @@ const AdvancedDashboard = ({ onLogout }) => {
     }
   }, []);
 
+  const isHalted = !!data.status.trading_halted;
+
+  const toggleHalt = async () => {
+    const message = isHalted
+      ? 'Resume automated trading?'
+      : 'HALT TRADING?\n\nThe agent stops submitting new orders immediately. Open positions stay open (protective stop-losses keep working).';
+    if (!window.confirm(message)) return;
+    try {
+      const token = localStorage.getItem('trading_token');
+      const res = await fetch(`${getApiBase()}/api/trading/${isHalted ? 'resume' : 'halt'}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ confirm: true }),
+      });
+      if (res.status === 401) { onLogout(); return; }
+      await fetchData();
+    } catch (e) {}
+  };
+
   const fetchData = async () => {
     const endpoints = [
       'status', 'performance', 'positions', 'alerts', 'news-feed', 
@@ -354,10 +373,31 @@ const AdvancedDashboard = ({ onLogout }) => {
         </nav>
         <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
           <MarketClock />
+          <button
+            onClick={toggleHalt}
+            title={isHalted ? 'Resume automated trading' : 'Stop all new orders immediately'}
+            style={{
+              background: isHalted ? theme.colors.warning : 'transparent',
+              border: `1px solid ${isHalted ? theme.colors.warning : theme.colors.danger}`,
+              color: isHalted ? '#000' : theme.colors.danger,
+              padding: '8px 15px', borderRadius: '8px', cursor: 'pointer',
+              fontSize: '12px', fontWeight: 800, letterSpacing: '0.5px',
+            }}
+          >
+            {isHalted ? 'RESUME' : 'HALT'}
+          </button>
           <button onClick={() => setShowHelp(true)} title="Getting started guide" style={{ background: 'transparent', border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, width: '34px', height: '34px', borderRadius: '8px', cursor: 'pointer', fontSize: '14px', fontWeight: 800 }}>?</button>
           <button onClick={onLogout} style={{ background: 'transparent', border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, padding: '8px 15px', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}><LogOut size={16} /> SIGN OUT</button>
         </div>
       </header>
+      {isHalted && (
+        <div style={{
+          backgroundColor: theme.colors.warning, color: '#000', textAlign: 'center',
+          padding: '8px', fontSize: '13px', fontWeight: 800, letterSpacing: '1px',
+        }}>
+          ⚠ TRADING HALTED — the agent is not submitting new orders. Protective stop-losses remain active.
+        </div>
+      )}
       <main style={{ padding: '40px' }}>{tabs.find(t => t.id === activeTab)?.component()}</main>
       {showHelp && <HelpPanel onClose={() => setShowHelp(false)} />}
     </div>
