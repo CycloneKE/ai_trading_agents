@@ -51,6 +51,41 @@ def require_rate_limit(f):
 
 
 # ---------------------------------------------------------------------------
+# Login brute-force protection (per username, independent of the IP limiter:
+# the IP limiter alone allows ~144k guesses/day against one account)
+# ---------------------------------------------------------------------------
+LOGIN_MAX_FAILURES = int(os.getenv('LOGIN_MAX_FAILURES', '5'))
+LOGIN_LOCKOUT_SECONDS = int(os.getenv('LOGIN_LOCKOUT_SECONDS', '900'))  # 15 min
+_login_failures = defaultdict(list)   # username -> [failure timestamps]
+_login_lock = threading.Lock()
+
+
+def _login_locked(username: str):
+    """Return seconds remaining in lockout, or 0 if the account may try."""
+    now = time.time()
+    with _login_lock:
+        recent = [t for t in _login_failures[username]
+                  if now - t < LOGIN_LOCKOUT_SECONDS]
+        _login_failures[username] = recent
+        if len(recent) >= LOGIN_MAX_FAILURES:
+            return int(LOGIN_LOCKOUT_SECONDS - (now - recent[0])) + 1
+    return 0
+
+
+def _login_failed(username: str, remote_addr: str):
+    with _login_lock:
+        _login_failures[username].append(time.time())
+        count = len(_login_failures[username])
+    logger.warning(f"AUTH FAILURE for '{username}' from {remote_addr} "
+                   f"({count}/{LOGIN_MAX_FAILURES} before lockout)")
+
+
+def _login_succeeded(username: str):
+    with _login_lock:
+        _login_failures.pop(username, None)
+
+
+# ---------------------------------------------------------------------------
 # Optional JWT authentication (enabled when auth module is available)
 # ---------------------------------------------------------------------------
 try:
@@ -146,24 +181,32 @@ class TradingAPI:
             if not data or not data.get('username') or not data.get('password'):
                 return jsonify({'error': 'Missing credentials'}), 400
             
-            username = data.get('username')
+            username = str(data.get('username'))[:64]
             password = data.get('password')
-            
+
+            lockout = _login_locked(username)
+            if lockout:
+                logger.warning(f"AUTH LOCKOUT active for '{username}' from {request.remote_addr}")
+                return jsonify({'error': 'Too many failed attempts; account temporarily locked',
+                                'retry_after': lockout}), 429
+
             try:
                 if not os.path.exists(USERS_FILE):
                     return jsonify({'error': 'User database not initialized'}), 503
-                
+
                 with open(USERS_FILE, 'r') as f:
                     users = json.load(f)
-                
+
                 if username in users and verify_password(users[username], password):
+                    _login_succeeded(username)
                     token = create_token(username)
                     return jsonify({
                         'token': token,
                         'message': 'Login successful',
                         'username': username
                     })
-                
+
+                _login_failed(username, request.remote_addr or '?')
                 return jsonify({'error': 'Invalid username or password'}), 401
             except Exception as e:
                 logger.error(f"Login error: {e}")
@@ -504,14 +547,22 @@ class TradingAPI:
             port = self.config.get('port', 5001)
 
             def run_server():
-                # Use threaded=True for better concurrent handling
-                self.app.run(
-                    host=host,
-                    port=port,
-                    debug=False,
-                    use_reloader=False,
-                    threaded=True
-                )
+                # Prefer waitress: a production WSGI server (Flask's builtin
+                # dev server is single-purpose and warns against real use).
+                try:
+                    from waitress import serve
+                    logger.info("Serving API with waitress")
+                    serve(self.app, host=host, port=port, threads=8,
+                          ident=None)  # ident=None: no Server version header
+                except ImportError:
+                    logger.warning("waitress not installed; falling back to Flask dev server")
+                    self.app.run(
+                        host=host,
+                        port=port,
+                        debug=False,
+                        use_reloader=False,
+                        threaded=True
+                    )
 
             self.server_thread = threading.Thread(target=run_server, daemon=True)
             self.server_thread.start()

@@ -130,11 +130,31 @@ Close the two windows the start script opened (backend and `next start`), or
 stop the compose stack with `docker compose down`. Paper-broker state persists
 in `data/` between sessions.
 
+## TLS (recommended)
+
+`deploy/Caddyfile` puts a TLS reverse proxy in front of both the dashboard
+and the API — traders browse to `https://<host-ip>` and JWTs stop crossing
+the LAN in cleartext:
+
+```powershell
+caddy run --config deploy\Caddyfile
+```
+
+When the dashboard is served through Caddy it calls the API on the same
+origin, so set `NEXT_PUBLIC_API_URL=https://<host-ip>` before `npm run build`
+(the API is proxied under `/api` on port 443).
+
+## Login protection
+
+- 5 failed logins for a username within 15 minutes lock the account for
+  15 minutes (`LOGIN_MAX_FAILURES` / `LOGIN_LOCKOUT_SECONDS` to tune).
+  Failures and lockouts are written to the agent log.
+- Tokens expire after 8 hours (`TOKEN_TTL_HOURS` to change).
+
 ## Known limitations (testing scope)
 
-- HTTP only — do not expose these ports to the public internet. LAN or VPN
-  only. Put a TLS reverse proxy (Caddy/nginx) in front before any wider
-  exposure.
+- Without the Caddy proxy the stack is HTTP-only — do not expose these
+  ports to the public internet. LAN or VPN only.
 - No per-user roles yet: every login has the same (full) API access.
 - `/api/strategy-performance` returns mock numbers pending database
   integration.

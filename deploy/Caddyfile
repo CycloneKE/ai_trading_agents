@@ -1,0 +1,31 @@
+# TLS reverse proxy for LAN trading sessions.
+#
+#   1. Install Caddy: winget install CaddyServer.Caddy   (or https://caddyserver.com)
+#   2. Run from the repo root:  caddy run --config deploy\Caddyfile
+#   3. Traders browse to  https://<host-ip>  (no port needed).
+#
+# `tls internal` uses Caddy's local CA. Browsers warn once per machine;
+# either accept the warning (LAN testing) or install Caddy's root cert on
+# each trader machine: `caddy trust` exports it.
+#
+# JWTs and passwords stop crossing the LAN in cleartext the moment this is
+# in front. Keep 3001/5001 firewall rules LAN-only regardless.
+
+:443 {
+	tls internal
+
+	# API (Flask/waitress on 5001)
+	handle /api/* {
+		reverse_proxy 127.0.0.1:5001
+	}
+
+	# Dashboard (Next.js on 3001)
+	handle {
+		reverse_proxy 127.0.0.1:3001
+	}
+}
+
+# Optional: redirect plain HTTP to HTTPS
+:80 {
+	redir https://{host}{uri} permanent
+}
