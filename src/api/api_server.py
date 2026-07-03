@@ -377,16 +377,27 @@ class TradingAPI:
         @require_rate_limit
         @token_required
         def get_strategy_performance():
-            """Get performance broken down by strategy."""
+            """Real per-strategy P&L attribution from the order journal."""
+            def produce():
+                journal = getattr(self.trading_agent, 'order_journal', None)
+                if not journal:
+                    return {}
+                from src.agent.strategy_attribution import compute_attribution
+
+                def price_lookup(symbol):
+                    data_manager = self.trading_agent.components.get('data_manager')
+                    real = data_manager.connectors.get('real_data') if data_manager else None
+                    if real:
+                        quote = real.get_real_time_data(symbol)
+                        return (quote or {}).get('price')
+                    return None
+
+                return compute_attribution(journal.filled_orders(), price_lookup)
+
             try:
-                # Mock performance per strategy until database integration is complete
-                # In a real app, we'd query performance per strategy over time
-                return jsonify({
-                    'momentum': {'win_rate': 0.65, 'sharpe': 1.8},
-                    'mean_reversion': {'win_rate': 0.58, 'sharpe': 1.4},
-                    'rsi_strategy': {'win_rate': 0.52, 'sharpe': 1.1}
-                })
+                return jsonify(self._cached('strategy_performance', 30, produce))
             except Exception as e:
+                logger.error(f"Error computing strategy attribution: {e}")
                 return jsonify({'error': str(e)}), 500
 
         @self.app.route('/api/system-health', methods=['GET'])

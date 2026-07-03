@@ -459,6 +459,17 @@ class TradingAgent:
                 # Get latest market data
                 market_data = self.components['data_manager'].get_latest_data()
                 
+                # Pull fill results for submitted orders into the journal so
+                # attribution and duplicate-close checks see current state.
+                if self.order_journal:
+                    try:
+                        broker_manager = self.components.get('broker_manager')
+                        primary = broker_manager.get_broker() if broker_manager else None
+                        if primary and primary.is_connected:
+                            self.order_journal.sync_fills(primary)
+                    except Exception as e:
+                        logger.debug(f"Fill sync error: {e}")
+
                 if market_data:
                     # --- Stop-loss enforcement ---
                     self._enforce_stop_losses(stop_loss_pct, trailing_stop_pct)

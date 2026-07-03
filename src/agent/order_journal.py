@@ -160,6 +160,46 @@ class OrderJournal:
             rows = cur.fetchall()
         return [dict(r) for r in rows]
 
+    def filled_orders(self) -> List[Dict[str, Any]]:
+        """All filled orders, oldest first — the input to P&L attribution."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM orders WHERE status = 'filled'"
+                " AND filled_quantity > 0 ORDER BY created_at")
+            cur.row_factory = sqlite3.Row
+            rows = cur.fetchall()
+        return [dict(r) for r in rows]
+
+    def sync_fills(self, broker) -> int:
+        """Resolve 'submitted' rows against the broker (fills, cancels).
+
+        Safe to run every loop: it only touches rows already at the broker,
+        never 'intent' rows that another thread may be mid-submission on.
+        Returns the number of rows that reached a final status.
+        """
+        updated = 0
+        api = getattr(broker, 'api', None)
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT client_order_id FROM orders WHERE status = 'submitted'")
+            submitted = [r[0] for r in cur.fetchall()]
+        for coid in submitted:
+            try:
+                if api is not None and hasattr(api, 'get_order_by_client_order_id'):
+                    o = api.get_order_by_client_order_id(coid)
+                else:
+                    continue
+                status = str(getattr(o, 'status', ''))
+                if status in FINAL_STATUSES:
+                    qty = float(getattr(o, 'filled_qty', 0) or 0)
+                    avg_raw = getattr(o, 'filled_avg_price', None)
+                    self.mark_final(coid, status, qty,
+                                    float(avg_raw) if avg_raw else None)
+                    updated += 1
+            except Exception as e:
+                logger.debug(f"sync_fills: could not resolve {coid}: {e}")
+        return updated
+
     def recent(self, limit: int = 50) -> List[Dict[str, Any]]:
         with self._lock:
             cur = self._conn.execute(

@@ -129,7 +129,9 @@ const AdvancedDashboard = ({ onLogout }) => {
       news: Array.isArray(newResponses[4]) ? newResponses[4] : prev.news,
       riskMetrics: newResponses[5] || prev.riskMetrics,
       modelPerf: newResponses[6] || prev.modelPerf,
-      strategies: Object.entries(newResponses[7] || {}).map(([name, stats]) => ({ name, ...stats })),
+      strategies: Object.entries(newResponses[7] || {})
+        .filter(([, stats]) => stats && typeof stats === 'object' && 'realized_pnl' in stats)
+        .map(([name, stats]) => ({ name, ...stats })),
       heatmap: Array.isArray(newResponses[8]) ? newResponses[8] : prev.heatmap,
       systemHealth: newResponses[9] || prev.systemHealth,
       agentActivity: Array.isArray(newResponses[10]) ? newResponses[10] : prev.agentActivity
@@ -198,6 +200,26 @@ const AdvancedDashboard = ({ onLogout }) => {
               ))
             ) : (
               <div style={{ padding: '20px', textAlign: 'center', color: theme.colors.textMuted }}>No active positions</div>
+            )}
+          </div>
+          <div style={glassCard}>
+            <SectionHeader title="Strategy Attribution" icon={Layers} />
+            {data.strategies.length > 0 ? (
+              data.strategies.map((s, i) => (
+                <div key={i} style={{ padding: '10px 0', borderBottom: `1px solid ${theme.colors.border}` }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                    <span style={{ fontWeight: '700', fontSize: '12px', textTransform: 'uppercase' }}>{s.name}</span>
+                    <span style={{ fontWeight: '800', color: (s.realized_pnl + (s.unrealized_pnl || 0)) >= 0 ? theme.colors.primary : theme.colors.danger }}>
+                      {(s.realized_pnl + (s.unrealized_pnl || 0)) >= 0 ? '+' : ''}${(s.realized_pnl + (s.unrealized_pnl || 0)).toFixed(2)}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: '11px', color: theme.colors.textMuted }}>
+                    {s.closed_trades} closed · {((s.win_rate || 0) * 100).toFixed(0)}% wins · {(s.open_positions || []).length} open
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div style={{ padding: '20px', textAlign: 'center', color: theme.colors.textMuted }}>No attributed trades yet</div>
             )}
           </div>
           <div style={glassCard}>
