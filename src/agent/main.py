@@ -696,20 +696,6 @@ class TradingAgent:
                             logger.warning(f"No valid price for {symbol} — skipping order")
                             continue
 
-                        # Dollar-notional sizing with fractional shares, so
-                        # small accounts get properly sized positions instead
-                        # of rounding to zero or oversizing to one share.
-                        from src.agent.position_sizing import size_order
-                        sizing_cfg = self.config.get('trading', {})
-                        sized = size_order(
-                            target_pos_value, price,
-                            min_notional=sizing_cfg.get('min_notional', 5.0),
-                            allow_fractional=sizing_cfg.get('allow_fractional', True),
-                        )
-                        if not sized:
-                            continue
-                        quantity = sized.quantity
-
                         if self.trading_halted:
                             logger.info(f"Trading halted; skipping {action} {symbol}")
                             continue
@@ -719,75 +705,111 @@ class TradingAgent:
                         if self._pdt_blocks_order(broker, symbol, action):
                             continue
 
-                        # Idempotency: one deterministic id per decision
-                        # (strategy, symbol, side, loop cycle). The journal
-                        # blocks re-submission after a crash/retry, and the
-                        # broker deduplicates on the same id server-side.
+                        # Execution plan: one blended order (default), or in
+                        # 'parallel' mode one order per agreeing strategy so
+                        # each keeps an independently attributed book on the
+                        # symbol. Only strategies agreeing with the validated
+                        # blended direction execute — dissenters skip, so the
+                        # account never trades against itself within a cycle.
+                        # The symbol total stays capped at target_pos_value.
+                        mode = self.config.get('strategy_execution_mode', 'blend')
+                        per_strategy = signal_data.get('per_strategy') or {}
+                        executions = []
+                        if mode == 'parallel' and per_strategy:
+                            agreeing = [
+                                n for n, s in per_strategy.items()
+                                if s.get('action') == action and s.get('confidence', 0) >= 0.3
+                            ]
+                            if agreeing:
+                                share = target_pos_value / len(agreeing)
+                                executions = [(n, share) for n in agreeing]
+                        if not executions:
+                            executions = [(signal_data.get('strategy', 'ensemble'), target_pos_value)]
+
+                        from src.agent.position_sizing import size_order
                         from src.agent.order_journal import make_client_order_id
-                        strategy_name = signal_data.get('strategy', 'ensemble')
-                        cycle = int(time.time() // self.config.get('trading_loop_interval', 60))
-                        client_order_id = make_client_order_id(strategy_name, symbol, action, cycle)
-
-                        if self.order_journal and not self.order_journal.record_intent(
-                                client_order_id, symbol, action, float(quantity),
-                                'market', strategy=strategy_name):
-                            logger.warning(f"Skipping duplicate order decision: {client_order_id}")
-                            continue
-
-                        # Prepare Order Request
                         from src.connectors.base_broker import OrderRequest
-                        order = OrderRequest(
-                            symbol=symbol,
-                            quantity=float(quantity),
-                            side=action,
-                            order_type='market',
-                            # fractional orders must be DAY (broker rule);
-                            # whole-share orders keep DAY too - the loop
-                            # re-decides every cycle, GTC adds nothing.
-                            time_in_force=sized.time_in_force,
-                            client_order_id=client_order_id
-                        )
+                        sizing_cfg = self.config.get('trading', {})
+                        cycle = int(time.time() // self.config.get('trading_loop_interval', 60))
 
-                        logger.info(f"Placing {action} order for {symbol}: {quantity:.2f} units via {broker.broker_name} ({client_order_id})")
-
-                        # Record attempt in risk manager
-                        if hasattr(self, 'risk_manager') and self.risk_manager:
-                            self.risk_manager.record_trade_attempt()
-
-                        # PLACE THE REAL ORDER
-                        order_result = broker.place_order(order)
-                        if self.order_journal:
-                            if order_result:
-                                self.order_journal.mark_submitted(
-                                    client_order_id, order_result.order_id, order_result.status)
-                            else:
-                                # May or may not have reached the broker; the id
-                                # stays burned and reconcile resolves it at restart.
-                                self.order_journal.mark_failed(
-                                    client_order_id, 'place_order returned no response')
-
-                        # Record metrics if monitoring is enabled
-                        if self.monitoring_service:
-                            strategy_name = signal_data.get('strategy', 'ensemble')
-                            self.monitoring_service.record_trade(
-                                action=action,
-                                symbol=symbol,
-                                strategy=strategy_name,
-                                quantity=quantity,
-                                price=price
+                        for strategy_name, target_value in executions:
+                            # Dollar-notional sizing with fractional shares,
+                            # so small accounts get properly sized positions
+                            # instead of rounding to zero.
+                            sized = size_order(
+                                target_value, price,
+                                min_notional=sizing_cfg.get('min_notional', 5.0),
+                                allow_fractional=sizing_cfg.get('allow_fractional', True),
                             )
+                            if not sized:
+                                continue
+                            quantity = sized.quantity
+
+                            # Idempotency: one deterministic id per decision
+                            # (strategy, symbol, side, loop cycle). The journal
+                            # blocks re-submission after a crash/retry, and the
+                            # broker deduplicates on the same id server-side.
+                            client_order_id = make_client_order_id(strategy_name, symbol, action, cycle)
+                            if self.order_journal and not self.order_journal.record_intent(
+                                    client_order_id, symbol, action, float(quantity),
+                                    'market', strategy=strategy_name):
+                                logger.warning(f"Skipping duplicate order decision: {client_order_id}")
+                                continue
+
+                            order = OrderRequest(
+                                symbol=symbol,
+                                quantity=float(quantity),
+                                side=action,
+                                order_type='market',
+                                # fractional orders must be DAY (broker rule);
+                                # whole-share keeps DAY too - the loop
+                                # re-decides every cycle, GTC adds nothing.
+                                time_in_force=sized.time_in_force,
+                                client_order_id=client_order_id
+                            )
+
+                            logger.info(f"Placing {action} order for {symbol}: {quantity} units "
+                                        f"[{strategy_name}] via {broker.broker_name} ({client_order_id})")
+
+                            # Record attempt in risk manager
+                            if hasattr(self, 'risk_manager') and self.risk_manager:
+                                self.risk_manager.record_trade_attempt()
+
+                            # PLACE THE REAL ORDER
+                            order_result = broker.place_order(order)
+                            if self.order_journal:
+                                if order_result:
+                                    self.order_journal.mark_submitted(
+                                        client_order_id, order_result.order_id, order_result.status)
+                                else:
+                                    # May or may not have reached the broker; the id
+                                    # stays burned and reconcile resolves it at restart.
+                                    self.order_journal.mark_failed(
+                                        client_order_id, 'place_order returned no response')
+
+                            # Record metrics if monitoring is enabled
+                            if self.monitoring_service:
+                                self.monitoring_service.record_trade(
+                                    action=action,
+                                    symbol=symbol,
+                                    strategy=strategy_name,
+                                    quantity=quantity,
+                                    price=price
+                                )
+                        if self.monitoring_service:
                             self.monitoring_service.update_risk_metrics({
                                 'portfolio_var': risk_assessment.get('portfolio_var', 0),
                                 'max_drawdown': risk_assessment.get('max_drawdown', 0),
                                 'sharpe_ratio': risk_assessment.get('sharpe_ratio', 0)
                             })
-                            # Record trade success metric
-                            try:
-                                if hasattr(self, 'risk_manager'):
-                                    self.risk_manager.record_trade_success(symbol)
-                            except Exception:
-                                pass
-                            
+                        # Record trade success metric
+                        try:
+                            if hasattr(self, 'risk_manager'):
+                                self.risk_manager.record_trade_success(symbol)
+                        except Exception:
+                            pass
+
+
         except Exception as e:
             logger.error(f"Error executing trades: {str(e)}")
     

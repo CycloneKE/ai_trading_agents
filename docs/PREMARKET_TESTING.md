@@ -109,6 +109,18 @@ you as the PowerShell script does.
 | Monitoring | `http://localhost:8080/health` (basic auth, any user + `MONITORING_PASSWORD`) | `"ready": true` |
 | Full smoke test | `.\.venv\Scripts\python.exe -m pytest tests\test_agent_smoke.py -q` | 1 passed |
 
+## Strategy execution modes
+
+`strategy_execution_mode` in `config/config.json` (default `"blend"`):
+
+- `blend` — strategies vote, one ensemble order per symbol (tagged
+  `ensemble` in attribution).
+- `parallel` — every strategy agreeing with the validated ensemble
+  direction places its own tagged order and keeps an independent P&L book
+  on the symbol (see Strategy Attribution on the dashboard). Dissenting
+  strategies skip, so the account never trades against itself in a cycle;
+  the per-symbol dollar cap is split between the agreeing strategies.
+
 ## Premarket notes and limits
 
 - Market data refreshes on `data_manager.update_interval` (60s in
