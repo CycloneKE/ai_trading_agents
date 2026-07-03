@@ -335,6 +335,20 @@ class TradingAgent:
             logger.error(f"Order journal init/reconcile failed: {e}")
             self.order_journal = None
 
+        # LLM weight allocator: proposes ensemble weight tilts from realized
+        # attribution on a slow cadence; hard guardrails clamp every proposal
+        # and it is a no-op without an LLM API key.
+        try:
+            from src.agent.llm_allocator import LLMAllocator
+            self.llm_allocator = LLMAllocator(
+                self.components.get('llm_orchestrator'),
+                self.components.get('strategy_manager'),
+                self.order_journal,
+                self.config.get('llm_allocator', {}))
+        except Exception as e:
+            logger.error(f"LLM allocator init failed: {e}")
+            self.llm_allocator = None
+
         # Health check loop (threaded)
         def broker_health_loop():
             while self.running:
@@ -459,6 +473,14 @@ class TradingAgent:
                 # Get latest market data
                 market_data = self.components['data_manager'].get_latest_data()
                 
+                # Slow-cadence LLM weight rebalance (self rate-limited; no-op
+                # without an LLM key or while halted).
+                if getattr(self, 'llm_allocator', None) and not self.trading_halted:
+                    try:
+                        self.llm_allocator.maybe_rebalance()
+                    except Exception as e:
+                        logger.error(f"LLM allocator error: {e}")
+
                 # Pull fill results for submitted orders into the journal so
                 # attribution and duplicate-close checks see current state.
                 if self.order_journal:
