@@ -186,6 +186,56 @@ class StrategyManager:
                 'timestamp': datetime.utcnow().isoformat()
             }
     
+    def warm_start(self, bars_by_symbol: Dict[str, list]) -> int:
+        """Seed every strategy that supports it with historical closes so
+        signals start immediately instead of after lookback_period live
+        cycles. Returns the number of (strategy, symbol) buffers seeded."""
+        seeded = 0
+        for name, strategy in self.strategies.items():
+            if not hasattr(strategy, 'seed_history'):
+                continue
+            for symbol, closes in bars_by_symbol.items():
+                try:
+                    if strategy.seed_history(symbol, closes):
+                        seeded += 1
+                except Exception as e:
+                    logger.warning(f"Warm-start failed for {name}/{symbol}: {e}")
+        if seeded:
+            logger.info(f"Warm-started {seeded} strategy/symbol history buffers")
+        return seeded
+
+    def update_performance_from_attribution(self, attribution: Dict[str, Dict[str, Any]]):
+        """Replace tracked strategy performance with REAL realized results
+        from the order journal (win rate, realized return, per-trade Sharpe,
+        drawdown of the realized P&L curve). This is what performance-based
+        rebalancing and the status API report — previously these numbers
+        came from placeholder metrics."""
+        import numpy as np
+        with self.lock:
+            for name, stats in attribution.items():
+                if name not in self.strategy_performance:
+                    continue  # e.g. manual/killswitch tags: not ensemble strategies
+                pnls = stats.get('trade_pnls') or []
+                sharpe = 0.0
+                max_dd = 0.0
+                if len(pnls) >= 2:
+                    arr = np.array(pnls, dtype=float)
+                    std = arr.std()
+                    sharpe = float(arr.mean() / std * np.sqrt(len(arr))) if std > 0 else 0.0
+                    curve = arr.cumsum()
+                    peak = np.maximum.accumulate(curve)
+                    max_dd = float((peak - curve).max())
+                self.strategy_performance[name].update({
+                    'returns': pnls[-100:],
+                    'win_rate': stats.get('win_rate', 0.0),
+                    'total_return': stats.get('realized_pnl', 0.0),
+                    'sharpe_ratio': round(sharpe, 4),
+                    'max_drawdown': round(max_dd, 4),
+                    'closed_trades': stats.get('closed_trades', 0),
+                    'last_update': datetime.utcnow().isoformat(),
+                    'source': 'order_journal',
+                })
+
     def collect_strategy_signals(self, data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         """Run every enabled strategy on the data and return its raw signal,
         keyed by strategy name. A strategy error degrades to 'hold'."""

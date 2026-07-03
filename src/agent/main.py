@@ -335,6 +335,33 @@ class TradingAgent:
             logger.error(f"Order journal init/reconcile failed: {e}")
             self.order_journal = None
 
+        # Warm-start strategy price buffers from historical daily bars so the
+        # agent can signal from the first cycle instead of being blind for
+        # lookback_period minutes after every restart.
+        try:
+            symbols = self.config.get('data_manager', {}).get('symbols', [])
+            primary = broker_manager.get_broker()
+            api = getattr(primary, 'api', None) if primary else None
+            if api is not None and symbols:
+                from datetime import timedelta
+                # feed='iex' + explicit start are required on the free data
+                # plan; the default SIP feed silently returns zero bars.
+                bars_start = (datetime.now() - timedelta(days=120)).strftime('%Y-%m-%d')
+                bars_by_symbol = {}
+                for sym in symbols:
+                    try:
+                        bars = api.get_bars(sym, '1Day', limit=60,
+                                            feed='iex', start=bars_start)
+                        closes = [float(b.c) for b in bars]
+                        if closes:
+                            bars_by_symbol[sym] = closes
+                    except Exception as e:
+                        logger.debug(f"No warm-start bars for {sym}: {e}")
+                if bars_by_symbol:
+                    self.components['strategy_manager'].warm_start(bars_by_symbol)
+        except Exception as e:
+            logger.warning(f"History warm-start failed (non-fatal): {e}")
+
         # LLM weight allocator: proposes ensemble weight tilts from realized
         # attribution on a slow cadence; hard guardrails clamp every proposal
         # and it is a no-op without an LLM API key.
@@ -491,6 +518,20 @@ class TradingAgent:
                             self.order_journal.sync_fills(primary)
                     except Exception as e:
                         logger.debug(f"Fill sync error: {e}")
+
+                # Refresh strategy performance from REAL journal attribution
+                # every 5 minutes, so performance-weighted decisions and the
+                # status API run on realized results, not placeholders.
+                if self.order_journal and \
+                        time.time() - getattr(self, '_last_perf_sync', 0) > 300:
+                    self._last_perf_sync = time.time()
+                    try:
+                        from src.agent.strategy_attribution import compute_attribution
+                        attribution = compute_attribution(self.order_journal.filled_orders())
+                        if attribution:
+                            self.components['strategy_manager'].update_performance_from_attribution(attribution)
+                    except Exception as e:
+                        logger.debug(f"Performance sync error: {e}")
 
                 if market_data:
                     # --- Stop-loss enforcement ---

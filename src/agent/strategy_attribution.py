@@ -41,6 +41,7 @@ def compute_attribution(fills: List[Dict[str, Any]],
 
         book = books.setdefault((strategy, symbol), {
             'qty': 0.0, 'avg': 0.0, 'realized': 0.0, 'closed': 0, 'wins': 0,
+            'pnls': [],
         })
         signed = qty if side == 'buy' else -qty
         pos = book['qty']
@@ -57,6 +58,7 @@ def compute_attribution(fills: List[Dict[str, Any]],
             pnl = (price - book['avg']) * close_qty * direction
             book['realized'] += pnl
             book['closed'] += 1
+            book['pnls'].append(round(pnl, 4))
             if pnl > 0:
                 book['wins'] += 1
             book['qty'] = pos + signed
@@ -71,11 +73,12 @@ def compute_attribution(fills: List[Dict[str, Any]],
     for (strategy, symbol), book in books.items():
         agg = result.setdefault(strategy, {
             'realized_pnl': 0.0, 'closed_trades': 0, 'wins': 0,
-            'unrealized_pnl': 0.0, 'open_positions': [],
+            'unrealized_pnl': 0.0, 'open_positions': [], 'trade_pnls': [],
         })
         agg['realized_pnl'] += book['realized']
         agg['closed_trades'] += book['closed']
         agg['wins'] += book['wins']
+        agg['trade_pnls'].extend(book['pnls'])
 
         if book['qty'] != 0:
             open_pos = {
