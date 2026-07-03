@@ -695,11 +695,20 @@ class TradingAgent:
                         if not price or price <= 0:
                             logger.warning(f"No valid price for {symbol} — skipping order")
                             continue
-                        quantity = target_pos_value / price
-                        
-                        if quantity <= 0:
-                            logger.warning(f"Calculated zero quantity for {symbol}")
+
+                        # Dollar-notional sizing with fractional shares, so
+                        # small accounts get properly sized positions instead
+                        # of rounding to zero or oversizing to one share.
+                        from src.agent.position_sizing import size_order
+                        sizing_cfg = self.config.get('trading', {})
+                        sized = size_order(
+                            target_pos_value, price,
+                            min_notional=sizing_cfg.get('min_notional', 5.0),
+                            allow_fractional=sizing_cfg.get('allow_fractional', True),
+                        )
+                        if not sized:
                             continue
+                        quantity = sized.quantity
 
                         if self.trading_halted:
                             logger.info(f"Trading halted; skipping {action} {symbol}")
@@ -732,7 +741,10 @@ class TradingAgent:
                             quantity=float(quantity),
                             side=action,
                             order_type='market',
-                            time_in_force='gtc',
+                            # fractional orders must be DAY (broker rule);
+                            # whole-share orders keep DAY too - the loop
+                            # re-decides every cycle, GTC adds nothing.
+                            time_in_force=sized.time_in_force,
                             client_order_id=client_order_id
                         )
 
