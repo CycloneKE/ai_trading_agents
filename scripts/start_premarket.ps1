@@ -38,6 +38,10 @@ if (-not $SkipBuild) {
     Pop-Location
 }
 
+Write-Host "Backfilling NSE history (catches up any missed days)..." -ForegroundColor Cyan
+& "$root\.venv\Scripts\python.exe" -m src.connectors.nse_scraper --backfill
+if ($LASTEXITCODE -ne 0) { Write-Host "Backfill failed (non-fatal, continuing)" -ForegroundColor Yellow }
+
 Write-Host "Running preflight checks..." -ForegroundColor Cyan
 & "$root\.venv\Scripts\python.exe" "$root\scripts\preflight.py"
 if ($LASTEXITCODE -ne 0) {

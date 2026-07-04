@@ -49,20 +49,33 @@ GRID = {
 
 
 def fetch_bars(symbols):
-    from src.connectors.alpaca_broker import AlpacaBroker
-    broker = AlpacaBroker({'paper': True})
-    if not broker.connect():
-        raise SystemExit('Cannot connect to Alpaca for historical bars')
-    start = (datetime.now() - timedelta(days=250)).strftime('%Y-%m-%d')
+    # Prefer Yahoo (free, keyless, ~500 daily bars -> much better train/test
+    # windows); fall back to Alpaca IEX (~150 bars) per symbol.
+    from src.connectors.yahoo_history import fetch_daily_closes
     bars = {}
+    missing = []
     for sym in symbols:
+        closes = fetch_daily_closes(sym, '2y')
+        if len(closes) >= 80:
+            bars[sym] = closes
+        else:
+            missing.append(sym)
+    if missing:
         try:
-            data = broker.api.get_bars(sym, '1Day', limit=150, feed='iex', start=start)
-            closes = [float(b.c) for b in data]
-            if len(closes) >= 80:
-                bars[sym] = closes
+            from src.connectors.alpaca_broker import AlpacaBroker
+            broker = AlpacaBroker({'paper': True})
+            if broker.connect():
+                start = (datetime.now() - timedelta(days=250)).strftime('%Y-%m-%d')
+                for sym in missing:
+                    try:
+                        data = broker.api.get_bars(sym, '1Day', limit=150, feed='iex', start=start)
+                        closes = [float(b.c) for b in data]
+                        if len(closes) >= 80:
+                            bars[sym] = closes
+                    except Exception as e:
+                        logger.warning(f'No bars for {sym}: {e}')
         except Exception as e:
-            logger.warning(f'No bars for {sym}: {e}')
+            logger.warning(f'Alpaca fallback unavailable: {e}')
     return bars
 
 
