@@ -71,6 +71,7 @@ const AdvancedDashboard = ({ onLogout }) => {
   const [isConnected, setIsConnected] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [drilldownSymbol, setDrilldownSymbol] = useState(null);
+  const [anomalies, setAnomalies] = useState([]);
 
   // First login: open the getting-started guide automatically.
   useEffect(() => {
@@ -82,6 +83,24 @@ const AdvancedDashboard = ({ onLogout }) => {
 
   const isHalted = !!data.status.trading_halted;
   const isOperator = data.status.role === 'operator';
+
+  // Operator-only anomaly scan: what's unusual today. 403 for viewers.
+  useEffect(() => {
+    if (!isOperator) { setAnomalies([]); return; }
+    let alive = true;
+    const load = async () => {
+      try {
+        const token = localStorage.getItem('trading_token');
+        const res = await fetch(`${getApiBase()}/api/anomalies`, { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok) return;
+        const json = await res.json();
+        if (alive) setAnomalies(json.anomalies || []);
+      } catch (e) {}
+    };
+    load();
+    const id = setInterval(load, 30000);
+    return () => { alive = false; clearInterval(id); };
+  }, [isOperator]);
 
   const toggleHalt = async () => {
     const message = isHalted
@@ -442,6 +461,30 @@ const AdvancedDashboard = ({ onLogout }) => {
           padding: '8px', fontSize: '13px', fontWeight: 800, letterSpacing: '1px',
         }}>
           ⚠ TRADING HALTED — the agent is not submitting new orders. Protective stop-losses remain active.
+        </div>
+      )}
+      {isOperator && anomalies.length > 0 && (
+        <div style={{ padding: '16px 40px 0' }}>
+          <div style={{ ...glassCard, padding: '16px 20px', borderLeft: `3px solid ${theme.colors.warning}` }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
+              <AlertTriangle size={16} color={theme.colors.warning} />
+              <span style={{ fontSize: '12px', fontWeight: 800, textTransform: 'uppercase', color: theme.colors.textSecondary }}>
+                {anomalies.length} thing{anomalies.length > 1 ? 's' : ''} worth a look
+              </span>
+            </div>
+            {anomalies.slice(0, 5).map((a, i) => {
+              const c = a.severity === 'high' ? theme.colors.danger : a.severity === 'medium' ? theme.colors.warning : theme.colors.textMuted;
+              return (
+                <div key={i}
+                  onClick={() => a.symbol && setDrilldownSymbol(a.symbol)}
+                  style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '6px 0', fontSize: '13px', cursor: a.symbol ? 'pointer' : 'default' }}>
+                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: c, flexShrink: 0 }} />
+                  <span style={{ color: theme.colors.text }}>{a.message}</span>
+                  {a.symbol && <span style={{ color: theme.colors.textMuted, fontSize: '10px' }}>↗</span>}
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
       <main style={{ padding: '40px' }}>{tabs.find(t => t.id === activeTab)?.component()}</main>
