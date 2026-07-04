@@ -300,6 +300,50 @@ def generate_synthetic(symbol: str, days: int = 730) -> List[DailyBar]:
     return bars
 
 
+def backfill_afx_history(symbols: List[str]) -> Dict[str, int]:
+    """Backfill recent daily bars from afx per-stock pages
+    (afx.kwayisi.org/nse/<sym>.html carries ~2 weeks of dated rows:
+    Date | Volume | Close | Change | Change%). Merged into the CSVs by
+    date, so re-runs and overlaps are harmless."""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    added: Dict[str, int] = {}
+    for sym in symbols:
+        try:
+            resp = requests.get(f"https://afx.kwayisi.org/nse/{sym.lower()}.html",
+                                headers=headers, timeout=20)
+            if resp.status_code != 200:
+                continue
+            parser = _NSETableParser()
+            parser.feed(resp.text)
+            bars = []
+            for row in parser.rows:
+                if len(row) < 3 or not row[0][:4].isdigit():
+                    continue
+                try:
+                    close = _parse_num(row[2])
+                    if close <= 0:
+                        continue
+                    chg = _parse_num(row[3]) if len(row) > 3 and row[3] else 0.0
+                    prev = close - chg
+                    pct = (chg / prev * 100) if prev > 0 else 0.0
+                    bars.append(DailyBar(
+                        date=row[0], symbol=sym,
+                        open=round(prev, 2), high=max(close, prev),
+                        low=min(close, prev), close=round(close, 2),
+                        volume=int(_parse_num(row[1])),
+                        change_pct=round(pct, 2), source="afx_history",
+                    ))
+                except (ValueError, IndexError):
+                    continue
+            if bars:
+                save_bars_csv(sym, bars)
+                added[sym] = len(bars)
+                logger.info(f"  {sym}: backfilled {len(bars)} historical bars")
+        except Exception as e:
+            logger.warning(f"Backfill failed for {sym}: {e}")
+    return added
+
+
 # ======================================================================
 # Storage helpers
 # ======================================================================
@@ -582,6 +626,9 @@ def main():
     elif len(sys.argv) >= 2 and sys.argv[1] == "--scrape":
         results = scraper.run_once()
         print(f"\nScraped {sum(1 for v in results.values() if v > 0)}/{len(results)} symbols")
+    elif len(sys.argv) >= 2 and sys.argv[1] == "--backfill":
+        added = backfill_afx_history(DEFAULT_SYMBOLS)
+        print(f"\nBackfilled {sum(added.values())} bars across {len(added)} symbols")
     else:
         print("=" * 55)
         print("  NSE Kenya Market Data Scraper")
@@ -589,6 +636,7 @@ def main():
         print("\nUsage:")
         print("  --seed [days]   Seed historical data (default: 730 days)")
         print("  --scrape        Run a single scrape cycle")
+        print("  --backfill      Backfill recent history from afx per-stock pages")
         print("\nSeeding historical data now...")
         scraper.seed_historical()
 
