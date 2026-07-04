@@ -158,7 +158,12 @@ const SymbolDrilldown = ({ symbol, onClose }) => {
               <div>
                 <SectionTitle icon={AlertTriangle} title="Why did / didn't it trade?" />
                 <div style={{ maxHeight: '280px', overflowY: 'auto' }}>
-                  {decisions.length === 0 && <div style={{ color: theme.colors.textMuted, fontSize: '13px' }}>No decisions recorded yet.</div>}
+                  {data.decisions_restricted && (
+                    <div style={{ color: theme.colors.textMuted, fontSize: '13px' }}>
+                      Decision internals are visible to operators only.
+                    </div>
+                  )}
+                  {!data.decisions_restricted && decisions.length === 0 && <div style={{ color: theme.colors.textMuted, fontSize: '13px' }}>No decisions recorded yet.</div>}
                   {decisions.map((d, i) => (
                     <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: `1px solid ${theme.colors.border}`, fontSize: '12px' }}>
                       <div>
