@@ -302,7 +302,7 @@ class FinnhubConnector(BaseConnector):
             start_ts = int(time.mktime(datetime.strptime(start_date, "%Y-%m-%d").timetuple()))
             end_ts = int(time.mktime(datetime.strptime(end_date, "%Y-%m-%d").timetuple()))
             url = f"{self.base_url}stock/candle?symbol={symbol}&resolution=D&from={start_ts}&to={end_ts}&token={self.api_key}"
-            resp = requests.get(url)
+            resp = requests.get(url, timeout=10)
             if resp.status_code == 200:
                 return resp.json()
             return None

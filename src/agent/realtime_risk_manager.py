@@ -432,6 +432,36 @@ class RealTimeRiskManager:
         else:
             return RiskLevel.LOW
     
+    def sync_broker_positions(self, positions, cash: float = 0.0):
+        """Mirror the broker's real positions into the risk manager.
+
+        Without this the risk manager's ``self.positions`` stays empty, so
+        trailing stops never fire and /api/risk-metrics reports zero exposure
+        while real positions sit at the broker. Called each trading loop with
+        broker.get_positions(). Preserves the high-water mark across syncs so
+        trailing stops track the peak, not just the latest price.
+        """
+        try:
+            new_positions = {}
+            for p in positions or []:
+                qty = float(getattr(p, 'quantity', 0) or 0)
+                if qty == 0:
+                    continue
+                price = float(getattr(p, 'current_price', 0) or getattr(p, 'avg_entry_price', 0) or 0)
+                prev_hwm = self.positions.get(p.symbol, {}).get('high_watermark', 0.0)
+                new_positions[p.symbol] = {
+                    'quantity': qty,
+                    'avg_price': float(getattr(p, 'avg_entry_price', 0) or 0),
+                    'market_value': float(getattr(p, 'market_value', 0) or qty * price),
+                    'high_watermark': max(prev_hwm, price),
+                }
+            self.positions = new_positions
+            if cash:
+                self.cash = float(cash)
+            self._update_portfolio_metrics()
+        except Exception as e:
+            logger.error(f"Broker position sync error: {e}")
+
     def update_market_data(self, market_data: Dict[str, Any]):
         """Update risk calculations with new market data"""
         try:

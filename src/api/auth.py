@@ -14,7 +14,13 @@ from datetime import datetime, timedelta
 SECRET_KEY = os.environ.get('SECRET_KEY')
 if not SECRET_KEY:
     raise RuntimeError("CRITICAL: SECRET_KEY environment variable is not set. Cannot start without JWT secret.")
-USERS_FILE = 'users.json'
+# Absolute path so auth works regardless of the process working directory
+# (systemd/Docker may set a different CWD than the repo root). Override with
+# USERS_FILE env for a path outside the image.
+USERS_FILE = os.environ.get(
+    'USERS_FILE',
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), 'users.json'))
 
 def hash_password(password: str) -> str:
     """Hashes a password using bcrypt."""

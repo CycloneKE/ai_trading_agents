@@ -8,11 +8,15 @@ services:
     env_file: .env
     environment:
       - PYTHONUNBUFFERED=1
-      - DB_HOST=postgres
       - REDIS_HOST=redis
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
+      # Dashboard origin(s) the API accepts; must match how traders reach it.
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3001}
+    # Ports bound to loopback only: expose the app through the Caddy TLS
+    # proxy (deploy/Caddyfile), never plaintext HTTP on a public interface.
     ports:
-      - "8080:8080" # monitoring
-      - "5001:5001" # api (config.json api.port)
+      - "127.0.0.1:8080:8080" # monitoring
+      - "127.0.0.1:5001:5001" # api (config.json api.port)
     command: ["python3", "-m", "src.agent.main"]
     depends_on:
       - redis
@@ -28,7 +32,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "3001:3001"
+      - "127.0.0.1:3001:3001"
     # Start only the Next.js frontend process
     command: ["npx", "next", "start", "-p", "3001", "-H", "0.0.0.0"]
     networks:
@@ -38,7 +42,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: trading-redis
-    command: redis-server --requirepass ${REDIS_PASSWORD:-@Sylvester214}
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
     volumes:
       - redis_data:/data
     networks:

@@ -3,6 +3,7 @@ Data Manager for coordinating all data sources and real-time data ingestion.
 Handles data aggregation, validation, and distribution to other modules.
 """
 
+import os
 import threading
 import time
 import json
@@ -214,12 +215,17 @@ class DataManager:
         try:
             redis_config = self.config.get('redis', {})
             if redis_config:
+                # Env overrides config so the same image works under Docker
+                # (REDIS_HOST=redis, REDIS_PASSWORD=...) and bare-metal.
                 self.redis_client = redis.Redis(
-                    host=redis_config.get('host', 'localhost'),
-                    port=redis_config.get('port', 6379),
+                    host=os.getenv('REDIS_HOST', redis_config.get('host', 'localhost')),
+                    port=int(os.getenv('REDIS_PORT', redis_config.get('port', 6379))),
                     db=redis_config.get('db', 0),
-                    decode_responses=True
+                    password=os.getenv('REDIS_PASSWORD') or redis_config.get('password'),
+                    decode_responses=True,
+                    socket_connect_timeout=5,
                 )
+                self.redis_client.ping()
                 logger.info("Redis connection initialized")
         except Exception as e:
             logger.warning(f"Failed to initialize Redis: {str(e)}")
