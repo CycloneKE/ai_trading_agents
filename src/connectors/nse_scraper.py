@@ -65,7 +65,14 @@ class DailyBar:
 # ======================================================================
 
 class _NSETableParser(HTMLParser):
-    """Parse HTML tables from the NSE website."""
+    """Parse HTML tables, tolerating implicit tag closes.
+
+    Real-world sources (afx.kwayisi.org) serve minified HTML5 where </td>
+    and </tr> are legally omitted: ``<td>12,043<td>339.00<tr><td>...``.
+    html.parser only fires handle_endtag for explicit closes, so a new
+    <td>/<tr> start tag must flush the still-open cell/row first — the
+    same implicit-close rule browsers apply.
+    """
     def __init__(self):
         super().__init__()
         self.in_table = False
@@ -75,25 +82,37 @@ class _NSETableParser(HTMLParser):
         self.rows: List[List[str]] = []
         self.cell_data = ""
 
+    def _flush_cell(self):
+        if self.in_cell:
+            self.current_row.append(self.cell_data.strip())
+            self.in_cell = False
+            self.cell_data = ""
+
+    def _flush_row(self):
+        self._flush_cell()
+        if self.in_row and self.current_row:
+            self.rows.append(self.current_row)
+        self.in_row = False
+        self.current_row = []
+
     def handle_starttag(self, tag, attrs):
         if tag == "table":
             self.in_table = True
         elif tag == "tr" and self.in_table:
+            self._flush_row()  # implicit </tr> (and </td>) of previous row
             self.in_row = True
-            self.current_row = []
         elif tag in ("td", "th") and self.in_row:
+            self._flush_cell()  # implicit </td> of previous cell
             self.in_cell = True
             self.cell_data = ""
 
     def handle_endtag(self, tag):
-        if tag in ("td", "th") and self.in_cell:
-            self.current_row.append(self.cell_data.strip())
-            self.in_cell = False
-        elif tag == "tr" and self.in_row:
-            if self.current_row:
-                self.rows.append(self.current_row)
-            self.in_row = False
+        if tag in ("td", "th"):
+            self._flush_cell()
+        elif tag == "tr":
+            self._flush_row()
         elif tag == "table":
+            self._flush_row()  # close any dangling row at table end
             self.in_table = False
 
     def handle_data(self, data):
@@ -192,15 +211,21 @@ def scrape_afx_kwayisi(symbols: List[str]) -> Dict[str, DailyBar]:
             if not matched:
                 continue
             try:
-                # Typical columns: Name, Price, Change, %Change, Volume
-                price = _parse_num(row[1])
+                # Live columns: Ticker | Name | Volume | Price | Change(abs)
+                # e.g. ['SCOM', 'Safaricom Plc', '2,785,507', '34.20', '+0.15']
+                if len(row) < 5:
+                    continue
+                price = _parse_num(row[3])
                 if price <= 0:
                     continue
-                chg_pct = _parse_num(row[3]) if len(row) > 3 else 0
-                vol = int(_parse_num(row[4])) if len(row) > 4 else 0
+                vol = int(_parse_num(row[2]))
+                chg_abs = _parse_num(row[4])
+                prev = price - chg_abs
+                chg_pct = (chg_abs / prev * 100) if prev > 0 else 0.0
                 results[matched] = DailyBar(
                     date=today, symbol=matched,
-                    open=price, high=price, low=price, close=round(price, 2),
+                    open=round(prev, 2), high=max(price, prev), low=min(price, prev),
+                    close=round(price, 2),
                     volume=vol, change_pct=round(chg_pct, 2), source="afx_kwayisi",
                 )
             except (ValueError, IndexError):
