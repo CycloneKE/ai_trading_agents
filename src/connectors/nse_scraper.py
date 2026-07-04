@@ -457,6 +457,11 @@ class NSEPeriodicScraper:
             csv_path = DATA_DIR / f"{sym}.csv"
             if csv_path.exists():
                 existing = load_csv(sym)
+                # Never bury real scraped bars under synthetic seed data.
+                if any((b.get('source') if isinstance(b, dict) else getattr(b, 'source', '')) != 'synthetic'
+                       for b in existing):
+                    logger.info(f"  {sym}: has real bars, skipping synthetic seed")
+                    continue
                 if len(existing) >= days // 2:
                     logger.info(f"  {sym}: already has {len(existing)} bars, skipping seed")
                     continue
