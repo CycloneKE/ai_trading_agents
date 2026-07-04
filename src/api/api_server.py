@@ -15,7 +15,10 @@ from datetime import datetime
 from functools import wraps
 from typing import Dict, Any, List
 from src.agent.sentiment_analyzer import FinancialSentimentAnalyzer
-from src.api.auth import token_required
+# NOTE: token_required is imported via the guarded try/except below, NOT here.
+# A top-level import defeats the fail-closed guard: auth.py raises RuntimeError
+# (not ImportError) when SECRET_KEY is unset, which would crash the whole agent
+# at import instead of starting with protected routes locked down.
 
 logger = logging.getLogger(__name__)
 
@@ -23,20 +26,39 @@ logger = logging.getLogger(__name__)
 # Rate Limiting
 # ---------------------------------------------------------------------------
 _request_counts = defaultdict(list)
+_rate_lock = threading.Lock()
 RATE_LIMIT = int(os.getenv('API_RATE_LIMIT', '100'))  # requests per minute
+# When behind a trusted reverse proxy (Caddy), remote_addr is always the
+# proxy, so all clients would share one bucket. Set TRUST_PROXY=1 to key
+# the limiter on the real client via X-Forwarded-For instead.
+TRUST_PROXY = os.getenv('TRUST_PROXY', '').lower() in ('1', 'true', 'yes')
+
+
+def _client_key() -> str:
+    if TRUST_PROXY:
+        xff = request.headers.get('X-Forwarded-For', '')
+        if xff:
+            return xff.split(',')[0].strip()
+    return request.remote_addr or '127.0.0.1'
 
 
 def _rate_limit_check() -> bool:
-    """Return True if the request is within rate limits."""
-    client_ip = request.remote_addr or '127.0.0.1'
+    """Return True if the request is within rate limits. Thread-safe (waitress
+    runs multiple worker threads) and self-pruning to bound memory."""
+    client_ip = _client_key()
     now = time.time()
-    # Remove entries older than 60 seconds
-    _request_counts[client_ip] = [
-        t for t in _request_counts[client_ip] if now - t < 60
-    ]
-    if len(_request_counts[client_ip]) >= RATE_LIMIT:
-        return False
-    _request_counts[client_ip].append(now)
+    with _rate_lock:
+        recent = [t for t in _request_counts[client_ip] if now - t < 60]
+        if len(recent) >= RATE_LIMIT:
+            _request_counts[client_ip] = recent
+            return False
+        recent.append(now)
+        _request_counts[client_ip] = recent
+        # Prune idle client keys so a scanner can't grow the map unbounded.
+        if len(_request_counts) > 1024:
+            for k in [k for k, v in _request_counts.items()
+                      if not v or now - v[-1] > 120]:
+                del _request_counts[k]
     return True
 
 
@@ -219,11 +241,13 @@ class TradingAPI:
         def get_status():
             """Get trading bot status (protected)."""
             try:
+                # Report the REAL running flag from the agent, not a constant —
+                # the dashboard must be able to see when the loop has stopped.
                 status = self.trading_agent.get_status()
-                status['running'] = True
                 return jsonify(status)
             except Exception as e:
-                return jsonify({'error': str(e)}), 500
+                logger.error(f"Error getting status: {e}")
+                return jsonify({'error': 'Failed to get status'}), 500
 
         @self.app.route('/api/performance', methods=['GET'])
         @require_rate_limit
@@ -233,10 +257,22 @@ class TradingAPI:
             try:
                 period = request.args.get('period', '1M')
                 report = self.trading_agent.performance_analytics.generate_performance_report(period)
+                # Flatten the headline numbers the dashboard cards read at the
+                # top level (they live under metrics/summary in the report).
+                metrics = report.get('metrics', {})
+                summary = report.get('summary', {})
+                current_value = summary.get('current_value', 0) or 0
+                total_return = metrics.get('total_return', 0) or 0
+                # Derive dollar P&L from period return and current equity.
+                initial = current_value / (1 + total_return) if total_return > -1 else current_value
+                report['portfolio_value'] = current_value
+                report['total_pnl'] = round(current_value - initial, 2)
+                report['win_rate'] = metrics.get('win_rate', 0)
+                report['total_trades'] = metrics.get('total_trades', 0)
                 return jsonify(report)
             except Exception as e:
                 logger.error(f"Error getting performance: {e}")
-                return jsonify({'error': str(e)}), 500
+                return jsonify({'error': 'Failed to generate performance report'}), 500
 
         @self.app.route('/api/trades', methods=['GET'])
         @require_rate_limit
@@ -244,13 +280,17 @@ class TradingAPI:
         def get_trades():
             """Get recent trades (protected)."""
             try:
-                offset = int(request.args.get('offset', 0))
-                limit = min(int(request.args.get('limit', 100)), 500)  # Cap at 500
+                # Clamp to non-negative: a negative offset/limit produces
+                # confusing wrap-around slices of the trade history.
+                offset = max(0, int(request.args.get('offset', 0)))
+                limit = min(max(0, int(request.args.get('limit', 100))), 500)  # Cap at 500
                 trades = self.trading_agent.performance_analytics.trades_history
                 return jsonify(trades[offset:offset + limit])
+            except (ValueError, TypeError):
+                return jsonify({'error': 'offset and limit must be integers'}), 400
             except Exception as e:
                 logger.error(f"Error getting trades: {e}")
-                return jsonify({'error': str(e)}), 500
+                return jsonify({'error': 'Failed to get trades'}), 500
 
         @self.app.route('/api/portfolio', methods=['GET'])
         @require_rate_limit
@@ -375,16 +415,18 @@ class TradingAPI:
         @require_rate_limit
         @token_required
         def get_alerts():
-            """Get recent system alerts."""
-            # Placeholder for alerts system
-            return jsonify([
-                {
-                    'id': 1,
-                    'type': 'info',
-                    'message': 'System initialized successfully',
-                    'timestamp': datetime.utcnow().isoformat()
-                }
-            ])
+            """Get recent system alerts from the risk manager (real, not mock)."""
+            try:
+                risk_manager = getattr(self.trading_agent, 'risk_manager', None)
+                if risk_manager and hasattr(risk_manager, 'get_risk_report'):
+                    report = risk_manager.get_risk_report() or {}
+                    alerts = report.get('alerts', {})
+                    recent = alerts.get('recent', []) if isinstance(alerts, dict) else alerts
+                    return jsonify(recent or [])
+                return jsonify([])
+            except Exception as e:
+                logger.error(f"Error getting alerts: {e}")
+                return jsonify([])
 
         @self.app.route('/api/news-feed', methods=['GET'])
         @require_rate_limit

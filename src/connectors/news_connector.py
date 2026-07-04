@@ -274,7 +274,7 @@ class FinnhubNewsConnector(BaseNewsConnector):
             for symbol in symbols:
                 url = f"{self.base_url}company-news?symbol={symbol}&from={week_ago}&to={today}&token={self.api_key}"
                 try:
-                    resp = requests.get(url)
+                    resp = requests.get(url, timeout=10)
                     if resp.status_code == 200:
                         results[symbol] = resp.json()
                     else:

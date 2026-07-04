@@ -21,7 +21,10 @@ class RealPriceFeed:
         """Get current price for a symbol."""
         with self.lock:
             cached = self.cache.get(symbol)
-            if cached and (datetime.now() - cached['timestamp']).seconds < self.cache_ttl:
+            # total_seconds(), not .seconds: .seconds drops the days component,
+            # so an entry aged 1 day + 10s reads as 10s "fresh" — a real order
+            # could then be sized off a days-old price on a long-running host.
+            if cached and (datetime.now() - cached['timestamp']).total_seconds() < self.cache_ttl:
                 return cached['price']
 
         try:

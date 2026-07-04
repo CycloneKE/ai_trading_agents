@@ -902,14 +902,28 @@ class MonitoringService:
                 self.wfile.write(html.encode())
             
             def _authenticate(self) -> bool:
-                """Perform basic authentication check."""
-                # Get the password from env - fallback to SECRET_KEY
-                expected_password = os.environ.get('MONITORING_PASSWORD', os.environ.get('SECRET_KEY'))
-                
-                # If no password is set at all, allow access (insecure but better than hardcoded default)
-                if not expected_password:
-                    logger.warning("No password set for monitoring. Access is unprotected.")
+                """Perform basic authentication check.
+
+                Health checks (liveness/readiness) are unauthenticated so
+                container/orchestrator probes work; everything else requires
+                a DEDICATED monitoring password. We never fall back to
+                SECRET_KEY — that key signs trading JWTs, and this port is
+                plaintext HTTP, so a sniffed Basic-auth header would let an
+                attacker mint valid API tokens.
+                """
+                if self.path.split('?')[0] in ('/health', '/'):
                     return True
+
+                expected_password = os.environ.get('MONITORING_PASSWORD')
+
+                # Fail CLOSED: no dedicated password -> metrics/status locked.
+                if not expected_password:
+                    logger.warning("MONITORING_PASSWORD not set; metrics endpoints locked down.")
+                    self.send_response(503)
+                    self.send_header('Content-Type', 'text/plain')
+                    self.end_headers()
+                    self.wfile.write(b"Monitoring auth not configured")
+                    return False
 
                 auth_header = self.headers.get('Authorization')
                 

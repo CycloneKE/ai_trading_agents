@@ -25,7 +25,7 @@ class PolygonConnector:
         
         # Test connection
         try:
-            response = requests.get(f"{self.base_url}/v2/aggs/ticker/AAPL/prev?apikey={self.api_key}")
+            response = requests.get(f"{self.base_url}/v2/aggs/ticker/AAPL/prev?apikey={self.api_key}", timeout=10)
             if response.status_code == 200:
                 self.is_connected = True
                 logger.info("Connected to Polygon.io")
@@ -39,7 +39,7 @@ class PolygonConnector:
         """Get real-time quote for a symbol."""
         try:
             url = f"{self.base_url}/v2/last/trade/{symbol}?apikey={self.api_key}"
-            response = requests.get(url)
+            response = requests.get(url, timeout=10)
             
             if response.status_code == 200:
                 data = response.json()
@@ -62,7 +62,7 @@ class PolygonConnector:
             start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
             
             url = f"{self.base_url}/v2/aggs/ticker/{symbol}/range/1/day/{start_date}/{end_date}?apikey={self.api_key}"
-            response = requests.get(url)
+            response = requests.get(url, timeout=10)
             
             if response.status_code == 200:
                 data = response.json()
@@ -88,7 +88,7 @@ class PolygonConnector:
         """Get current market status."""
         try:
             url = f"{self.base_url}/v1/marketstatus/now?apikey={self.api_key}"
-            response = requests.get(url)
+            response = requests.get(url, timeout=10)
             
             if response.status_code == 200:
                 return response.json()

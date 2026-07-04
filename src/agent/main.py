@@ -516,8 +516,16 @@ class TradingAgent:
                         primary = broker_manager.get_broker() if broker_manager else None
                         if primary and primary.is_connected:
                             self.order_journal.sync_fills(primary)
+                            # Feed real broker positions into the risk manager
+                            # so trailing stops fire and /api/risk-metrics
+                            # reflects actual exposure.
+                            if getattr(self, 'risk_manager', None):
+                                acct = primary.get_account_info()
+                                self.risk_manager.sync_broker_positions(
+                                    primary.get_positions(),
+                                    cash=acct.cash if acct else 0.0)
                     except Exception as e:
-                        logger.debug(f"Fill sync error: {e}")
+                        logger.debug(f"Position/fill sync error: {e}")
 
                 # Refresh strategy performance from REAL journal attribution
                 # every 5 minutes, so performance-weighted decisions and the
@@ -544,7 +552,14 @@ class TradingAgent:
                         try:
                             # Extract symbol-specific data
                             symbol_data = self._extract_symbol_data(market_data, symbol)
-                            
+
+                            # Never place real orders on synthetic fallback
+                            # prices — the fallback generator exists to keep
+                            # the system alive when vendors fail, not to trade.
+                            if symbol_data and symbol_data.get('source') == 'fallback':
+                                logger.debug(f"Skipping {symbol}: price is synthetic fallback, not tradeable")
+                                continue
+
                             if symbol_data:
                                 # Retrieve recent news if NLP manager is functioning and data is available
                                 symbol_news = []
@@ -732,21 +747,33 @@ class TradingAgent:
                         elif '_' in symbol:
                             asset_type = 'forex'
 
-                        # Route to appropriate broker
+                        # Route to appropriate broker. Stocks go to the
+                        # PRIMARY broker (Alpaca in prod) — the same book that
+                        # stop-losses, PDT guard, journal reconcile/fill-sync
+                        # and /api/portfolio all read. Hardcoding paper_broker
+                        # here split entries onto one book while exits fired
+                        # against another.
                         broker = None
                         if asset_type == 'crypto':
                             broker = broker_manager.get_broker('coinbase_broker')
                         elif asset_type == 'forex':
                             broker = broker_manager.get_broker('oanda_broker')
                         else:
-                            broker = broker_manager.get_broker('paper_broker')
+                            broker = broker_manager.get_broker()  # primary
                             
                         if not broker or not broker.is_connected:
                             logger.warning(f"No connected broker for {symbol} ({asset_type})")
                             continue
 
-                        # Calculate quantity (Max 2% of portfolio per trade for safety)
-                        portfolio_value = broker.get_account_info().equity if broker.get_account_info() else 100000
+                        # Calculate quantity (Max 2% of portfolio per trade for safety).
+                        # Skip the cycle if account info is unavailable rather
+                        # than sizing off a phantom $100k — on a small live
+                        # account that would massively over-size the order.
+                        account_info = broker.get_account_info()
+                        if not account_info or not account_info.equity:
+                            logger.warning(f"No account info for {symbol}; skipping (won't size off a default)")
+                            continue
+                        portfolio_value = account_info.equity
                         max_risk_per_trade = 0.02 # 2% Rule
                         
                         # Position value based on signal (confidence * position_size)
@@ -883,90 +910,7 @@ class TradingAgent:
 
         except Exception as e:
             logger.error(f"Error executing trades: {str(e)}")
-    
-    def _check_risk_limits_enhanced(self, signals: Dict[str, Any], risk_assessment: Dict[str, Any]) -> bool:
-        """Enhanced risk checking using Phase 2 risk manager"""
-        try:
-            # Use real-time risk manager if available
-            if hasattr(self, 'risk_manager'):
-                # Check each signal for risk compliance
-                for symbol, signal_data in signals.items():
-                    if isinstance(signal_data, dict):
-                        action = signal_data.get('action', 'hold')
-                        if action != 'hold':
-                            side = 'buy' if action == 'buy' else 'sell'
-                            quantity = signal_data.get('position_size', 0) * 1000  # Convert to shares
-                            price = signal_data.get('price', 100)  # Default price
-                            
-                            approved, reason, adjusted_qty = self.risk_manager.pre_trade_risk_check(
-                                symbol, side, quantity, price
-                            )
-                            
-                            if not approved:
-                                logger.warning(f"Risk check failed for {symbol}: {reason}")
-                                return False
-                
-                return True
-            else:
-                # Fallback to original risk checking
-                return self._check_risk_limits(risk_assessment)
-                
-        except Exception as e:
-            logger.error(f"Enhanced risk check error: {e}")
-            return False
-    
-    def _execute_trades_enhanced(self, signals: Dict[str, Any], risk_assessment: Dict[str, Any]):
-        """Enhanced trade execution using Phase 2 execution engine"""
-        try:
-            if not hasattr(self, 'execution_engine'):
-                # Fallback to original execution
-                return self._execute_trades(signals, risk_assessment)
-            
-            from order_execution_engine import OrderRequest, OrderType
-            
-            for symbol, signal_data in signals.items():
-                if isinstance(signal_data, dict):
-                    action = signal_data.get('action', 'hold')
-                    if action != 'hold':
-                        confidence = signal_data.get('confidence', 0)
-                        position_size = signal_data.get('position_size', 0)
-                        
-                        if confidence > 0.1 and position_size > 0:  # Minimum thresholds
-                            # Create order request
-                            order_request = OrderRequest(
-                                symbol=symbol,
-                                side=action,
-                                quantity=position_size * 1000,  # Convert to shares
-                                order_type=OrderType.LIMIT,
-                                price=signal_data.get('price', 100),
-                                strategy=signal_data.get('strategy', 'adaptive'),
-                                metadata={
-                                    'confidence': confidence,
-                                    'timestamp': datetime.utcnow().isoformat()
-                                }
-                            )
-                            
-                            # Execute through execution engine
-                            order_id = self.execution_engine.execute_order(order_request)
-                            
-                            if order_id:
-                                logger.info(f"Order submitted: {order_id} for {symbol} {action}")
-                                
-                                # Record in performance analytics
-                                if hasattr(self, 'performance_analytics'):
-                                    self.performance_analytics.record_trade(
-                                        symbol=symbol,
-                                        side=action,
-                                        quantity=order_request.quantity,
-                                        price=order_request.price if order_request.price is not None else 0.0,
-                                        strategy=order_request.strategy
-                                    )
-                            else:
-                                logger.warning(f"Order execution failed for {symbol}")
-                
-        except Exception as e:
-            logger.error(f"Enhanced trade execution error: {e}")
-    
+
     def halt_trading(self, flatten: bool = False, reason: str = 'operator request') -> Dict[str, Any]:
         """Kill switch: stop all NEW order submission immediately.
 
@@ -1234,15 +1178,19 @@ class TradingAgent:
             market_data: Current market data
         """
         try:
-            today = datetime.now().date()
-            
+            # Anchor to US Eastern (exchange time), not the host clock. The
+            # Docker image pins TZ=UTC, so datetime.now().hour would gate on
+            # 09:00 UTC (~04:00-05:00 ET, premarket) and never at the open.
+            from zoneinfo import ZoneInfo
+            et_now = datetime.now(ZoneInfo('America/New_York'))
+            today = et_now.date()
+
             # Only run once per day
             if hasattr(self, '_last_optimization_date') and self._last_optimization_date == today:
                 return
-            
-            # Only run during market hours (9 AM)
-            current_hour = datetime.now().hour
-            if current_hour != 9:
+
+            # Only run in the first market hour (09:00-09:59 ET)
+            if et_now.hour != 9:
                 return
             
             logger.info("Running daily portfolio optimization...")

@@ -351,11 +351,24 @@ const AdvancedDashboard = ({ onLogout }) => {
         </div>
         <div style={glassCard}>
           <SectionHeader title="Service Health" icon={Activity} />
-          {['Database', 'Scraper', 'RiskMgr', 'Model'].map(s => (
-            <div key={s} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-              <span>{s}</span><span style={{ color: theme.colors.primary }}>ONLINE</span>
-            </div>
-          ))}
+          {(() => {
+            const comps = data.status?.components || {};
+            const names = Object.keys(comps);
+            if (names.length === 0) {
+              return <div style={{ color: theme.colors.textMuted, fontSize: '12px' }}>Awaiting status…</div>;
+            }
+            return names.map(name => {
+              const c = comps[name] || {};
+              // A component is healthy if it reports running/connected/initialized truthy.
+              const up = c.is_running ?? c.is_connected ?? c.initialized ?? true;
+              return (
+                <div key={name} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <span style={{ textTransform: 'capitalize' }}>{name.replace(/_/g, ' ')}</span>
+                  <span style={{ color: up ? theme.colors.primary : theme.colors.danger }}>{up ? 'ONLINE' : 'OFFLINE'}</span>
+                </div>
+              );
+            });
+          })()}
         </div>
       </div>
       <div style={glassCard}>
