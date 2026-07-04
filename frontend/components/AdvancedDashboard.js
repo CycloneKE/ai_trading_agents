@@ -12,6 +12,7 @@ import {
 import AgentActivity from './AgentActivity';
 import MarketClock from './MarketClock';
 import HelpPanel from './HelpPanel';
+import SymbolDrilldown from './SymbolDrilldown';
 import { theme, glassCard } from './DashboardStyles';
 import { getApiBase } from '../utils/apiBase';
 
@@ -69,6 +70,7 @@ const AdvancedDashboard = ({ onLogout }) => {
   const [nseData, setNseData] = useState({ quotes: [], movers: { gainers: [], losers: [] }, sectors: [], status: {}, kes_usd_rate: 0.0077, market_open: false });
   const [isConnected, setIsConnected] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [drilldownSymbol, setDrilldownSymbol] = useState(null);
 
   // First login: open the getting-started guide automatically.
   useEffect(() => {
@@ -193,8 +195,8 @@ const AdvancedDashboard = ({ onLogout }) => {
             <SectionHeader title="Top Positions" icon={RefreshCw} />
             {data.positions.length > 0 ? (
               data.positions.slice(0, 5).map((pos, i) => (
-                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: `1px solid ${theme.colors.border}` }}>
-                  <span style={{ fontWeight: '700' }}>{pos.symbol}</span>
+                <div key={i} onClick={() => setDrilldownSymbol(pos.symbol)} title={`Drill into ${pos.symbol}`} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: `1px solid ${theme.colors.border}`, cursor: 'pointer' }}>
+                  <span style={{ fontWeight: '700' }}>{pos.symbol} <span style={{ color: theme.colors.textMuted, fontSize: '10px' }}>↗</span></span>
                   <span style={{ color: pos.unrealized_pl >= 0 ? theme.colors.primary : theme.colors.danger }}>{pos.unrealized_pl >= 0 ? '+' : ''}{pos.unrealized_pl_pct?.toFixed(2)}%</span>
                 </div>
               ))
@@ -408,6 +410,12 @@ const AdvancedDashboard = ({ onLogout }) => {
         </nav>
         <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
           <MarketClock />
+          <input
+            placeholder="Drill symbol…"
+            title="Type a ticker + Enter to open its drill-down"
+            onKeyDown={(e) => { if (e.key === 'Enter' && e.target.value.trim()) { setDrilldownSymbol(e.target.value.trim().toUpperCase()); e.target.value = ''; } }}
+            style={{ background: theme.colors.bgSecondary, border: `1px solid ${theme.colors.border}`, color: theme.colors.text, padding: '7px 12px', borderRadius: '8px', fontSize: '12px', width: '120px', outline: 'none' }}
+          />
           <button
             onClick={toggleHalt}
             title={isHalted ? 'Resume automated trading' : 'Stop all new orders immediately'}
@@ -435,6 +443,7 @@ const AdvancedDashboard = ({ onLogout }) => {
       )}
       <main style={{ padding: '40px' }}>{tabs.find(t => t.id === activeTab)?.component()}</main>
       {showHelp && <HelpPanel onClose={() => setShowHelp(false)} />}
+      {drilldownSymbol && <SymbolDrilldown symbol={drilldownSymbol} onClose={() => setDrilldownSymbol(null)} />}
     </div>
   );
 };
