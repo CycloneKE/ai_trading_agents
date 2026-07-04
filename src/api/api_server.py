@@ -292,6 +292,42 @@ class TradingAPI:
                 logger.error(f"Error getting trades: {e}")
                 return jsonify({'error': 'Failed to get trades'}), 500
 
+        @self.app.route('/api/symbol/<symbol>', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_symbol_drilldown(symbol):
+            """Per-symbol drill-down: decision tape, per-strategy books,
+            execution quality, and alpha-vs-hold (Phase 1 of the drill-down)."""
+            symbol = (symbol or '').upper()
+            # Validate against configured symbols to avoid unbounded lookups.
+            allowed = set(self.config.get('data_manager', {}).get('symbols', [])) | \
+                set(self.trading_agent.config.get('data_manager', {}).get('symbols', []))
+            if allowed and symbol not in {s.upper() for s in allowed}:
+                return jsonify({'error': f'Unknown or untracked symbol: {symbol}'}), 404
+
+            def produce():
+                from src.agent.symbol_drilldown import build_payload
+                dj = getattr(self.trading_agent, 'decision_journal', None)
+                oj = getattr(self.trading_agent, 'order_journal', None)
+                decisions = dj.recent(symbol, limit=100) if dj else []
+                orders = oj.orders_for_symbol(symbol, limit=100) if oj else []
+
+                def price_lookup(sym):
+                    dm = self.trading_agent.components.get('data_manager')
+                    real = dm.connectors.get('real_data') if dm else None
+                    if real:
+                        q = real.get_real_time_data(sym)
+                        return (q or {}).get('price')
+                    return None
+
+                return build_payload(symbol, decisions, orders, price_lookup)
+
+            try:
+                return jsonify(self._cached(f'symbol:{symbol}', 20, produce))
+            except Exception as e:
+                logger.error(f"Error building symbol drilldown for {symbol}: {e}")
+                return jsonify({'error': 'Failed to build symbol view'}), 500
+
         @self.app.route('/api/portfolio', methods=['GET'])
         @require_rate_limit
         @token_required
