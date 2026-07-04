@@ -432,6 +432,39 @@ class TradingAPI:
                 logger.error(f"Error getting risk metrics: {e}")
                 return jsonify({'error': str(e)}), 500
 
+        @self.app.route('/api/anomalies', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        @role_required('operator')
+        def get_anomalies():
+            """Surface what's unusual: blocked trade intent, slippage spikes,
+            systemic skip reasons, strategy disagreement, drawdown. Operator-
+            only (reads decision internals)."""
+            def produce():
+                from src.agent.anomaly_scan import scan
+                dj = getattr(self.trading_agent, 'decision_journal', None)
+                oj = getattr(self.trading_agent, 'order_journal', None)
+                decisions = dj.recent(None, limit=500) if dj else []
+                orders = oj.filled_orders() if oj else []
+                risk_report = None
+                rm = getattr(self.trading_agent, 'risk_manager', None)
+                if rm and hasattr(rm, 'get_risk_report'):
+                    try:
+                        risk_report = rm.get_risk_report()
+                    except Exception:
+                        risk_report = None
+                cap = self.trading_agent.config.get('risk_limits', {}).get('max_drawdown', 0.10)
+                cfg = self.trading_agent.config.get('anomalies', {})
+                anomalies = scan(decisions, orders, risk_report,
+                                 max_drawdown_cap=cap, config=cfg)
+                return {'anomalies': anomalies, 'count': len(anomalies)}
+
+            try:
+                return jsonify(self._cached('anomalies', 30, produce))
+            except Exception as e:
+                logger.error(f"Error scanning anomalies: {e}")
+                return jsonify({'anomalies': [], 'count': 0})
+
         @self.app.route('/api/trading/halt', methods=['POST'])
         @require_rate_limit
         @token_required
