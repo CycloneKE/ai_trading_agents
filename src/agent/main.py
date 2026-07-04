@@ -751,6 +751,14 @@ class TradingAgent:
                         
                         # Position value based on signal (confidence * position_size)
                         target_pos_value = portfolio_value * min(position_size, max_risk_per_trade)
+
+                        # Known risk windows (elections, FOMC) scale sizing
+                        # down deterministically — cycles are treated as
+                        # volatility regimes, not return predictions.
+                        if not hasattr(self, 'event_calendar'):
+                            from src.agent.event_calendar import EventCalendar
+                            self.event_calendar = EventCalendar()
+                        target_pos_value *= self.event_calendar.risk_multiplier()
                         
                         # Fetch price
                         from src.utils.real_price_feed import price_feed
