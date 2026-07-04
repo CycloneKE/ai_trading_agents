@@ -170,6 +170,17 @@ class OrderJournal:
             rows = cur.fetchall()
         return [dict(r) for r in rows]
 
+    def orders_for_symbol(self, symbol: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """Every journaled order for a symbol, newest first — the drill-down's
+        order/fill history (decision price, fill price, status, strategy)."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM orders WHERE symbol = ? ORDER BY created_at DESC LIMIT ?",
+                (symbol, limit))
+            cur.row_factory = sqlite3.Row
+            rows = cur.fetchall()
+        return [dict(r) for r in rows]
+
     def sync_fills(self, broker) -> int:
         """Resolve 'submitted' rows against the broker (fills, cancels).
 
