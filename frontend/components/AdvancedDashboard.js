@@ -81,6 +81,7 @@ const AdvancedDashboard = ({ onLogout }) => {
   }, []);
 
   const isHalted = !!data.status.trading_halted;
+  const isOperator = data.status.role === 'operator';
 
   const toggleHalt = async () => {
     const message = isHalted
@@ -416,19 +417,21 @@ const AdvancedDashboard = ({ onLogout }) => {
             onKeyDown={(e) => { if (e.key === 'Enter' && e.target.value.trim()) { setDrilldownSymbol(e.target.value.trim().toUpperCase()); e.target.value = ''; } }}
             style={{ background: theme.colors.bgSecondary, border: `1px solid ${theme.colors.border}`, color: theme.colors.text, padding: '7px 12px', borderRadius: '8px', fontSize: '12px', width: '120px', outline: 'none' }}
           />
-          <button
-            onClick={toggleHalt}
-            title={isHalted ? 'Resume automated trading' : 'Stop all new orders immediately'}
-            style={{
-              background: isHalted ? theme.colors.warning : 'transparent',
-              border: `1px solid ${isHalted ? theme.colors.warning : theme.colors.danger}`,
-              color: isHalted ? '#000' : theme.colors.danger,
-              padding: '8px 15px', borderRadius: '8px', cursor: 'pointer',
-              fontSize: '12px', fontWeight: 800, letterSpacing: '0.5px',
-            }}
-          >
-            {isHalted ? 'RESUME' : 'HALT'}
-          </button>
+          {isOperator && (
+            <button
+              onClick={toggleHalt}
+              title={isHalted ? 'Resume automated trading' : 'Stop all new orders immediately'}
+              style={{
+                background: isHalted ? theme.colors.warning : 'transparent',
+                border: `1px solid ${isHalted ? theme.colors.warning : theme.colors.danger}`,
+                color: isHalted ? '#000' : theme.colors.danger,
+                padding: '8px 15px', borderRadius: '8px', cursor: 'pointer',
+                fontSize: '12px', fontWeight: 800, letterSpacing: '0.5px',
+              }}
+            >
+              {isHalted ? 'RESUME' : 'HALT'}
+            </button>
+          )}
           <button onClick={() => setShowHelp(true)} title="Getting started guide" style={{ background: 'transparent', border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, width: '34px', height: '34px', borderRadius: '8px', cursor: 'pointer', fontSize: '14px', fontWeight: 800 }}>?</button>
           <button onClick={onLogout} style={{ background: 'transparent', border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, padding: '8px 15px', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}><LogOut size={16} /> SIGN OUT</button>
         </div>

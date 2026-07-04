@@ -111,7 +111,10 @@ def _login_succeeded(username: str):
 # Optional JWT authentication (enabled when auth module is available)
 # ---------------------------------------------------------------------------
 try:
-    from .auth import token_required, verify_password, create_token, USERS_FILE, json
+    from .auth import (token_required, role_required, verify_password,
+                       create_token, user_hash_and_role, get_user_role,
+                       USERS_FILE, json)
+    from flask import g
     AUTH_AVAILABLE = True
 except Exception as e:
     AUTH_AVAILABLE = False
@@ -130,6 +133,14 @@ except Exception as e:
                 'error': 'Authentication unavailable; service is locked down'
             }), 503
         return decorated
+
+    def role_required(*allowed_roles):
+        def decorator(f):
+            @wraps(f)
+            def decorated(*args, **kwargs):
+                return jsonify({'error': 'Authentication unavailable'}), 503
+            return decorated
+        return decorator
 
 
 class TradingAPI:
@@ -219,13 +230,16 @@ class TradingAPI:
                 with open(USERS_FILE, 'r') as f:
                     users = json.load(f)
 
-                if username in users and verify_password(users[username], password):
+                stored_hash, role = (user_hash_and_role(users[username])
+                                     if username in users else ('', 'viewer'))
+                if username in users and stored_hash and verify_password(stored_hash, password):
                     _login_succeeded(username)
-                    token = create_token(username)
+                    token = create_token(username, role)
                     return jsonify({
                         'token': token,
                         'message': 'Login successful',
-                        'username': username
+                        'username': username,
+                        'role': role,
                     })
 
                 _login_failed(username, request.remote_addr or '?')
@@ -244,6 +258,8 @@ class TradingAPI:
                 # Report the REAL running flag from the agent, not a constant —
                 # the dashboard must be able to see when the loop has stopped.
                 status = self.trading_agent.get_status()
+                # Surface the caller's role so the UI can gate operator controls.
+                status['role'] = getattr(g, 'current_role', 'viewer')
                 return jsonify(status)
             except Exception as e:
                 logger.error(f"Error getting status: {e}")
@@ -323,7 +339,14 @@ class TradingAPI:
                 return build_payload(symbol, decisions, orders, price_lookup)
 
             try:
-                return jsonify(self._cached(f'symbol:{symbol}', 20, produce))
+                payload = self._cached(f'symbol:{symbol}', 20, produce)
+                # Viewers see outcomes, not the agent's decision internals.
+                # The decision log + LLM rationale is the strategy's fingerprint.
+                if getattr(g, 'current_role', 'viewer') != 'operator':
+                    payload = dict(payload)
+                    payload['decisions'] = []
+                    payload['decisions_restricted'] = True
+                return jsonify(payload)
             except Exception as e:
                 logger.error(f"Error building symbol drilldown for {symbol}: {e}")
                 return jsonify({'error': 'Failed to build symbol view'}), 500
@@ -412,10 +435,10 @@ class TradingAPI:
         @self.app.route('/api/trading/halt', methods=['POST'])
         @require_rate_limit
         @token_required
+        @role_required('operator')
         def halt_trading():
             """Kill switch: stop all new orders; optionally flatten the book.
-
-            Body: {"confirm": true, "flatten": false}
+            Operator-only. Body: {"confirm": true, "flatten": false}
             """
             try:
                 data = request.get_json(silent=True) or {}
@@ -434,8 +457,9 @@ class TradingAPI:
         @self.app.route('/api/trading/resume', methods=['POST'])
         @require_rate_limit
         @token_required
+        @role_required('operator')
         def resume_trading():
-            """Release the kill switch."""
+            """Release the kill switch. Operator-only."""
             try:
                 data = request.get_json(silent=True) or {}
                 if data.get('confirm') is not True:

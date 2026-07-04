@@ -54,13 +54,18 @@ def main() -> int:
                         help='regenerate passwords for usernames that already exist')
     parser.add_argument('--list', action='store_true', dest='list_users',
                         help='list existing usernames and exit')
+    parser.add_argument('--role', choices=('operator', 'viewer'), default='viewer',
+                        help="account role (default: viewer; 'operator' has "
+                             "kill switch + decision internals)")
     args = parser.parse_args()
 
     users = load_users()
 
     if args.list_users:
         for name in sorted(users):
-            print(name)
+            rec = users[name]
+            role = rec.get('role', 'operator') if isinstance(rec, dict) else 'operator'
+            print(f"{name} ({role})")
         return 0
 
     if not args.usernames:
@@ -76,7 +81,7 @@ def main() -> int:
             print(f"SKIP  {username}: already exists (use --reset to regenerate password)")
             continue
         password = generate_password()
-        users[username] = hash_password(password)
+        users[username] = {'password': hash_password(password), 'role': args.role}
         created.append((username, password))
 
     if not created:
@@ -85,10 +90,10 @@ def main() -> int:
 
     save_users(users)
 
-    print(f"\n{len(created)} account(s) written to {USERS_FILE}.")
+    print(f"\n{len(created)} {args.role} account(s) written to {USERS_FILE}.")
     print('Credentials below are shown ONCE - hand each to its trader privately:\n')
     for username, password in created:
-        print(f"    {username}: {password}")
+        print(f"    {username}: {password}  [{args.role}]")
     print('\nTraders log in with these at the dashboard; tokens expire after 24h.')
     return 0
 
