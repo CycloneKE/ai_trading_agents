@@ -109,6 +109,8 @@ class TradingAgent:
         self.trading_halted = False  # kill switch: blocks all NEW orders when True
         self.components = {}
         self.order_journal = None  # initialized in start() after brokers connect
+        self.decision_journal = None
+        self._cycle_decisions = {}
         self.secure_config = SecureConfigManager()
         # Initialize database (optional)
         try:
@@ -274,12 +276,14 @@ class TradingAgent:
                 self.components['event_risk_manager'].stop()
         except Exception as e:
             logger.warning(f"Error stopping components: {e}")
-        # Close the order journal so the SQLite handle is released cleanly.
+        # Close the order/decision journals so SQLite handles release cleanly.
         try:
             if getattr(self, 'order_journal', None):
                 self.order_journal.close()
+            if getattr(self, 'decision_journal', None):
+                self.decision_journal.close()
         except Exception as e:
-            logger.warning(f"Error closing order journal: {e}")
+            logger.warning(f"Error closing journals: {e}")
         # Stop the monitoring service (HTTP server + metrics threads) so the
         # port is released and background threads don't outlive the agent.
         try:
@@ -334,6 +338,15 @@ class TradingAgent:
         except Exception as e:
             logger.error(f"Order journal init/reconcile failed: {e}")
             self.order_journal = None
+
+        # Decision journal: records WHY the agent acts or holds each cycle,
+        # for the per-symbol drill-down. Shares the journal DB.
+        try:
+            from src.agent.decision_journal import DecisionJournal
+            self.decision_journal = DecisionJournal()
+        except Exception as e:
+            logger.error(f"Decision journal init failed: {e}")
+            self.decision_journal = None
 
         # Warm-start strategy price buffers from historical daily bars so the
         # agent can signal from the first cycle instead of being blind for
@@ -544,20 +557,34 @@ class TradingAgent:
                 if market_data:
                     # --- Stop-loss enforcement ---
                     self._enforce_stop_losses(stop_loss_pct, trailing_stop_pct)
-                    
+
                     # Process each symbol individually
                     all_signals = {}
-                    
+                    # Per-cycle decision records, keyed by symbol. Populated here
+                    # and mutated by _execute_trades, then flushed once below so
+                    # the drill-down can answer "why did/didn't it trade X?".
+                    cycle = int(time.time() // loop_interval)
+                    self._cycle_decisions = {}
+
                     for symbol in symbols:
                         try:
                             # Extract symbol-specific data
                             symbol_data = self._extract_symbol_data(market_data, symbol)
+
+                            price = (symbol_data or {}).get('price') or (symbol_data or {}).get('close')
+                            self._cycle_decisions[symbol] = {
+                                'symbol': symbol, 'cycle': cycle, 'action': 'hold',
+                                'skip_reason': 'hold', 'price': price,
+                                'ensemble_confidence': 0.0, 'per_strategy': {},
+                                'llm_verdict': {}, 'executed': False,
+                            }
 
                             # Never place real orders on synthetic fallback
                             # prices — the fallback generator exists to keep
                             # the system alive when vendors fail, not to trade.
                             if symbol_data and symbol_data.get('source') == 'fallback':
                                 logger.debug(f"Skipping {symbol}: price is synthetic fallback, not tradeable")
+                                self._cycle_decisions[symbol]['skip_reason'] = 'fallback_price'
                                 continue
 
                             if symbol_data:
@@ -578,11 +605,27 @@ class TradingAgent:
                                 
                                 # Generate trading signals for this symbol
                                 symbol_signals = self.components['strategy_manager'].generate_signals(symbol_data)
-                                
+
+                                dec = self._cycle_decisions[symbol]
+                                if symbol_signals:
+                                    dec['action'] = symbol_signals.get('action', 'hold')
+                                    dec['ensemble_confidence'] = symbol_signals.get('confidence', 0.0)
+                                    dec['per_strategy'] = {
+                                        n: {'action': s.get('action'), 'confidence': s.get('confidence')}
+                                        for n, s in (symbol_signals.get('per_strategy') or {}).items()
+                                    }
+
                                 if symbol_signals and symbol_signals.get('action') != 'hold':
                                     # Validate with LLM Orchestrator
                                     validated_signal = self.components['llm_orchestrator'].validate_trade(symbol, symbol_signals, symbol_data, symbol_news)
-                                    
+                                    dec['llm_verdict'] = {
+                                        'action': validated_signal.get('action'),
+                                        'confidence': validated_signal.get('confidence'),
+                                        'reasoning': validated_signal.get('reasoning'),
+                                    }
+                                    if validated_signal.get('action') == 'hold':
+                                        dec['skip_reason'] = 'llm_veto'
+
                                     # Check for Algorithmic/Cognitive Bias
                                     is_biased = self.components['bias_detector'].detect_bias(validated_signal, symbol_data, market_data)
                                     if is_biased:
@@ -590,9 +633,14 @@ class TradingAgent:
                                         validated_signal['confidence'] *= 0.5
                                         if validated_signal['confidence'] < 0.3:
                                             validated_signal['action'] = 'hold'
-                                        
+                                            dec['skip_reason'] = 'bias_downgrade'
+
                                     if validated_signal['action'] != 'hold':
                                         all_signals[symbol] = validated_signal
+                                        dec['action'] = validated_signal['action']
+                                        # Reason set to None here means "candidate";
+                                        # _execute_trades sets the final outcome.
+                                        dec['skip_reason'] = None
                                         
                         except Exception as e:
                             logger.error(f"Error processing symbol {symbol}: {str(e)}")
@@ -602,6 +650,9 @@ class TradingAgent:
                     if self.trading_halted:
                         if all_signals:
                             logger.info(f"Trading halted; dropping signals for {list(all_signals)}")
+                            for s in all_signals:
+                                if s in self._cycle_decisions:
+                                    self._cycle_decisions[s]['skip_reason'] = 'halted'
                         all_signals = {}
 
                     # Process signals if any were generated
@@ -628,7 +679,18 @@ class TradingAgent:
                             self.components['adaptive_integration'].update_with_performance(real_performance, market_data)
                         else:
                             logger.warning("Risk limits exceeded, skipping trade execution")
-                    
+                            for s in all_signals:
+                                if s in self._cycle_decisions:
+                                    self._cycle_decisions[s]['skip_reason'] = 'risk_limits'
+
+                    # Flush this cycle's decisions (change-detected inside).
+                    if self.decision_journal and self._cycle_decisions:
+                        for dec in self._cycle_decisions.values():
+                            try:
+                                self.decision_journal.record(dec)
+                            except Exception as e:
+                                logger.debug(f"Decision record error: {e}")
+
                     # Update portfolio optimization (once daily, not every loop)
                     self._update_portfolio_optimization(market_data)
                 
@@ -730,6 +792,23 @@ class TradingAgent:
             signals: Dict of symbol -> signal data
             risk_assessment: Risk assessment results
         """
+        # Mark the final outcome for a symbol on this cycle's decision record.
+        cycle_dec = getattr(self, '_cycle_decisions', {})
+
+        def _note(sym, reason=None, executed=False, coid=None, target=None):
+            d = cycle_dec.get(sym)
+            if not d:
+                return
+            if reason is not None:
+                d['skip_reason'] = reason
+            if executed:
+                d['executed'] = True
+                d['skip_reason'] = None
+            if coid:
+                d['client_order_id'] = coid
+            if target is not None:
+                d['target_value'] = target
+
         try:
             broker_manager = self.components['broker_manager']
 
@@ -738,7 +817,10 @@ class TradingAgent:
                     action = signal_data.get('action', 'hold')
                     confidence = signal_data.get('confidence', 0.0)
                     position_size = signal_data.get('position_size', 0.0)
-                    
+
+                    if action != 'hold' and confidence <= 0.1:
+                        _note(symbol, 'below_confidence')
+
                     if action != 'hold' and confidence > 0.1 and position_size > 0:
                         # Determine asset type for routing
                         asset_type = 'stock'
@@ -763,6 +845,7 @@ class TradingAgent:
                             
                         if not broker or not broker.is_connected:
                             logger.warning(f"No connected broker for {symbol} ({asset_type})")
+                            _note(symbol, 'no_broker')
                             continue
 
                         # Calculate quantity (Max 2% of portfolio per trade for safety).
@@ -772,6 +855,7 @@ class TradingAgent:
                         account_info = broker.get_account_info()
                         if not account_info or not account_info.equity:
                             logger.warning(f"No account info for {symbol}; skipping (won't size off a default)")
+                            _note(symbol, 'no_account_info')
                             continue
                         portfolio_value = account_info.equity
                         max_risk_per_trade = 0.02 # 2% Rule
@@ -792,15 +876,20 @@ class TradingAgent:
                         price = signal_data.get('price') or price_feed.get_price(symbol)
                         if not price or price <= 0:
                             logger.warning(f"No valid price for {symbol} — skipping order")
+                            _note(symbol, 'no_price')
                             continue
+
+                        _note(symbol, target=target_pos_value)
 
                         if self.trading_halted:
                             logger.info(f"Trading halted; skipping {action} {symbol}")
+                            _note(symbol, 'halted')
                             continue
 
                         # Small-account protection: don't let an automated
                         # exit trip the pattern-day-trader rule.
                         if self._pdt_blocks_order(broker, symbol, action):
+                            _note(symbol, 'pdt_guard')
                             continue
 
                         # Execution plan: one blended order (default), or in
@@ -824,6 +913,7 @@ class TradingAgent:
                         if not executions:
                             executions = [(signal_data.get('strategy', 'ensemble'), target_pos_value)]
 
+                        symbol_executed = False
                         from src.agent.position_sizing import size_order
                         from src.agent.order_journal import make_client_order_id
                         from src.connectors.base_broker import OrderRequest
@@ -840,6 +930,7 @@ class TradingAgent:
                                 allow_fractional=sizing_cfg.get('allow_fractional', True),
                             )
                             if not sized:
+                                _note(symbol, 'min_notional')
                                 continue
                             quantity = sized.quantity
 
@@ -852,6 +943,8 @@ class TradingAgent:
                                     client_order_id, symbol, action, float(quantity),
                                     'market', strategy=strategy_name):
                                 logger.warning(f"Skipping duplicate order decision: {client_order_id}")
+                                if not symbol_executed:
+                                    _note(symbol, 'duplicate')
                                 continue
 
                             order = OrderRequest(
@@ -879,6 +972,8 @@ class TradingAgent:
                                 if order_result:
                                     self.order_journal.mark_submitted(
                                         client_order_id, order_result.order_id, order_result.status)
+                                    symbol_executed = True
+                                    _note(symbol, executed=True, coid=client_order_id)
                                 else:
                                     # May or may not have reached the broker; the id
                                     # stays burned and reconcile resolves it at restart.
