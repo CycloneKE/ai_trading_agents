@@ -3,6 +3,7 @@ Strategy Manager for coordinating multiple trading strategies.
 Handles strategy selection, ensemble methods, and performance optimization.
 """
 
+import os
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, List, Optional, Tuple
@@ -99,8 +100,24 @@ class StrategyManager:
         """
         try:
             strategies_config = self.config.get('strategies', {})
-            
+
+            # Overlay parameters promoted by the nightly practice session
+            # (scripts/practice_session.py). Only values that beat current
+            # parameters on BOTH train and test windows land in this file.
+            overlay_path = os.path.join('data', 'strategy_params.json')
+            overlay = {}
+            try:
+                if os.path.exists(overlay_path):
+                    with open(overlay_path) as f:
+                        overlay = json.load(f)
+                    if overlay:
+                        logger.info(f"Applying practiced parameter overlay: {overlay}")
+            except Exception as e:
+                logger.warning(f"Could not read strategy param overlay: {e}")
+
             for strategy_name, strategy_config in strategies_config.items():
+                if strategy_name in overlay:
+                    strategy_config = {**strategy_config, **overlay[strategy_name]}
                 strategy_type = strategy_config.get('type', 'supervised_learning')
                 
                 try:
