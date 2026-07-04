@@ -1,9 +1,13 @@
 {
   "data_manager": {
     "symbols": [
-      "AAPL", "GOOGL", "MSFT", "TSLA", "NVDA", "AMZN", "META",
-      "SCOM.NR", "EABL.NR", "EQTY.NR", "KCB.NR",
-      "BTC-USD", "ETH-USD", "SOL-USD"
+      "AAPL", "GOOGL", "MSFT", "TSLA", "NVDA",
+      "SPY", "QQQ", "XLF", "XLV", "XLE", "DIA"
+    ],
+    "nse_symbols": [
+      "SCOM", "EQTY", "KCB", "COOP", "SCBK", "SBIC", "ABSA",
+      "BAT", "EABL", "KEGN", "KNRE", "BAMB",
+      "TOTL", "CTUM", "NMG", "NCBA", "BRIT", "CIC"
     ],
     "update_interval": 60,
     "max_retries": 3,
@@ -20,9 +24,21 @@
       "alpha_vantage": {
         "enabled": true,
         "api_key": "${TRADING_ALPHA_VANTAGE_API_KEY}"
+      },
+      "finnhub": {
+        "enabled": true,
+        "api_key": "${TRADING_FINNHUB_API_KEY}"
+      },
+      "nse": {
+        "enabled": true,
+        "cache_ttl": 1800,
+        "comment": "Kenyan NSE via Afristox + Mansa APIs"
       }
     }
   },
+  "ensemble_method": "adaptive_confidence",
+  "performance_window": 30,
+  "rebalance_frequency": 7,
   "strategies": {
     "momentum": {
       "type": "technical",
@@ -68,10 +84,19 @@
       "type": "paper",
       "initial_cash": 100000,
       "commission_per_trade": 1.0,
+      "primary": false
+    },
+    "alpaca_broker": {
+      "type": "alpaca",
+      "enabled": true,
+      "api_key": "${TRADING_ALPACA_API_KEY}",
+      "api_secret": "${TRADING_ALPACA_API_SECRET}",
+      "paper": true,
       "primary": true
     },
     "coinbase_broker": {
       "type": "coinbase",
+      "enabled": false,
       "api_key": "${COINBASE_API_KEY}",
       "secret": "${COINBASE_API_SECRET}",
       "passphrase": "${COINBASE_PASSPHRASE}",

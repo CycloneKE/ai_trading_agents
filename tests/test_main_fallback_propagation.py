@@ -13,7 +13,8 @@ def test_main_propagates_top_level_use_fallback_only(monkeypatch):
         'data_manager': {'symbols': ['AAPL'], 'connectors': {'yahoo_finance': {'enabled': False}}},
         'use_fallback_only': True,
         'monitoring': {'enabled': False},
-        'strategies': {},
+        # validate_config requires a non-empty strategies section with a 'type'
+        'strategies': {'momentum': {'type': 'technical', 'enabled': True, 'weight': 1.0}},
         'risk_management': {},
         'risk_limits': {},
         'brokers': {'paper_broker': {'type': 'paper', 'initial_cash': 100000}},
