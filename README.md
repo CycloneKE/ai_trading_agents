@@ -111,3 +111,25 @@ Access the monitoring dashboard at http://localhost:8080 when running.
 ## License
 
 MIT License
+
+## Testing & Safety
+
+Run tests and startup checks without contacting external APIs by enabling the fallback-only mode.
+
+- To run the smoke startup test (uses an internal fallback generator and does not call external APIs):
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_agent_smoke.py -q
+```
+
+- You can set this behavior in configs in two ways:
+   - Add `"data_manager": { "use_fallback_only": true }` to your config file.
+   - Or set the top-level `"use_fallback_only": true` or `"test_mode": true` flag; `main.py` will propagate this into the `data_manager` sub-config.
+
+- If pytest fails during collection due to missing optional test libs (for example `bs4` or `responses`), install the test deps:
+
+```powershell
+pip install -r requirements-test.txt
+```
+
+See `docs/INFRA_AND_SAFETY_CHECKLIST.md` for longer guidance.

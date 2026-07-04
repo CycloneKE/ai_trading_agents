@@ -1,0 +1,64 @@
+import yfinance as yf
+import pandas as pd
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional
+import threading
+
+logger = logging.getLogger(__name__)
+
+class RealPriceFeed:
+    """
+    Fetch real market prices using yfinance with caching.
+    Supports US stocks, Kenyan NSE stocks, and Crypto.
+    """
+    def __init__(self):
+        self.cache = {}
+        self.cache_ttl = 60  # seconds
+        self.lock = threading.Lock()
+
+    def get_price(self, symbol: str) -> Optional[float]:
+        """Get current price for a symbol."""
+        with self.lock:
+            cached = self.cache.get(symbol)
+            if cached and (datetime.now() - cached['timestamp']).seconds < self.cache_ttl:
+                return cached['price']
+
+        try:
+            # Map NSE symbols to yfinance format (e.g., SCOM -> SCOM.NR)
+            # This is a simplified mapping for common NSE stocks
+            yf_symbol = symbol
+            if not (symbol.endswith('.NR') or '-' in symbol): 
+                # Basic heuristic: if it's 3-4 chars and not crypto/US, it might be NSE
+                # But for now, we'll rely on the config to provide correct yf symbols
+                pass
+
+            ticker = yf.Ticker(yf_symbol)
+            data = ticker.fast_info
+            price = data.last_price
+            
+            if price:
+                with self.lock:
+                    self.cache[symbol] = {
+                        'price': price,
+                        'timestamp': datetime.now()
+                    }
+                return price
+        except Exception as e:
+            logger.error(f"Error fetching price for {symbol}: {e}")
+        
+        return None
+
+    def get_batch_prices(self, symbols: List[str]) -> Dict[str, float]:
+        """Fetch prices for multiple symbols at once."""
+        results = {}
+        # yfinance doesn't have a great batch 'last price' for FastInfo, 
+        # so we'll do individual fetches but we could optimize later with download()
+        for symbol in symbols:
+            price = self.get_price(symbol)
+            if price:
+                results[symbol] = price
+        return results
+
+# Global instance
+price_feed = RealPriceFeed()

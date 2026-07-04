@@ -1,0 +1,15 @@
+# Gemini Code Assist / Firebase Studio exclude file.
+# Keep AI assistants out of credential/secret files.
+# .env.example is intentionally readable (it is a non-secret template).
+.env
+.env.local
+.env.production
+.env.*.local
+**/.env
+**/.env.local
+**/.env.production
+secrets/
+**/secrets/
+*.key
+*.pem
+!.env.example

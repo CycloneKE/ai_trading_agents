@@ -13,5 +13,5 @@ else
 fi
 
 # Run backend in foreground
-echo "Starting Python backend (main.py)..."
-exec python3 main.py
+echo "Starting Python backend (src.agent.main)..."
+exec python3 -m src.agent.main

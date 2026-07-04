@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell } from 'recharts';
+import { getApiBase } from '../utils/apiBase';
 
 const Dashboard = ({ theme, onThemeChange }) => {
   const [data, setData] = useState({
@@ -38,9 +39,9 @@ const Dashboard = ({ theme, onThemeChange }) => {
   const fetchData = useCallback(async () => {
     try {
       const [statusRes, perfRes, tradesRes] = await Promise.all([
-        fetch('http://localhost:5001/api/status'),
-        fetch('http://localhost:5001/api/performance'),
-        fetch('http://localhost:5001/api/trades')
+        fetch(`${getApiBase()}/api/status`),
+        fetch(`${getApiBase()}/api/performance`),
+        fetch(`${getApiBase()}/api/trades`)
       ]);
 
       if (statusRes.ok && perfRes.ok && tradesRes.ok) {
