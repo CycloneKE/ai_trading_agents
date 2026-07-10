@@ -629,6 +629,18 @@ const AdvancedDashboard = ({ onLogout }) => {
     );
   };
 
+  const nseSession = () => {
+    const now = new Date();
+    const eatMin = ((now.getUTCHours() + 3) % 24) * 60 + now.getUTCMinutes();
+    const day = (now.getUTCDay() + (now.getUTCHours() + 3 >= 24 ? 1 : 0)) % 7;
+    const OPEN = 9 * 60 + 30, CLOSE = 15 * 60, PRE = 9 * 60;
+    if (day === 0 || day === 6) return { label: 'CLOSED · WEEKEND', color: theme.colors.textMuted };
+    if (eatMin < PRE) return { label: `PRE-OPEN IN ${Math.floor((PRE - eatMin) / 60)}h ${(PRE - eatMin) % 60}m`, color: theme.colors.textMuted };
+    if (eatMin < OPEN) return { label: `PRE-OPEN · TRADING IN ${OPEN - eatMin}m`, color: theme.colors.warning };
+    if (eatMin < CLOSE) return { label: `OPEN · CLOSES IN ${Math.floor((CLOSE - eatMin) / 60)}h ${(CLOSE - eatMin) % 60}m`, color: theme.colors.primary };
+    return { label: 'CLOSED', color: theme.colors.warning };
+  };
+
   const renderKenyaNSE = () => {
     const positionsBySymbol = Object.fromEntries((data.positions || []).map(p => [p.symbol, p]));
     const heldCount = (nseData.quotes || []).filter(q => positionsBySymbol[q.symbol]).length;
@@ -636,7 +648,9 @@ const AdvancedDashboard = ({ onLogout }) => {
     <div style={{ display: 'grid', gap: '30px' }}>
       <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
         <HUDCard title="KES / USD" value={`${(1 / (nseData.kes_usd_rate || 0.0077)).toFixed(2)}`} subValue="Central Bank Rate" icon={Globe} color={theme.colors.secondary} />
-        <HUDCard title="NSE Status" value={nseData.market_open ? 'OPEN' : 'CLOSED'} subValue={`${nseData.quotes?.length || 0} Symbols`} icon={Activity} color={nseData.market_open ? theme.colors.primary : theme.colors.warning} />
+        {(() => { const s = nseSession(); return (
+          <HUDCard title="NSE Session" value={s.label.split(' · ')[0]} subValue={s.label.includes('·') ? s.label.split(' · ')[1] : `${nseData.quotes?.length || 0} Symbols`} icon={Activity} color={s.color} />
+        ); })()}
         <HUDCard title="Top NSE Gainer" value={nseData.movers?.gainers?.[0]?.symbol || '—'} subValue={`+${nseData.movers?.gainers?.[0]?.change_pct?.toFixed(2) || 0}%`} icon={TrendingUp} color={theme.colors.primary} />
         <HUDCard title="Top NSE Loser" value={nseData.movers?.losers?.[0]?.symbol || '—'} subValue={`${nseData.movers?.losers?.[0]?.change_pct?.toFixed(2) || 0}%`} icon={TrendingDown} color={theme.colors.danger} />
         <HUDCard title="Your NSE Positions" value={heldCount} subValue={`of ${nseData.quotes?.length || 0} watched`} icon={Shield} color={theme.colors.secondary} />
