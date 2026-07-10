@@ -7,12 +7,14 @@ import {
   TrendingUp, TrendingDown, Activity, Shield, Zap, AlertTriangle, 
   Clock, Layers, ChevronRight, Maximize2, Globe, Cpu, RefreshCw,
   Search, Info, ExternalLink, Play, Square, Pause, Terminal, Flag,
-  Lock, Bell, BarChart as BarChartIcon, LogOut
+  Lock, Bell, BarChart as BarChartIcon, LogOut, FileText, CheckCircle, XCircle, Upload
 } from 'lucide-react';
 import AgentActivity from './AgentActivity';
 import MarketClock from './MarketClock';
 import HelpPanel from './HelpPanel';
 import SymbolDrilldown from './SymbolDrilldown';
+import SectorDrilldown from './SectorDrilldown';
+import AdvancedAnalytics from './AdvancedAnalytics';
 import { theme, glassCard } from './DashboardStyles';
 import { getApiBase } from '../utils/apiBase';
 
@@ -52,7 +54,293 @@ const HUDCard = ({ title, value, subValue, icon: Icon, color }) => (
   </div>
 );
 
+const ResearchView = ({ activeTab, fetchData }) => {
+  const [uploading, setUploading] = useState(false);
+  const [uploadResult, setUploadResult] = useState(null);
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [escalations, setEscalations] = useState([]);
+  const [watchlist, setWatchlist] = useState([]);
+  const [uploads, setUploads] = useState([]);
+
+  const token = typeof window !== 'undefined' ? localStorage.getItem('trading_token') : null;
+
+  const loadResearchData = useCallback(async () => {
+    try {
+      const hRes = await fetch(`${getApiBase()}/api/operator/upload-history`, { headers: { Authorization: `Bearer ${token}` } });
+      if (hRes.ok) {
+        const hJson = await hRes.json();
+        setUploads(hJson.uploads || []);
+      }
+      
+      const escRes = await fetch(`${getApiBase()}/api/operator/escalations`, { headers: { Authorization: `Bearer ${token}` } });
+      if (escRes.ok) {
+        const escJson = await escRes.json();
+        setEscalations(escJson.escalations || []);
+      }
+      
+      const wlRes = await fetch(`${getApiBase()}/api/operator/watchlist`, { headers: { Authorization: `Bearer ${token}` } });
+      if (wlRes.ok) {
+        const wlJson = await wlRes.json();
+        setWatchlist(wlJson.watchlist || []);
+      }
+    } catch (e) {
+      console.error("Failed to fetch research data", e);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    if (activeTab === 'research') {
+      loadResearchData();
+    }
+  }, [activeTab, loadResearchData]);
+
+  const handleFileChange = (e) => {
+    if (e.target.files && e.target.files[0]) {
+      setSelectedFile(e.target.files[0]);
+      setUploadResult(null);
+    }
+  };
+
+  const handleUpload = async () => {
+    if (!selectedFile) return;
+    setUploading(true);
+    setUploadResult(null);
+    
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+    
+    try {
+      const res = await fetch(`${getApiBase()}/api/operator/upload-research`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData
+      });
+      const json = await res.json();
+      setUploadResult(json);
+      setSelectedFile(null);
+      loadResearchData();
+    } catch (e) {
+      setUploadResult({ status: 'failed', error: 'Upload request failed' });
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleResolveEscalation = async (escId, status) => {
+    try {
+      const res = await fetch(`${getApiBase()}/api/operator/escalations/${escId}/resolve`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ status, notes: `Resolved via Web Dashboard` })
+      });
+      if (res.ok) {
+        loadResearchData();
+        fetchData();
+      }
+    } catch (e) {
+      console.error("Resolution failed", e);
+    }
+  };
+
+  const handleWatchlistAction = async (symbol, action) => {
+    try {
+      const res = await fetch(`${getApiBase()}/api/operator/watchlist/${symbol}/pause`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ action })
+      });
+      if (res.ok) {
+        loadResearchData();
+      }
+    } catch (e) {
+      console.error("Watchlist action failed", e);
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '30px' }}>
+      <div style={{ display: 'flex', gap: '30px', flexWrap: 'wrap' }}>
+        <div style={{ ...glassCard, flex: 1, minWidth: '400px' }}>
+          <SectionHeader title="Research PDF Ingestion" icon={Upload} />
+          <div style={{ border: `2px dashed ${theme.colors.border}`, borderRadius: '12px', padding: '30px', textAlign: 'center', backgroundColor: 'rgba(255,255,255,0.01)', position: 'relative' }}>
+            {!selectedFile && (
+              <input type="file" onChange={handleFileChange} accept=".pdf" style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', opacity: 0, cursor: 'pointer' }} />
+            )}
+            <FileText size={40} color={selectedFile ? theme.colors.primary : theme.colors.textMuted} style={{ marginBottom: '12px' }} />
+            {selectedFile ? (
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
+                <p style={{ margin: '0 0 4px 0', fontSize: '14px', fontWeight: 'bold' }}>{selectedFile.name}</p>
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <button onClick={(e) => { e.stopPropagation(); handleUpload(); }} disabled={uploading} style={{ backgroundColor: theme.colors.primary, color: '#000', border: 'none', padding: '8px 20px', borderRadius: '8px', fontSize: '13px', fontWeight: '800', cursor: 'pointer' }}>
+                    {uploading ? 'Processing PDF...' : 'Audit Document'}
+                  </button>
+                  <button onClick={(e) => { e.stopPropagation(); setSelectedFile(null); }} style={{ backgroundColor: 'transparent', color: theme.colors.danger, border: `1px solid ${theme.colors.danger}`, padding: '8px 20px', borderRadius: '8px', fontSize: '13px', fontWeight: '800', cursor: 'pointer' }}>
+                    Clear
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <p style={{ margin: 0, fontSize: '13px', color: theme.colors.textSecondary }}>Drag & drop or click to select AIB AXYS broker report (PDF)</p>
+                <p style={{ margin: '5px 0 0 0', fontSize: '11px', color: theme.colors.textMuted }}>Directly extracts symbols, recommendations & investment rationales via LLM</p>
+              </div>
+            )}
+          </div>
+          
+          {uploadResult && (
+            <div style={{ marginTop: '20px', padding: '15px', borderRadius: '8px', border: `1px solid ${uploadResult.status === 'completed' ? theme.colors.primary : theme.colors.danger}`, backgroundColor: `${uploadResult.status === 'completed' ? theme.colors.primary : theme.colors.danger}10` }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: '700', fontSize: '14px', color: uploadResult.status === 'completed' ? theme.colors.primary : theme.colors.danger }}>
+                {uploadResult.status === 'completed' ? <CheckCircle size={16} /> : <XCircle size={16} />}
+                <span>{uploadResult.status === 'completed' ? 'Processing Complete' : 'Processing Failed'}</span>
+              </div>
+              {uploadResult.status === 'completed' ? (
+                <div style={{ fontSize: '12px', marginTop: '5px', color: theme.colors.textSecondary }}>
+                  <p style={{ margin: '3px 0' }}>Successfully processed <strong>{uploadResult.signals_processed}</strong> recommendations.</p>
+                  {uploadResult.auto_followed?.length > 0 && <p style={{ margin: '3px 0' }}>Auto-followed watchlist: <span style={{ color: theme.colors.primary }}>{uploadResult.auto_followed.join(', ')}</span></p>}
+                  {uploadResult.escalated?.length > 0 && <p style={{ margin: '3px 0' }}>Escalated to Operator queue: <span style={{ color: theme.colors.warning }}>{uploadResult.escalated.map(x => x[0]).join(', ')}</span></p>}
+                </div>
+              ) : (
+                <p style={{ fontSize: '12px', margin: '5px 0 0 0', color: theme.colors.textMuted }}>{uploadResult.error || 'Check server logs for details'}</p>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div style={{ ...glassCard, flex: 1, minWidth: '400px' }}>
+          <SectionHeader title="Ingest Archives" icon={Clock} />
+          <div style={{ maxHeight: '190px', overflowY: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, textAlign: 'left' }}>
+                  <th style={{ padding: '8px 0' }}>FILENAME</th>
+                  <th style={{ padding: '8px 0' }}>DATE</th>
+                  <th style={{ padding: '8px 0' }}>EXTRACTS</th>
+                  <th style={{ padding: '8px 0' }}>STATUS</th>
+                </tr>
+              </thead>
+              <tbody>
+                {uploads.length > 0 ? (
+                  uploads.map(u => (
+                    <tr key={u.id} style={{ borderBottom: `1px solid ${theme.colors.border}20` }}>
+                      <td style={{ padding: '10px 0', fontWeight: 'bold' }}>{u.filename}</td>
+                      <td style={{ padding: '10px 0', color: theme.colors.textMuted }}>{new Date(u.uploaded_at).toLocaleString()}</td>
+                      <td style={{ padding: '10px 0' }}>{u.signals_count} positions</td>
+                      <td style={{ padding: '10px 0', color: u.status === 'completed' ? theme.colors.primary : theme.colors.danger }}>{u.status.toUpperCase()}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr><td colSpan="4" style={{ padding: '20px 0', textAlign: 'center', color: theme.colors.textMuted }}>No documents audited yet</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div style={glassCard}>
+        <SectionHeader title="Operator Approval Queue" icon={AlertTriangle} />
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, textAlign: 'left' }}>
+                <th style={{ padding: '10px 0' }}>ASSET</th>
+                <th style={{ padding: '10px 0' }}>ACTION</th>
+                <th style={{ padding: '10px 0' }}>BROKER RATING</th>
+                <th style={{ padding: '10px 0' }}>TARGET (UPSIDE)</th>
+                <th style={{ padding: '10px 0' }}>RISK / ESCALATION REASON</th>
+                <th style={{ padding: '10px 0', textAlign: 'right' }}>DECISION</th>
+              </tr>
+            </thead>
+            <tbody>
+              {escalations.length > 0 ? (
+                escalations.map(esc => (
+                  <tr key={esc.id} style={{ borderBottom: `1px solid ${theme.colors.border}30` }}>
+                    <td style={{ padding: '12px 0', fontWeight: 'bold' }}>{esc.symbol}</td>
+                    <td style={{ padding: '12px 0' }}><span style={{ backgroundColor: `${theme.colors.accent}15`, color: theme.colors.accent, padding: '3px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: '800' }}>{esc.action.toUpperCase()}</span></td>
+                    <td style={{ padding: '12px 0' }}><span style={{ color: esc.recommendation === 'SELL' ? theme.colors.danger : theme.colors.primary, fontWeight: '700' }}>{esc.recommendation || 'UNKNOWN'}</span></td>
+                    <td style={{ padding: '12px 0' }}>
+                      {esc.target_price ? (
+                        <span>KES {esc.target_price.toFixed(2)} ({esc.upside_pct ? `${esc.upside_pct.toFixed(1)}%` : '-%'})</span>
+                      ) : (
+                        <span style={{ color: theme.colors.textMuted }}>N/A</span>
+                      )}
+                    </td>
+                    <td style={{ padding: '12px 0', maxWidth: '300px', whiteSpace: 'normal', fontSize: '12px' }}>
+                      <span style={{ color: theme.colors.warning, fontWeight: '700', marginRight: '5px' }}>[{esc.risk_level.toUpperCase()}]</span>
+                      <span style={{ color: theme.colors.textSecondary }}>{esc.reason}</span>
+                    </td>
+                    <td style={{ padding: '12px 0', textAlign: 'right' }}>
+                      <button onClick={() => handleResolveEscalation(esc.id, 'approved')} style={{ backgroundColor: theme.colors.primary, color: '#000', border: 'none', padding: '6px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: '800', cursor: 'pointer', marginRight: '8px' }}>APPROVE</button>
+                      <button onClick={() => handleResolveEscalation(esc.id, 'rejected')} style={{ backgroundColor: 'rgba(244, 63, 94, 0.1)', color: theme.colors.danger, border: `1px solid ${theme.colors.danger}`, padding: '5px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: '800', cursor: 'pointer' }}>REJECT</button>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr><td colSpan="6" style={{ padding: '30px 0', textAlign: 'center', color: theme.colors.textMuted }}>Approval queue is empty. System running autonomously.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div style={glassCard}>
+        <SectionHeader title="Active Symbol Watchlist" icon={Layers} />
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, textAlign: 'left' }}>
+                <th style={{ padding: '10px 0' }}>SYMBOL</th>
+                <th style={{ padding: '10px 0' }}>MARKET</th>
+                <th style={{ padding: '10px 0' }}>RATING</th>
+                <th style={{ padding: '10px 0' }}>TARGET PRICE</th>
+                <th style={{ padding: '10px 0' }}>SOURCE</th>
+                <th style={{ padding: '10px 0' }}>STATUS</th>
+                <th style={{ padding: '10px 0', textAlign: 'right' }}>ACTION</th>
+              </tr>
+            </thead>
+            <tbody>
+              {watchlist.length > 0 ? (
+                watchlist.map(item => (
+                  <tr key={item.symbol} style={{ borderBottom: `1px solid ${theme.colors.border}20` }}>
+                    <td style={{ padding: '12px 0', fontWeight: 'bold' }}>{item.symbol}</td>
+                    <td style={{ padding: '12px 0', color: theme.colors.textSecondary }}>{item.market.toUpperCase()}</td>
+                    <td style={{ padding: '12px 0', color: theme.colors.primary, fontWeight: '700' }}>{item.recommendation}</td>
+                    <td style={{ padding: '12px 0' }}>{item.target_price ? `KES ${item.target_price.toFixed(2)}` : 'N/A'}</td>
+                    <td style={{ padding: '12px 0', color: theme.colors.textMuted }}>{item.source}</td>
+                    <td>
+                      <span style={{ backgroundColor: item.status === 'active' ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)', color: item.status === 'active' ? theme.colors.primary : theme.colors.warning, padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold' }}>
+                        {item.status.toUpperCase()}
+                      </span>
+                    </td>
+                    <td style={{ padding: '12px 0', textAlign: 'right' }}>
+                      {item.status === 'active' ? (
+                        <button onClick={() => handleWatchlistAction(item.symbol, 'pause')} style={{ backgroundColor: 'rgba(245, 158, 11, 0.1)', color: theme.colors.warning, border: `1px solid ${theme.colors.warning}`, padding: '4px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '800', cursor: 'pointer', marginRight: '5px' }}>PAUSE</button>
+                      ) : (
+                        <button onClick={() => handleWatchlistAction(item.symbol, 'resume')} style={{ backgroundColor: 'transparent', color: theme.colors.primary, border: `1px solid ${theme.colors.primary}`, padding: '4px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '800', cursor: 'pointer', marginRight: '5px' }}>RESUME</button>
+                      )}
+                      <button onClick={() => handleWatchlistAction(item.symbol, 'remove')} style={{ backgroundColor: 'transparent', color: theme.colors.danger, border: `1px solid ${theme.colors.danger}`, padding: '4px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '800', cursor: 'pointer' }}>REMOVE</button>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr><td colSpan="7" style={{ padding: '30px 0', textAlign: 'center', color: theme.colors.textMuted }}>No symbol watchlist records. Run research ingest or approve escalations to watch assets.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const AdvancedDashboard = ({ onLogout }) => {
+
   const [activeTab, setActiveTab] = useState('overview');
   const [data, setData] = useState({
     status: { components: {} }, 
@@ -65,12 +353,14 @@ const AdvancedDashboard = ({ onLogout }) => {
     strategies: [], 
     heatmap: [], 
     systemHealth: { uptime: 0, cpu_usage: 0, memory_usage: 'stable' }, 
-    agentActivity: []
+    agentActivity: [],
+    allocation: []
   });
   const [nseData, setNseData] = useState({ quotes: [], movers: { gainers: [], losers: [] }, sectors: [], status: {}, kes_usd_rate: 0.0077, market_open: false });
   const [isConnected, setIsConnected] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [drilldownSymbol, setDrilldownSymbol] = useState(null);
+  const [drilldownSector, setDrilldownSector] = useState(null);
   const [anomalies, setAnomalies] = useState([]);
 
   // First login: open the getting-started guide automatically.
@@ -123,7 +413,7 @@ const AdvancedDashboard = ({ onLogout }) => {
     const endpoints = [
       'status', 'performance', 'positions', 'alerts', 'news-feed', 
       'risk-metrics', 'model-performance', 'strategy-performance',
-      'market-heatmap', 'system-health', 'agent-activity'
+      'market-heatmap', 'system-health', 'agent-activity', 'portfolio-allocation'
     ];
     
     const token = localStorage.getItem('trading_token');
@@ -156,7 +446,8 @@ const AdvancedDashboard = ({ onLogout }) => {
         .map(([name, stats]) => ({ name, ...stats })),
       heatmap: Array.isArray(newResponses[8]) ? newResponses[8] : prev.heatmap,
       systemHealth: newResponses[9] || prev.systemHealth,
-      agentActivity: Array.isArray(newResponses[10]) ? newResponses[10] : prev.agentActivity
+      agentActivity: Array.isArray(newResponses[10]) ? newResponses[10] : prev.agentActivity,
+      allocation: Array.isArray(newResponses[11]) ? newResponses[11] : prev.allocation
     }));
     setIsConnected(true);
   };
@@ -201,9 +492,24 @@ const AdvancedDashboard = ({ onLogout }) => {
               <AreaChart data={data.performance.portfolio_chart || []}>
                 <defs><linearGradient id="colorVal" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={theme.colors.primary} stopOpacity={0.3}/><stop offset="95%" stopColor={theme.colors.primary} stopOpacity={0}/></linearGradient></defs>
                 <CartesianGrid strokeDasharray="3 3" stroke={theme.colors.border} vertical={false} />
-                <XAxis dataKey="timestamp" stroke={theme.colors.textMuted} fontSize={10} tickFormatter={(t) => new Date(t).toLocaleTimeString()} />
-                <YAxis stroke={theme.colors.textMuted} fontSize={10} domain={['auto', 'auto']} />
-                <Tooltip contentStyle={{ backgroundColor: theme.colors.bgSecondary, border: `1px solid ${theme.colors.border}` }} />
+                <XAxis 
+                  dataKey="timestamp" 
+                  stroke={theme.colors.textMuted} 
+                  fontSize={10} 
+                  tickFormatter={(t) => {
+                    try {
+                      const d = new Date(t);
+                      const isToday = d.toDateString() === new Date().toDateString();
+                      return isToday 
+                        ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
+                        : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+                    } catch (e) {
+                      return t;
+                    }
+                  }} 
+                />
+                <YAxis stroke={theme.colors.textMuted} fontSize={10} domain={['dataMin - (dataMin * 0.01)', 'dataMax + (dataMax * 0.01)']} />
+                <Tooltip contentStyle={{ backgroundColor: theme.colors.bgSecondary, border: `1px solid ${theme.colors.border}`, color: '#fff' }} />
                 <Area type="monotone" dataKey="value" stroke={theme.colors.primary} fill="url(#colorVal)" />
               </AreaChart>
             </ResponsiveContainer>
@@ -224,6 +530,51 @@ const AdvancedDashboard = ({ onLogout }) => {
               <div style={{ padding: '20px', textAlign: 'center', color: theme.colors.textMuted }}>No active positions</div>
             )}
           </div>
+          
+          {/* Asset Allocation Pie/Donut Chart */}
+          <div style={glassCard}>
+            <SectionHeader title="Asset Allocation" icon={Layers} />
+            <div style={{ height: '170px', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', marginTop: '10px' }}>
+              {data.allocation && data.allocation.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={data.allocation}
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={50}
+                      outerRadius={70}
+                      paddingAngle={3}
+                      dataKey="value"
+                    >
+                      {data.allocation.map((entry, idx) => (
+                        <Cell key={`cell-${idx}`} fill={entry.color} />
+                      ))}
+                    </Pie>
+                    <Tooltip 
+                      contentStyle={{ backgroundColor: theme.colors.bgSecondary, border: `1px solid ${theme.colors.border}`, borderRadius: '8px', fontSize: '11px', color: '#fff' }}
+                      formatter={(value) => [`$${value.toLocaleString()}`, 'Value']}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+              ) : (
+                <div style={{ color: theme.colors.textMuted, fontSize: '12px' }}>No allocation data</div>
+              )}
+            </div>
+            {/* Scrollable Legend list */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '12px', maxHeight: '110px', overflowY: 'auto', paddingRight: '4px' }}>
+              {data.allocation && data.allocation.map((entry, idx) => (
+                <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <div style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: entry.color }} />
+                    <span style={{ fontWeight: '600' }}>{entry.name}</span>
+                  </div>
+                  <span style={{ color: theme.colors.textSecondary }}>${entry.value.toLocaleString()}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
           <div style={glassCard}>
             <SectionHeader title="Strategy Attribution" icon={Layers} />
             {data.strategies.length > 0 ? (
@@ -260,42 +611,56 @@ const AdvancedDashboard = ({ onLogout }) => {
     </div>
   );
 
-  const renderKenyaNSE = () => (
+  const renderKenyaNSE = () => {
+    const positionsBySymbol = Object.fromEntries((data.positions || []).map(p => [p.symbol, p]));
+    const heldCount = (nseData.quotes || []).filter(q => positionsBySymbol[q.symbol]).length;
+    return (
     <div style={{ display: 'grid', gap: '30px' }}>
       <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
         <HUDCard title="KES / USD" value={`${(1 / (nseData.kes_usd_rate || 0.0077)).toFixed(2)}`} subValue="Central Bank Rate" icon={Globe} color={theme.colors.secondary} />
         <HUDCard title="NSE Status" value={nseData.market_open ? 'OPEN' : 'CLOSED'} subValue={`${nseData.quotes?.length || 0} Symbols`} icon={Activity} color={nseData.market_open ? theme.colors.primary : theme.colors.warning} />
         <HUDCard title="Top NSE Gainer" value={nseData.movers?.gainers?.[0]?.symbol || '—'} subValue={`+${nseData.movers?.gainers?.[0]?.change_pct?.toFixed(2) || 0}%`} icon={TrendingUp} color={theme.colors.primary} />
         <HUDCard title="Top NSE Loser" value={nseData.movers?.losers?.[0]?.symbol || '—'} subValue={`${nseData.movers?.losers?.[0]?.change_pct?.toFixed(2) || 0}%`} icon={TrendingDown} color={theme.colors.danger} />
+        <HUDCard title="Your NSE Positions" value={heldCount} subValue={`of ${nseData.quotes?.length || 0} watched`} icon={Shield} color={theme.colors.secondary} />
       </div>
       <div style={glassCard}>
         <SectionHeader title="NSE Market Watch" icon={Flag} />
+        <div style={{ marginBottom: '12px', fontSize: '11px', color: theme.colors.textMuted }}>
+          The agent watches all {nseData.quotes?.length || 0} symbols below every cycle. Rows highlighted are symbols currently held.
+        </div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ textAlign: 'left', color: theme.colors.textMuted, fontSize: '12px', borderBottom: `1px solid ${theme.colors.border}` }}>
-                <th style={{ padding: '12px' }}>SYMBOL</th><th style={{ padding: '12px' }}>PRICE (KES)</th><th style={{ padding: '12px' }}>CHANGE</th><th style={{ padding: '12px' }}>VOLUME</th>
+                <th style={{ padding: '12px' }}>SYMBOL</th><th style={{ padding: '12px' }}>PRICE (KES)</th><th style={{ padding: '12px' }}>CHANGE</th><th style={{ padding: '12px' }}>VOLUME</th><th style={{ padding: '12px' }}>YOUR POSITION</th>
               </tr>
             </thead>
             <tbody>
               {nseData.quotes.length > 0 ? (
-                nseData.quotes.map((q, i) => (
-                  <tr key={i} style={{ borderBottom: `1px solid ${theme.colors.border}` }}>
-                    <td style={{ padding: '12px', fontWeight: '700' }}>{q.symbol}</td>
-                    <td style={{ padding: '12px' }}>{q.price_kes?.toFixed(2)}</td>
-                    <td style={{ padding: '12px', color: q.change_pct >= 0 ? theme.colors.primary : theme.colors.danger }}>{q.change_pct >= 0 ? '+' : ''}{q.change_pct?.toFixed(2)}%</td>
-                    <td style={{ padding: '12px' }}>{q.volume?.toLocaleString()}</td>
-                  </tr>
-                ))
+                nseData.quotes.map((q, i) => {
+                  const pos = positionsBySymbol[q.symbol];
+                  return (
+                    <tr key={i} style={{ borderBottom: `1px solid ${theme.colors.border}`, background: pos ? `${theme.colors.primary}15` : 'transparent' }}>
+                      <td style={{ padding: '12px', fontWeight: '700' }}>{q.symbol}</td>
+                      <td style={{ padding: '12px' }}>{q.price_kes?.toFixed(2)}</td>
+                      <td style={{ padding: '12px', color: q.change_pct >= 0 ? theme.colors.primary : theme.colors.danger }}>{q.change_pct >= 0 ? '+' : ''}{q.change_pct?.toFixed(2)}%</td>
+                      <td style={{ padding: '12px' }}>{q.volume?.toLocaleString()}</td>
+                      <td style={{ padding: '12px', color: pos ? (pos.unrealized_pl >= 0 ? theme.colors.primary : theme.colors.danger) : theme.colors.textMuted }}>
+                        {pos ? `${pos.quantity} @ ${pos.unrealized_pl >= 0 ? '+' : ''}${pos.unrealized_pl_pct?.toFixed(2)}%` : '—'}
+                      </td>
+                    </tr>
+                  );
+                })
               ) : (
-                <tr><td colSpan="4" style={{ padding: '20px', textAlign: 'center', color: theme.colors.textMuted }}>No NSE data available</td></tr>
+                <tr><td colSpan="5" style={{ padding: '20px', textAlign: 'center', color: theme.colors.textMuted }}>No NSE data available</td></tr>
               )}
             </tbody>
           </table>
         </div>
       </div>
     </div>
-  );
+    );
+  };
 
   const renderRiskView = () => {
     const rm = data.riskMetrics || {};
@@ -339,25 +704,75 @@ const AdvancedDashboard = ({ onLogout }) => {
     <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '24px' }}>
       <div style={glassCard}>
         <SectionHeader title="Intelligence Feed" icon={Globe} />
-        {data.news.map((n, i) => (
-          <div key={i} style={{ padding: '15px 0', borderBottom: `1px solid ${theme.colors.border}` }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
-              <span style={{ fontSize: '10px', fontWeight: '800', color: n.sentiment_label === 'positive' ? theme.colors.primary : (n.sentiment_label === 'negative' ? theme.colors.danger : theme.colors.textMuted) }}>{n.sentiment_label?.toUpperCase() || 'NEUTRAL'}</span>
-              <span style={{ fontSize: '10px', color: theme.colors.textMuted }}>{new Date(n.time).toLocaleTimeString()}</span>
-            </div>
-            <div style={{ fontWeight: '700', marginBottom: '5px' }}>{n.title}</div>
-            <div style={{ fontSize: '12px', color: theme.colors.textSecondary }}>{n.summary}</div>
-          </div>
-        ))}
+        {data.news.map((n, i) => {
+          const Wrapper = n.url ? 'a' : 'div';
+          const wrapperProps = n.url
+            ? { href: n.url, target: '_blank', rel: 'noopener noreferrer', style: { display: 'block', textDecoration: 'none', color: 'inherit', cursor: 'pointer' } }
+            : {};
+          return (
+            <Wrapper key={i} {...wrapperProps}>
+              <div style={{ padding: '15px 0', borderBottom: `1px solid ${theme.colors.border}` }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
+                  <span style={{ fontSize: '10px', fontWeight: '800', color: n.sentiment_label === 'positive' ? theme.colors.primary : (n.sentiment_label === 'negative' ? theme.colors.danger : theme.colors.textMuted) }}>
+                    {n.sentiment_label?.toUpperCase() || 'NEUTRAL'}{n.region === 'east_africa' ? ' · EAST AFRICA' : ''}
+                  </span>
+                  <span style={{ fontSize: '10px', color: theme.colors.textMuted }}>{new Date(n.time).toLocaleTimeString()}</span>
+                </div>
+                <div style={{ fontWeight: '700', marginBottom: '5px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  {n.title}{n.url && <ExternalLink size={12} color={theme.colors.textMuted} />}
+                </div>
+                <div style={{ fontSize: '12px', color: theme.colors.textSecondary }}>{n.summary}</div>
+                {n.source && <div style={{ fontSize: '10px', color: theme.colors.textMuted, marginTop: '4px' }}>{n.source}</div>}
+              </div>
+            </Wrapper>
+          );
+        })}
       </div>
       <div style={glassCard}>
         <SectionHeader title="Market Heatmap" icon={Layers} />
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
-          {data.heatmap.map((s, i) => (
-            <div key={i} style={{ aspectRatio: '1', borderRadius: '8px', background: s.performance >= 0 ? theme.colors.primary : theme.colors.danger, opacity: 0.1 + Math.abs(s.performance || 0) * 5, display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center', fontSize: '9px', fontWeight: '800' }}>
-              {s.sector}<br/>{((s.performance || 0) * 100).toFixed(1)}%
-            </div>
-          ))}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px' }}>
+          {data.heatmap.map((s, i) => {
+            const score = s.outlook_score ?? 0.0;
+            let cellBg = 'rgba(255, 255, 255, 0.04)';
+            if (score > 0.05) {
+              cellBg = `rgba(16, 185, 129, ${0.1 + score * 0.7})`;
+            } else if (score < -0.05) {
+              cellBg = `rgba(244, 63, 94, ${0.1 + Math.abs(score) * 0.7})`;
+            }
+            
+            return (
+              <div 
+                key={i} 
+                onClick={() => setDrilldownSector(s.sector)}
+                title={`Drill into ${s.sector} sector outlook`}
+                style={{ 
+                  aspectRatio: '1', 
+                  borderRadius: '10px', 
+                  background: cellBg,
+                  border: `1px solid ${score > 0.1 ? theme.colors.primary : (score < -0.1 ? theme.colors.danger : theme.colors.border)}40`,
+                  display: 'flex', 
+                  flexDirection: 'column',
+                  alignItems: 'center', 
+                  justifyContent: 'center', 
+                  textAlign: 'center', 
+                  fontSize: '10px', 
+                  fontWeight: '800',
+                  cursor: 'pointer',
+                  padding: '8px',
+                  boxShadow: score > 0.4 ? '0 0 10px rgba(16, 185, 129, 0.15)' : (score < -0.4 ? '0 0 10px rgba(244, 63, 94, 0.15)' : 'none'),
+                  transition: 'all 0.2s ease',
+                }}
+              >
+                <div style={{ color: '#fff', fontSize: '10px', marginBottom: '4px' }}>{s.sector}</div>
+                <div style={{ fontSize: '9px', color: theme.colors.textSecondary, fontWeight: 'normal' }}>
+                  ETF: {s.performance >= 0 ? '+' : ''}{((s.performance || 0) * 100).toFixed(1)}%
+                </div>
+                <div style={{ fontSize: '9px', color: score >= 0.1 ? theme.colors.primary : (score <= -0.1 ? theme.colors.danger : theme.colors.textMuted), fontWeight: 'bold', marginTop: '2px' }}>
+                  Score: {score >= 0 ? '+' : ''}{score.toFixed(2)}
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -408,9 +823,15 @@ const AdvancedDashboard = ({ onLogout }) => {
     </div>
   );
 
+  const renderAnalytics = () => (
+    <AdvancedAnalytics data={data} />
+  );
+
   const tabs = [
     { id: 'overview', label: 'DASHBOARD', icon: Activity, component: renderOverview },
     { id: 'nse', label: 'NSE KENYA', icon: Flag, component: renderKenyaNSE },
+    { id: 'research', label: 'RESEARCH & AUTO-PILOT', icon: FileText, component: () => <ResearchView activeTab={activeTab} fetchData={fetchData} /> },
+    { id: 'analytics', label: 'ANALYTICS', icon: TrendingUp, component: renderAnalytics },
     { id: 'risk', label: 'RISK', icon: Shield, component: renderRiskView },
     { id: 'market', label: 'MARKET', icon: Globe, component: renderMarketView },
     { id: 'system', label: 'SYSTEM', icon: Cpu, component: renderPulseView }
@@ -490,6 +911,7 @@ const AdvancedDashboard = ({ onLogout }) => {
       <main style={{ padding: '40px' }}>{tabs.find(t => t.id === activeTab)?.component()}</main>
       {showHelp && <HelpPanel onClose={() => setShowHelp(false)} />}
       {drilldownSymbol && <SymbolDrilldown symbol={drilldownSymbol} onClose={() => setDrilldownSymbol(null)} />}
+      {drilldownSector && <SectorDrilldown sector={drilldownSector} onClose={() => setDrilldownSector(null)} />}
     </div>
   );
 };

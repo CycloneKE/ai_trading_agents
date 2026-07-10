@@ -106,6 +106,7 @@ class TradingAgent:
         # derives the required env vars from the enabled config (self.config).
         self._validate_secrets()
         self.running = False
+        self.start_time = time.time()  # for /api/system-health uptime
         self.trading_halted = False  # kill switch: blocks all NEW orders when True
         self.components = {}
         self.order_journal = None  # initialized in start() after brokers connect
@@ -206,6 +207,37 @@ class TradingAgent:
             self.components['bias_detector'] = BiasDetector(self.config)
             self.components['adaptive_integration'] = AdaptiveStrategyIntegration(self.config)
 
+            # Watchlist, Escalation, Ingest, and Self-Assessment Components
+            from src.agent.escalation_manager import EscalationManager
+            from src.agent.broker_research_ingest import BrokerResearchIngest
+            from src.agent.self_assessment import SelfAssessmentEngine
+            from src.agent.swarm_state_store import SwarmStateStore
+            from src.agent.sector_specialist import SectorSpecialistManager
+            
+            em = EscalationManager()
+            self.components['escalation_manager'] = em
+            self.components['research_ingest'] = BrokerResearchIngest(
+                self.components['llm_orchestrator'],
+                em,
+                self.config
+            )
+            self.components['self_assessment'] = SelfAssessmentEngine(
+                self.components['llm_orchestrator'],
+                em,
+                self.config
+            )
+            
+            # Swarm Infrastructure & Specialist Components
+            redis_client = None
+            dm = self.components.get('data_manager')
+            if dm and getattr(dm, 'redis_client', None) is not None:
+                redis_client = dm.redis_client
+                
+            self.components['swarm_state_store'] = SwarmStateStore(redis_client)
+            self.components['sector_specialist'] = SectorSpecialistManager(
+                self.components['llm_orchestrator']
+            )
+
             
             # NLP Engine
             if NLPManager is not None:
@@ -282,8 +314,14 @@ class TradingAgent:
                 self.order_journal.close()
             if getattr(self, 'decision_journal', None):
                 self.decision_journal.close()
+            if 'escalation_manager' in self.components:
+                self.components['escalation_manager'].close()
+            if 'self_assessment' in self.components:
+                self.components['self_assessment'].close()
+            if 'sector_specialist' in self.components:
+                self.components['sector_specialist'].close()
         except Exception as e:
-            logger.warning(f"Error closing journals: {e}")
+            logger.warning(f"Error closing journals and swarm components: {e}")
         # Stop the monitoring service (HTTP server + metrics threads) so the
         # port is released and background threads don't outlive the agent.
         try:
@@ -540,6 +578,21 @@ class TradingAgent:
                     except Exception as e:
                         logger.debug(f"Position/fill sync error: {e}")
 
+                # Record current equity every cycle so the performance chart
+                # and consolidated-equity card reflect live state. Startup
+                # only seeds history from the broker's own equity curve
+                # (paper accounts return none), so without this the chart
+                # and equity figure stay frozen at zero for paper sessions.
+                try:
+                    broker_manager = self.components.get('broker_manager')
+                    primary = broker_manager.get_broker() if broker_manager else None
+                    if primary and primary.is_connected:
+                        acct = primary.get_account_info()
+                        if acct is not None and acct.equity is not None:
+                            self.performance_analytics.record_portfolio_value(float(acct.equity))
+                except Exception as e:
+                    logger.debug(f"Portfolio value recording error: {e}")
+
                 # Refresh strategy performance from REAL journal attribution
                 # every 5 minutes, so performance-weighted decisions and the
                 # status API run on realized results, not placeholders.
@@ -557,6 +610,54 @@ class TradingAgent:
                 if market_data:
                     # --- Stop-loss enforcement ---
                     self._enforce_stop_losses(stop_loss_pct, trailing_stop_pct)
+                    
+                    # Swarm: Run parallel Sector Specialists before the symbol loop
+                    import json
+                    swarm_enabled = self.config.get("swarm", {}).get("enabled", True)
+                    if swarm_enabled and 'sector_specialist' in self.components:
+                        try:
+                            sector_specialist = self.components['sector_specialist']
+                            state_store = self.components['swarm_state_store']
+                            
+                            symbols_by_sector = {}
+                            for sym in symbols:
+                                sect = sector_specialist.get_sector_for_symbol(sym)
+                                if sect not in symbols_by_sector:
+                                    symbols_by_sector[sect] = []
+                                symbols_by_sector[sect].append(sym)
+                                
+                            import concurrent.futures
+                            
+                            def run_sector_analysis_task(sect, syms):
+                                sect_news = []
+                                for sym in syms:
+                                    if isinstance(market_data, dict) and 'news_data' in market_data:
+                                        for source, source_data in market_data['news_data'].items():
+                                            data = source_data.get('data', [])
+                                            if isinstance(data, dict):
+                                                sect_news.extend([n for n in (data.get(sym) or []) if isinstance(n, dict)])
+                                            else:
+                                                sect_news.extend([n for n in data if isinstance(n, dict) and n.get('symbol') == sym])
+                                res = sector_specialist.run_sector_analysis(sect, sect_news)
+                                state_store.set(f"swarm:sector_outlook:{sect}", json.dumps(res), ttl_seconds=900)
+                                return sect, res
+                                
+                            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                                futures = {
+                                    executor.submit(run_sector_analysis_task, sect, syms): sect
+                                    for sect, syms in symbols_by_sector.items()
+                                }
+                                try:
+                                    for fut in concurrent.futures.as_completed(futures, timeout=25.0):
+                                        sect = futures[fut]
+                                        try:
+                                            fut.result()
+                                        except Exception as e:
+                                            logger.error(f"Failed parallel sector specialist for {sect}: {e}")
+                                except concurrent.futures.TimeoutError:
+                                    logger.warning("Parallel sector specialist analysis timed out after 25s. Continuing cycle.")
+                        except Exception as e:
+                            logger.error(f"Error in parallel swarm sector execution: {e}")
 
                     # Process each symbol individually
                     all_signals = {}
@@ -602,6 +703,13 @@ class TradingAgent:
 
                                 # Apply Adaptive Goals to strategy execution
                                 modified_params = self.components['adaptive_integration'].get_strategy_parameters('technical')
+                                if modified_params:
+                                    # Update momentum & reversion weights if adjusted by goals/performance
+                                    mw = modified_params.get('momentum_weight')
+                                    mr = modified_params.get('mean_reversion_weight')
+                                    if mw is not None and mr is not None:
+                                        self.components['strategy_manager'].strategy_weights['momentum'] = mw
+                                        self.components['strategy_manager'].strategy_weights['mean_reversion'] = mr
                                 
                                 # Generate trading signals for this symbol
                                 symbol_signals = self.components['strategy_manager'].generate_signals(symbol_data)
@@ -616,8 +724,52 @@ class TradingAgent:
                                     }
 
                                 if symbol_signals and symbol_signals.get('action') != 'hold':
+                                    # Modify position size dynamically based on adaptive integration
+                                    confidence = symbol_signals.get('confidence', 0.5)
+                                    broker_manager = self.components.get('broker_manager')
+                                    account_val = 100000.0
+                                    if broker_manager:
+                                        primary = broker_manager.get_broker()
+                                        if primary:
+                                            try:
+                                                info = primary.get_account_info()
+                                                if info:
+                                                    account_val = info.equity
+                                            except Exception:
+                                                pass
+                                    pos_value = self.components['adaptive_integration'].get_position_size(
+                                        symbol, confidence, account_val
+                                    )
+                                    symbol_signals['position_size'] = pos_value / account_val if account_val > 0 else 0.0
+
+                                    # Fetch active research context for this symbol if available in watchlist
+                                    research_context = None
+                                    em = self.components.get('escalation_manager')
+                                    if em:
+                                        watchlist_items = em.get_active_watchlist()
+                                        for item in watchlist_items:
+                                            if item.get('symbol') == symbol:
+                                                research_context = item
+                                                break
+                                    
+                                    # Retrieve sector outlook from SwarmStateStore
+                                    sector_outlook = None
+                                    ss = self.components.get('sector_specialist')
+                                    state_store = self.components.get('swarm_state_store')
+                                    if ss and state_store:
+                                        sect = ss.get_sector_for_symbol(symbol)
+                                        cached_out = state_store.get(f"swarm:sector_outlook:{sect}")
+                                        if cached_out:
+                                            try:
+                                                sector_outlook = json.loads(cached_out)
+                                            except Exception:
+                                                pass
+
                                     # Validate with LLM Orchestrator
-                                    validated_signal = self.components['llm_orchestrator'].validate_trade(symbol, symbol_signals, symbol_data, symbol_news)
+                                    validated_signal = self.components['llm_orchestrator'].validate_trade(
+                                        symbol, symbol_signals, symbol_data, symbol_news, 
+                                        research_context=research_context, sector_outlook=sector_outlook
+                                    )
                                     dec['llm_verdict'] = {
                                         'action': validated_signal.get('action'),
                                         'confidence': validated_signal.get('confidence'),
@@ -693,6 +845,31 @@ class TradingAgent:
 
                     # Update portfolio optimization (once daily, not every loop)
                     self._update_portfolio_optimization(market_data)
+
+                    # Self-assessment: once daily (aligned to end-of-day).
+                    assessment_interval = self.config.get('self_assessment', {}).get('assessment_interval', 390)
+                    if cycle > 0 and cycle % assessment_interval == 0:
+                        try:
+                            logger.info("Executing periodic self-assessment and self-improvement loop...")
+                            engine = self.components.get('self_assessment')
+                            if engine:
+                                plan = engine.run_assessment(
+                                    self.decision_journal,
+                                    self.order_journal,
+                                    self.performance_analytics,
+                                    cycles_to_review=assessment_interval
+                                )
+                                # Auto-apply safe changes
+                                auto_applied, escalated = engine.apply_improvements(plan, require_approval=False)
+                                logger.info(f"Retrospective assessment completed: applied {len(auto_applied)} auto-improvements, escalated {len(escalated)} structural proposals.")
+                                
+                                # Prune expired local cache entries to prevent memory leaks in local offline mode
+                                if state_store:
+                                    pruned = state_store.clear_expired()
+                                    if pruned > 0:
+                                        logger.info(f"SwarmStateStore: Pruned {pruned} expired local cache entries.")
+                        except Exception as e:
+                            logger.error(f"Error in self-assessment cycle: {e}")
                 
                 # Calculate sleep time to maintain consistent loop interval
                 loop_duration = time.time() - loop_start_time

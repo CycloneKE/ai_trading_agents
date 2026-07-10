@@ -61,42 +61,42 @@ def main():
     
     # Check files
     files_ok, missing_files = check_files()
-    status_icon = "✓" if files_ok else "✗"
+    status_icon = "[OK]" if files_ok else "[FAIL]"
     print(f"{status_icon} Required Files: {'OK' if files_ok else 'Missing: ' + ', '.join(missing_files)}")
     
     # Check API server
     api_ok, api_msg = check_api_server()
-    status_icon = "✓" if api_ok else "✗"
+    status_icon = "[OK]" if api_ok else "[FAIL]"
     print(f"{status_icon} API Server: {api_msg}")
     
     # Check resources
     resources = check_system_resources()
     if resources.get('critical', False):
-        status_icon = "🔥"
-        status_msg = f"CRITICAL - CPU {resources['cpu']:.1f}%, Memory {resources['memory']:.1f}%"
+        status_icon = "[CRITICAL]"
+        status_msg = f"CPU {resources['cpu']:.1f}%, Memory {resources['memory']:.1f}%"
     elif resources['healthy']:
-        status_icon = "✓"
+        status_icon = "[OK]"
         status_msg = f"CPU {resources['cpu']:.1f}%, Memory {resources['memory']:.1f}%, Disk {resources['disk']:.1f}%"
     else:
-        status_icon = "⚠"
+        status_icon = "[WARN]"
         status_msg = f"HIGH - CPU {resources['cpu']:.1f}%, Memory {resources['memory']:.1f}%"
     
     print(f"{status_icon} System Resources: {status_msg}")
     
     if resources.get('critical', False):
-        print("🚨 CRITICAL: System resources critically high!")
-        print("💡 Run: python emergency_fix.py")
+        print("[CRITICAL] System resources critically high!")
+        print("[TIP] Run: python emergency_fix.py")
     
     # Overall status
     print()
     if files_ok and api_ok and resources['healthy']:
-        print("✓ System is healthy and running")
+        print("[OK] System is healthy and running")
     elif not api_ok:
-        print("✗ System not responding - check if it's running")
-        print("💡 Run: python quick_start_system.py")
+        print("[FAIL] System not responding - check if it's running")
+        print("[TIP] Run: python quick_start_system.py")
     else:
-        print("⚠ System has issues - run diagnostics")
-        print("💡 Run: python enhanced_error_handler.py")
+        print("[WARN] System has issues - run diagnostics")
+        print("[TIP] Run: python enhanced_error_handler.py")
 
 if __name__ == '__main__':
     main()

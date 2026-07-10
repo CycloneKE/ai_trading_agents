@@ -161,5 +161,27 @@
     "file": "logs/trading_agent.log",
     "max_size_mb": 10,
     "backup_count": 5
+  },
+  "research_ingest": {
+    "enabled": true,
+    "upload_dir": "data/research_uploads",
+    "auto_follow_rules": {
+      "require_existing_symbol": true,
+      "allowed_recommendations": ["BUY", "HOLD", "ACCUMULATE"],
+      "min_upside_pct": 5.0
+    }
+  },
+  "self_assessment": {
+    "assessment_interval": 390
+  },
+  "swarm": {
+    "enabled": true,
+    "redis_enabled": true,
+    "agents": {
+      "pdf_extractor": "anthropic/claude-sonnet-4.6",
+      "sector_specialist": "anthropic/claude-sonnet-4.6",
+      "sentiment_analyst": "meta-llama/llama-3.3-70b-instruct",
+      "synthesizer": "deepseek/deepseek-r1"
+    }
   }
 }

@@ -24,7 +24,7 @@ class LLMOrchestrator:
             logger.warning("No LLM API keys found. LLM Orchestrator will be disabled.")
             self.enabled = False
 
-    def validate_trade(self, symbol: str, strategy_signal: Dict[str, Any], market_data: Dict[str, Any], news_data: list = None) -> Dict[str, Any]:
+    def validate_trade(self, symbol: str, strategy_signal: Dict[str, Any], market_data: Dict[str, Any], news_data: list = None, research_context: Dict[str, Any] = None, sector_outlook: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Takes the base strategy signal and validates it against current market context using an LLM.
         """
@@ -49,60 +49,95 @@ class LLMOrchestrator:
         # Extract volatility explicitly for the prompt
         volatility = market_data.get('volatility', 'Unknown')
         if isinstance(market_data, dict) and 'data' in market_data and symbol in market_data['data']:
-             sym_data = market_data['data'][symbol]
-             if isinstance(sym_data, dict) and 'close' in sym_data and 'open' in sym_data:
-                 volatility = f"{abs((sym_data['close'] - sym_data['open']) / sym_data['open']):.4f} (Intraday proxy)"
+              sym_data = market_data['data'][symbol]
+              if isinstance(sym_data, dict) and 'close' in sym_data and 'open' in sym_data:
+                  volatility = f"{abs((sym_data['close'] - sym_data['open']) / sym_data['open']):.4f} (Intraday proxy)"
 
         user_prompt = f"Target Asset: {symbol}\n" \
                       f"Proposed Ensemble Signal: {json.dumps(strategy_signal)}\n" \
                       f"Market Data Context (Close Price): {json.dumps(market_data.get('close', 'Unknown'))}\n" \
                       f"Current Asset Volatility: {volatility}\n"
         
+        if research_context:
+            user_prompt += (
+                f"Broker Research Context (AIB AXYS): "
+                f"Recommendation={research_context.get('recommendation')}, "
+                f"Target Price={research_context.get('target_price')}, "
+                f"Rationale: {research_context.get('rationale')}\n"
+            )
+
+        if sector_outlook:
+            user_prompt += (
+                f"Sector Outlook Context: "
+                f"Outlook Score={sector_outlook.get('outlook_score')}\n"
+                f"Sector Analysis: {sector_outlook.get('updated_profile_text')}\n"
+                f"Sector Risks: {json.dumps(sector_outlook.get('risk_factors', []))}\n"
+            )
+
         if news_data:
             user_prompt += f"Recent News Context: {json.dumps(news_data[:3])}\n"
             
         user_prompt += "\nEvaluate this signal critically. Do you agree with the ensemble? Provide your validated JSON output now."
         
+        # Resolve dynamic model config
+        model = self.config.get("swarm", {}).get("agents", {}).get("synthesizer", "meta-llama/llama-3.1-8b-instruct")
+        
         try:
             if self.primary_provider == "openrouter" and self.openrouter_api_key:
-                return self._call_openrouter(system_prompt, user_prompt, strategy_signal)
-            elif self.gemini_api_key:
-                return self._call_gemini(system_prompt, user_prompt, strategy_signal)
-            else:
-                return strategy_signal
+                try:
+                    return self._call_openrouter(system_prompt, user_prompt, strategy_signal, model_override=model)
+                except Exception as openrouter_err:
+                    logger.warning(f"OpenRouter validation failed ({openrouter_err}). Falling back to Gemini...")
+            
+            if self.gemini_api_key:
+                return self._call_gemini(system_prompt, user_prompt, strategy_signal, model_override=model)
+            
+            return strategy_signal
         except Exception as e:
             logger.error(f"LLM validation failed: {str(e)}. Falling back to base signal.")
             return strategy_signal
 
-    def propose_json(self, system_prompt: str, user_prompt: str):
-        """Generic JSON completion (used by the weight allocator).
+    def propose_json(self, system_prompt: str, user_prompt: str, model_override: Optional[str] = None):
+        """Generic JSON completion (used by the weight allocator and sector specialists).
 
         Returns the parsed dict, or None when no provider is configured or
-        the call/parse fails — callers must treat None as 'no opinion'.
+        the call/parse fails.
         """
         if not self.enabled:
             return None
         try:
             if self.primary_provider == "openrouter" and self.openrouter_api_key:
-                result = self._call_openrouter(system_prompt, user_prompt, None)
-            elif self.gemini_api_key:
-                result = self._call_gemini(system_prompt, user_prompt, None)
-            else:
-                return None
-            return result if isinstance(result, dict) else None
+                try:
+                    result = self._call_openrouter(system_prompt, user_prompt, None, model_override=model_override)
+                    if result:
+                        return result if isinstance(result, dict) else None
+                except Exception as openrouter_err:
+                    logger.warning(f"OpenRouter propose_json failed ({openrouter_err}). Falling back to Gemini...")
+            
+            if self.gemini_api_key:
+                result = self._call_gemini(system_prompt, user_prompt, None, model_override=model_override)
+                return result if isinstance(result, dict) else None
+            
+            return None
         except Exception as e:
             logger.error(f"LLM propose_json failed: {e}")
             return None
 
-    def _call_openrouter(self, system_prompt: str, user_prompt: str, fallback_signal: Dict[str, Any]) -> Dict[str, Any]:
+    def _call_openrouter(self, system_prompt: str, user_prompt: str, fallback_signal: Optional[Dict[str, Any]], model_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
         url = "https://openrouter.ai/api/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.openrouter_api_key}",
             "HTTP-Referer": "http://localhost:8000",
             "Content-Type": "application/json"
         }
+        
+        model = model_override or self.config.get("swarm", {}).get("agents", {}).get("synthesizer", "meta-llama/llama-3.1-8b-instruct")
+        
+        # Allow up to 45 seconds for DeepSeek-R1 or o1 models to produce thinking tokens
+        timeout = 45 if ("r1" in model.lower() or "o1" in model.lower()) else 15
+        
         data = {
-            "model": "meta-llama/llama-3.1-8b-instruct", # Using a fast model, can be configured
+            "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -110,20 +145,27 @@ class LLMOrchestrator:
             "response_format": {"type": "json_object"}
         }
         
-        response = requests.post(url, headers=headers, json=data, timeout=10)
+        response = requests.post(url, headers=headers, json=data, timeout=timeout)
         response.raise_for_status()
         
         result_text = response.json()['choices'][0]['message']['content']
         try:
             result = json.loads(result_text)
-            result['strategy'] = 'llm_orchestrated'
+            if isinstance(result, dict) and fallback_signal is not None:
+                result['strategy'] = 'llm_orchestrated'
             return result
         except json.JSONDecodeError:
-            logger.error("Failed to decode OpenRouter JSON response.")
+            logger.error(f"Failed to decode OpenRouter JSON response. Model: {model}. Text: {result_text}")
             return fallback_signal
 
-    def _call_gemini(self, system_prompt: str, user_prompt: str, fallback_signal: Dict[str, Any]) -> Dict[str, Any]:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.gemini_api_key}"
+    def _call_gemini(self, system_prompt: str, user_prompt: str, fallback_signal: Optional[Dict[str, Any]], model_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        # Map dynamic model to gemini endpoints if applicable, otherwise default
+        model = model_override or "gemini-2.0-flash"
+        if "/" in model:
+            # e.g. openrouter model passed to gemini override: fall back to default
+            model = "gemini-2.0-flash"
+            
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.gemini_api_key}"
         headers = {
             "Content-Type": "application/json"
         }
@@ -137,14 +179,16 @@ class LLMOrchestrator:
             }
         }
         
-        response = requests.post(url, headers=headers, json=data, timeout=10)
+        response = requests.post(url, headers=headers, json=data, timeout=15)
         response.raise_for_status()
         
         result_text = response.json()['candidates'][0]['content']['parts'][0]['text']
         try:
             result = json.loads(result_text)
-            result['strategy'] = 'llm_orchestrated'
+            if isinstance(result, dict) and fallback_signal is not None:
+                result['strategy'] = 'llm_orchestrated'
             return result
         except (json.JSONDecodeError, KeyError):
-            logger.error("Failed to decode Gemini JSON response.")
+            logger.error(f"Failed to decode Gemini JSON response. Text: {result_text}")
             return fallback_signal
+

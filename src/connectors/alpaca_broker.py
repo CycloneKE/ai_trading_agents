@@ -131,7 +131,7 @@ class AlpacaBroker(BaseBroker):
                 buying_power=float(acc.buying_power),
                 initial_margin=float(getattr(acc, 'initial_margin', 0) or 0),
                 maintenance_margin=float(getattr(acc, 'maintenance_margin', 0) or 0),
-                day_trade_count=int(acc.daytrade_count),
+                day_trade_count=int(getattr(acc, 'daytrade_count', 0) or getattr(acc, 'daytrading_count', 0) or 0),
                 last_updated=datetime.utcnow(),
                 broker_name=self.broker_name
             )

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
   ComposedChart, Line, Scatter, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, Cell,
+  ResponsiveContainer, Cell, ReferenceLine
 } from 'recharts';
 import { X, TrendingUp, TrendingDown, Activity, Layers, AlertTriangle } from 'lucide-react';
 import { theme, glassCard } from './DashboardStyles';
@@ -136,12 +136,21 @@ const SymbolDrilldown = ({ symbol, onClose }) => {
                   <ComposedChart data={tape}>
                     <CartesianGrid strokeDasharray="3 3" stroke={theme.colors.border} />
                     <XAxis dataKey="ts" tick={{ fontSize: 10, fill: theme.colors.textMuted }} />
-                    <YAxis domain={['auto', 'auto']} tick={{ fontSize: 10, fill: theme.colors.textMuted }} width={55} />
+                    <YAxis domain={['dataMin - (dataMin * 0.05)', 'dataMax + (dataMax * 0.05)']} tick={{ fontSize: 10, fill: theme.colors.textMuted }} width={55} />
                     <Tooltip
                       contentStyle={{ background: theme.colors.bgSecondary, border: `1px solid ${theme.colors.border}`, borderRadius: '8px', fontSize: '12px' }}
                       formatter={(v, n) => n === 'price' ? [`$${v}`, 'Price'] : [v, n]}
                     />
                     <Line type="monotone" dataKey="price" stroke={theme.colors.secondary} dot={false} strokeWidth={2} />
+                    
+                    {/* Reference lines for target and entry prices */}
+                    {data.target_price && (
+                      <ReferenceLine y={data.target_price} stroke={theme.colors.primary} strokeDasharray="3 3" label={{ value: `Target: $${data.target_price.toFixed(2)}`, fill: theme.colors.primary, position: 'top', fontSize: 9 }} />
+                    )}
+                    {alpha.first_entry_price && (
+                      <ReferenceLine y={alpha.first_entry_price} stroke={theme.colors.warning} strokeDasharray="3 3" label={{ value: `Entry: $${alpha.first_entry_price.toFixed(2)}`, fill: theme.colors.warning, position: 'bottom', fontSize: 9 }} />
+                    )}
+
                     {/* Green dots where an order actually executed */}
                     <Scatter dataKey="executed" fill={theme.colors.primary}>
                       {tape.map((d, i) => <Cell key={i} fill={theme.colors.primary} />)}

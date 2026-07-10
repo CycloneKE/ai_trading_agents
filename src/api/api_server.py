@@ -285,6 +285,8 @@ class TradingAPI:
                 report['total_pnl'] = round(current_value - initial, 2)
                 report['win_rate'] = metrics.get('win_rate', 0)
                 report['total_trades'] = metrics.get('total_trades', 0)
+                report['sharpe_ratio'] = metrics.get('sharpe_ratio', 0)
+                report['max_drawdown'] = metrics.get('max_drawdown', 0)
                 return jsonify(report)
             except Exception as e:
                 logger.error(f"Error getting performance: {e}")
@@ -317,7 +319,9 @@ class TradingAPI:
             symbol = (symbol or '').upper()
             # Validate against configured symbols to avoid unbounded lookups.
             allowed = set(self.config.get('data_manager', {}).get('symbols', [])) | \
-                set(self.trading_agent.config.get('data_manager', {}).get('symbols', []))
+                      set(self.config.get('data_manager', {}).get('nse_symbols', [])) | \
+                      set(self.trading_agent.config.get('data_manager', {}).get('symbols', [])) | \
+                      set(self.trading_agent.config.get('data_manager', {}).get('nse_symbols', []))
             if allowed and symbol not in {s.upper() for s in allowed}:
                 return jsonify({'error': f'Unknown or untracked symbol: {symbol}'}), 404
 
@@ -336,7 +340,24 @@ class TradingAPI:
                         return (q or {}).get('price')
                     return None
 
-                return build_payload(symbol, decisions, orders, price_lookup)
+                payload = build_payload(symbol, decisions, orders, price_lookup)
+                
+                # Fetch target price from database
+                em = self.trading_agent.components.get('escalation_manager')
+                t_price = None
+                if em:
+                    with em._lock:
+                        cur = em._conn.execute("SELECT target_price FROM position_watchlist WHERE symbol = ? AND status = 'active'", (symbol,))
+                        row = cur.fetchone()
+                        if row:
+                            t_price = row[0]
+                        if not t_price:
+                            cur = em._conn.execute("SELECT target_price FROM research_signals WHERE symbol = ? ORDER BY extracted_at DESC LIMIT 1", (symbol,))
+                            row = cur.fetchone()
+                            if row:
+                                t_price = row[0]
+                payload['target_price'] = t_price
+                return payload
 
             try:
                 payload = self._cached(f'symbol:{symbol}', 20, produce)
@@ -533,6 +554,15 @@ class TradingAPI:
                     real_connector = data_manager.connectors['real_data']
                     news = real_connector.get_market_news()
 
+                # Blend in East Africa/Kenya coverage (free, keyless Google
+                # News RSS) alongside the US-centric Finnhub feed above.
+                try:
+                    from src.connectors.regional_news import get_east_africa_news
+                    news = news + get_east_africa_news()
+                except Exception as e:
+                    logger.debug(f"Regional news fetch error: {e}")
+                news.sort(key=lambda n: n.get('time') or '', reverse=True)
+
                 # Enrich news with live sentiment analysis if available
                 # Using faster VADER/Keyword logic for low-latency dashboard updates
                 for item in news:
@@ -601,8 +631,31 @@ class TradingAPI:
         @require_rate_limit
         @token_required
         def get_agent_activity():
-            """Get recent agent actions."""
-            return jsonify([])
+            """Recent agent actions, sourced from the decision journal (the
+            same per-cycle records the symbol drill-down reads)."""
+            def produce():
+                dj = getattr(self.trading_agent, 'decision_journal', None)
+                decisions = dj.recent(None, limit=50) if dj else []
+                activity = []
+                for d in decisions:
+                    if d.get('executed'):
+                        message = f"{(d.get('action') or '').upper()} executed at {d.get('price')}"
+                    elif d.get('skip_reason'):
+                        message = f"{(d.get('action') or 'hold').upper()} blocked: {d.get('skip_reason')}"
+                    else:
+                        message = f"{(d.get('action') or 'hold').upper()}"
+                    activity.append({
+                        'timestamp': d.get('ts'),
+                        'component': d.get('symbol'),
+                        'message': message,
+                    })
+                return activity
+
+            try:
+                return jsonify(self._cached('agent_activity', 20, produce))
+            except Exception as e:
+                logger.error(f"Error getting agent activity: {e}")
+                return jsonify([])
 
         @self.app.route('/api/correlation-matrix', methods=['GET'])
         @require_rate_limit
@@ -614,19 +667,223 @@ class TradingAPI:
         @require_rate_limit
         @token_required
         def get_market_heatmap():
-            """Get sector performance heatmap (cached: 8 ETF quotes per refresh)."""
+            """Get sector performance heatmap informed by specialist agents."""
             def produce():
+                sectors = {
+                    'Technology': 'XLK',
+                    'Energy': 'XLE',
+                    'Financials': 'XLF',
+                    'Healthcare': 'XLV',
+                    'Utilities': 'XLU',
+                    'Consumer Staples': 'XLP',
+                    'Real Estate': 'XLRE',
+                    'Materials': 'XLB'
+                }
+                results = []
                 data_manager = self.trading_agent.components.get('data_manager')
-                if data_manager and 'real_data' in data_manager.connectors:
-                    real_connector = data_manager.connectors['real_data']
-                    return real_connector.get_sector_performance()
-                return []
+                real_connector = data_manager.connectors.get('real_data') if data_manager else None
+                specialist_manager = self.trading_agent.components.get('sector_specialist')
+                
+                for name, symbol in sectors.items():
+                    perf = 0.0
+                    price = 0.0
+                    volume = 0
+                    if real_connector:
+                        try:
+                            data = real_connector.get_real_time_data(symbol)
+                            if data:
+                                perf = (data.get('change_percent', 0) or 0) / 100.0
+                                price = data.get('price', 0) or 0
+                                volume = data.get('volume', 0) or 0
+                        except Exception as e:
+                            logger.error(f"Error getting heatmap data for {name}: {e}")
+                    
+                    # Fetch specialist outlook
+                    outlook_score = 0.0
+                    agent_profile = ""
+                    risk_factors = []
+                    catalysts = []
+                    if specialist_manager:
+                        profile = specialist_manager.load_sector_profile(name.lower())
+                        outlook_score = profile.get('outlook_score', 0.0)
+                        agent_profile = profile.get('updated_profile_text', '')
+                        risk_factors = profile.get('risk_factors', [])
+                        catalysts = profile.get('catalysts', [])
+                        
+                    results.append({
+                        'sector': name,
+                        'symbol': symbol,
+                        'performance': perf,
+                        'price': price,
+                        'volume': volume,
+                        'outlook_score': outlook_score,
+                        'agent_profile': agent_profile,
+                        'risk_factors': risk_factors,
+                        'catalysts': catalysts
+                    })
+                    
+                # Add Kenyan telecommunications sector
+                telecom_perf = 0.0
+                if real_connector:
+                    try:
+                        scom_data = real_connector.get_real_time_data('SCOM')
+                        if scom_data:
+                            telecom_perf = (scom_data.get('change_percent', 0) or 0) / 100.0
+                    except Exception:
+                        pass
+                telecom_outlook = 0.0
+                telecom_profile = ""
+                telecom_risks = []
+                telecom_catalysts = []
+                if specialist_manager:
+                    profile = specialist_manager.load_sector_profile('telecommunications')
+                    telecom_outlook = profile.get('outlook_score', 0.0)
+                    telecom_profile = profile.get('updated_profile_text', '')
+                    telecom_risks = profile.get('risk_factors', [])
+                    telecom_catalysts = profile.get('catalysts', [])
+                
+                results.append({
+                    'sector': 'Telecommunications',
+                    'symbol': 'SCOM',
+                    'performance': telecom_perf,
+                    'price': 0.0,
+                    'volume': 0,
+                    'outlook_score': telecom_outlook,
+                    'agent_profile': telecom_profile,
+                    'risk_factors': telecom_risks,
+                    'catalysts': telecom_catalysts
+                })
+                return results
 
             try:
-                return jsonify(self._cached('market_heatmap', 120, produce))
+                return jsonify(self._cached('market_heatmap', 30, produce))
             except Exception as e:
                 logger.error(f"Error getting market heatmap: {e}")
                 return jsonify([])
+
+        @self.app.route('/api/portfolio-allocation', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_portfolio_allocation():
+            """Get Cash vs. Asset exposures for allocation pie chart."""
+            try:
+                broker = self.trading_agent.components.get('broker_manager')
+                cash = 100000.0
+                positions = []
+                if broker:
+                    primary = broker.get_broker()
+                    if primary:
+                        try:
+                            acct = primary.get_account_info()
+                            if acct:
+                                cash = acct.cash
+                        except Exception:
+                            cash = getattr(primary, 'cash', cash)
+                        try:
+                            positions = primary.get_positions()
+                        except Exception:
+                            positions = []
+                        
+                if not positions:
+                    return jsonify([
+                        {'name': 'Cash', 'value': cash * 0.35, 'color': '#64748b'},
+                        {'name': 'Safaricom (SCOM)', 'value': cash * 0.30, 'color': '#10b981'},
+                        {'name': 'Equity Group (EQTY)', 'value': cash * 0.20, 'color': '#06b6d4'},
+                        {'name': 'KCB Group (KCB)', 'value': cash * 0.15, 'color': '#f59e0b'}
+                    ])
+                
+                allocations = []
+                total_position_val = 0.0
+                theme_colors = ['#10b981', '#06b6d4', '#f59e0b', '#ec4899', '#8b5cf6', '#3b82f6']
+                
+                for idx, p in enumerate(positions):
+                    val = p.quantity * p.current_price
+                    total_position_val += val
+                    allocations.append({
+                        'name': p.symbol,
+                        'value': round(val, 2),
+                        'color': theme_colors[idx % len(theme_colors)]
+                    })
+                
+                allocations.append({
+                    'name': 'Cash',
+                    'value': round(cash, 2),
+                    'color': '#64748b'
+                })
+                return jsonify(allocations)
+            except Exception as e:
+                logger.error(f"Error getting portfolio allocation: {e}")
+                return jsonify([])
+
+        @self.app.route('/api/sector-specialist/<sector>', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_sector_specialist_detail(sector):
+            """Get detailed sector profile and associated assets."""
+            try:
+                sector = (sector or '').lower()
+                specialist_manager = self.trading_agent.components.get('sector_specialist')
+                if not specialist_manager:
+                    return jsonify({'error': 'Sector specialist not active'}), 503
+                    
+                profile = specialist_manager.load_sector_profile(sector)
+                associated_assets = []
+                broker = self.trading_agent.components.get('broker_manager')
+                positions = []
+                if broker:
+                    primary = broker.get_broker()
+                    if primary:
+                        try:
+                            positions = primary.get_positions()
+                        except Exception:
+                            pass
+                            
+                for p in (positions or []):
+                    p_sector = specialist_manager.get_sector_for_symbol(p.symbol)
+                    if p_sector.lower() == sector:
+                        associated_assets.append({
+                            'symbol': p.symbol,
+                            'type': 'position',
+                            'quantity': p.quantity,
+                            'avg_entry_price': p.avg_entry_price,
+                            'current_price': p.current_price,
+                            'unrealized_pl': p.unrealized_pl
+                        })
+                        
+                all_symbols = set(self.config.get('data_manager', {}).get('symbols', [])) | \
+                              set(self.config.get('data_manager', {}).get('nse_symbols', []))
+                
+                for sym in all_symbols:
+                    if any(a['symbol'] == sym for a in associated_assets):
+                        continue
+                    p_sector = specialist_manager.get_sector_for_symbol(sym)
+                    if p_sector.lower() == sector:
+                        dm = self.trading_agent.components.get('data_manager')
+                        real = dm.connectors.get('real_data') if dm else None
+                        price = None
+                        if real:
+                            try:
+                                q = real.get_real_time_data(sym)
+                                price = (q or {}).get('price')
+                            except Exception:
+                                pass
+                        associated_assets.append({
+                            'symbol': sym,
+                            'type': 'watchlist',
+                            'current_price': price,
+                            'quantity': 0,
+                            'avg_entry_price': 0,
+                            'unrealized_pl': 0
+                        })
+                        
+                return jsonify({
+                    'sector': sector.capitalize(),
+                    'profile': profile,
+                    'associated_assets': associated_assets
+                })
+            except Exception as e:
+                logger.error(f"Error getting sector specialist detail for {sector}: {e}")
+                return jsonify({'error': str(e)}), 500
 
         @self.app.route('/api/economic-calendar', methods=['GET'])
         @require_rate_limit
@@ -666,10 +923,153 @@ class TradingAPI:
                 logger.error(f"Error getting NSE market data: {e}")
                 return jsonify({'error': str(e), 'quotes': [], 'movers': {}, 'sectors': []}), 500
 
+        # --- Operator Ingestion, Watchlist and Escalation Endpoints ---
+        @self.app.route('/api/operator/upload-research', methods=['POST'])
+        @require_rate_limit
+        @token_required
+        @role_required('operator')
+        def upload_research():
+            """Upload a PDF research document and trigger ingest pipeline."""
+            from werkzeug.utils import secure_filename
+            if 'file' not in request.files:
+                return jsonify({'error': 'No file part in the request'}), 400
+            file = request.files['file']
+            if file.filename == '':
+                return jsonify({'error': 'No file selected'}), 400
+                
+            if file and file.filename.endswith('.pdf'):
+                upload_dir = self.trading_agent.config.get('research_ingest', {}).get('upload_dir', 'data/research_uploads')
+                os.makedirs(upload_dir, exist_ok=True)
+                
+                filename = secure_filename(file.filename)
+                file_path = os.path.join(upload_dir, filename)
+                file.save(file_path)
+                
+                ingest = self.trading_agent.components.get('research_ingest')
+                if not ingest:
+                    return jsonify({'error': 'Research ingest component is not initialized'}), 500
+                    
+                result = ingest.process_pdf(file_path, source='aib_axys')
+                return jsonify(result), 200
+            else:
+                return jsonify({'error': 'Only PDF files are supported'}), 400
+
+        @self.app.route('/api/operator/escalations', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        @role_required('operator')
+        def get_pending_escalations():
+            """Get all pending operator escalations."""
+            em = self.trading_agent.components.get('escalation_manager')
+            if not em:
+                return jsonify({'error': 'Escalation manager not initialized'}), 500
+            return jsonify({'escalations': em.get_pending_escalations()}), 200
+
+        @self.app.route('/api/operator/escalations/<int:escalation_id>/resolve', methods=['POST'])
+        @require_rate_limit
+        @token_required
+        @role_required('operator')
+        def resolve_escalation(escalation_id):
+            """Approve or reject a pending escalation."""
+            em = self.trading_agent.components.get('escalation_manager')
+            if not em:
+                return jsonify({'error': 'Escalation manager not initialized'}), 500
+                
+            data = request.get_json(silent=True) or {}
+            status = data.get('status')
+            notes = data.get('notes', '')
+            
+            if status not in ('approved', 'rejected'):
+                return jsonify({'error': "Status must be 'approved' or 'rejected'"}), 400
+                
+            success, escalation = em.resolve_escalation(escalation_id, status, notes, resolved_by='operator')
+            if not success:
+                return jsonify({'error': 'Escalation not found or already resolved'}), 404
+                
+            if status == 'approved' and escalation:
+                symbol = escalation.get('symbol')
+                market = escalation.get('market', 'kenyan')
+                recommendation = escalation.get('recommendation', 'BUY')
+                target_price = escalation.get('target_price', 0.0)
+                rationale = escalation.get('rationale', '')
+                
+                em.add_to_watchlist(
+                    symbol=symbol,
+                    market=market,
+                    source=f"escalation_{escalation_id}",
+                    recommendation=recommendation,
+                    target_price=target_price,
+                    rationale=rationale
+                )
+                
+                try:
+                    dm = self.trading_agent.components.get('data_manager')
+                    if dm:
+                        if market == 'kenyan':
+                            if symbol not in dm.nse_symbols:
+                                dm.nse_symbols.append(symbol)
+                                logger.info(f"Added approved symbol {symbol} to data_manager.nse_symbols")
+                        else:
+                            if symbol not in dm.symbols:
+                                dm.symbols.append(symbol)
+                                logger.info(f"Added approved symbol {symbol} to data_manager.symbols")
+                except Exception as e:
+                    logger.error(f"Failed to dynamically add approved symbol to data_manager: {e}")
+                    
+            return jsonify({'success': True, 'escalation': escalation}), 200
+
+        @self.app.route('/api/operator/watchlist', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_watchlist():
+            """Get the active watchlist."""
+            em = self.trading_agent.components.get('escalation_manager')
+            if not em:
+                return jsonify({'error': 'Escalation manager not initialized'}), 500
+            return jsonify({'watchlist': em.get_active_watchlist()}), 200
+
+        @self.app.route('/api/operator/watchlist/<symbol>/pause', methods=['POST'])
+        @require_rate_limit
+        @token_required
+        @role_required('operator')
+        def pause_watchlist_symbol(symbol):
+            """Pause or resume a watchlist symbol."""
+            em = self.trading_agent.components.get('escalation_manager')
+            if not em:
+                return jsonify({'error': 'Escalation manager not initialized'}), 500
+                
+            data = request.get_json(silent=True) or {}
+            action = data.get('action')
+            
+            if action == 'pause':
+                success = em.pause_watchlist_symbol(symbol)
+            elif action == 'resume':
+                success = em.resume_watchlist_symbol(symbol)
+            elif action == 'remove':
+                success = em.remove_from_watchlist(symbol)
+            else:
+                return jsonify({'error': "Action must be 'pause', 'resume', or 'remove'"}), 400
+                
+            if not success:
+                return jsonify({'error': f"Failed to perform action '{action}' on symbol {symbol}"}), 404
+                
+            return jsonify({'success': True, 'symbol': symbol, 'status': action + 'd'}), 200
+
+        @self.app.route('/api/operator/upload-history', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_upload_history():
+            """Get research upload history."""
+            em = self.trading_agent.components.get('escalation_manager')
+            if not em:
+                return jsonify({'error': 'Escalation manager not initialized'}), 500
+            return jsonify({'uploads': em.get_upload_history()}), 200
+
         # --- Error handlers ---
         @self.app.errorhandler(429)
         def rate_limit_exceeded(error):
             return jsonify({'error': 'Rate limit exceeded', 'retry_after': 60}), 429
+
 
         @self.app.errorhandler(500)
         def internal_error(error):
