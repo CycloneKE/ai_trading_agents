@@ -1,4 +1,5 @@
 {
+  "primary_llm_provider": "gemini",
   "data_manager": {
     "symbols": [
       "AAPL", "GOOGL", "MSFT", "TSLA", "NVDA",

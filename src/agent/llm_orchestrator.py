@@ -5,6 +5,7 @@ Handles the reasoning layer for trading decisions.
 import os
 import json
 import logging
+import time
 import requests
 from typing import Dict, Any, Optional
 
@@ -19,7 +20,10 @@ class LLMOrchestrator:
         # Determine primary model strategy
         self.primary_provider = config.get("primary_llm_provider", "openrouter")
         self.enabled = config.get("llm_enabled", True)
-        
+
+        self.cache_ttl = config.get('llm_cache_ttl', 900)  # 15 min default
+        self._verdict_cache: Dict[str, tuple] = {}  # key -> (expires_at, verdict)
+
         if not self.openrouter_api_key and not self.gemini_api_key:
             logger.warning("No LLM API keys found. LLM Orchestrator will be disabled.")
             self.enabled = False
@@ -34,6 +38,12 @@ class LLMOrchestrator:
         action = strategy_signal.get("action", "hold")
         if action == "hold" and strategy_signal.get("confidence", 0) < 0.5:
             return strategy_signal  # Don't ask LLM about weak holds to save costs
+
+        conf_bucket = round(strategy_signal.get('confidence', 0) * 10)  # 0.71/0.73 share a verdict
+        cache_key = f"{symbol}:{action}:{conf_bucket}"
+        cached = self._verdict_cache.get(cache_key)
+        if cached and cached[0] > time.time():
+            return dict(cached[1])
 
         system_prompt = (
             "You are an elite quantitative AI risk manager and trading orchestrator.\n"
@@ -82,16 +92,21 @@ class LLMOrchestrator:
         # Resolve dynamic model config
         model = self.config.get("swarm", {}).get("agents", {}).get("synthesizer", "meta-llama/llama-3.1-8b-instruct")
         
+        def _remember(verdict):
+            if isinstance(verdict, dict):
+                self._verdict_cache[cache_key] = (time.time() + self.cache_ttl, dict(verdict))
+            return verdict
+
         try:
             if self.primary_provider == "openrouter" and self.openrouter_api_key:
                 try:
-                    return self._call_openrouter(system_prompt, user_prompt, strategy_signal, model_override=model)
+                    return _remember(self._call_openrouter(system_prompt, user_prompt, strategy_signal, model_override=model))
                 except Exception as openrouter_err:
                     logger.warning(f"OpenRouter validation failed ({openrouter_err}). Falling back to Gemini...")
-            
+
             if self.gemini_api_key:
-                return self._call_gemini(system_prompt, user_prompt, strategy_signal, model_override=model)
-            
+                return _remember(self._call_gemini(system_prompt, user_prompt, strategy_signal, model_override=model))
+
             return strategy_signal
         except Exception as e:
             logger.error(f"LLM validation failed: {str(e)}. Falling back to base signal.")
@@ -160,10 +175,10 @@ class LLMOrchestrator:
 
     def _call_gemini(self, system_prompt: str, user_prompt: str, fallback_signal: Optional[Dict[str, Any]], model_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
         # Map dynamic model to gemini endpoints if applicable, otherwise default
-        model = model_override or "gemini-2.0-flash"
+        model = model_override or "gemini-2.5-flash-lite"
         if "/" in model:
             # e.g. openrouter model passed to gemini override: fall back to default
-            model = "gemini-2.0-flash"
+            model = "gemini-2.5-flash-lite"
             
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.gemini_api_key}"
         headers = {
