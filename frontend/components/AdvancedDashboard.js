@@ -364,6 +364,8 @@ const AdvancedDashboard = ({ onLogout }) => {
   const [drilldownSymbol, setDrilldownSymbol] = useState(null);
   const [drilldownSector, setDrilldownSector] = useState(null);
   const [anomalies, setAnomalies] = useState([]);
+  const [nseSort, setNseSort] = useState({ key: 'symbol', dir: 1 });
+  const [nseFilter, setNseFilter] = useState('all'); // all | held | movers
 
   // First login: open the getting-started guide automatically.
   useEffect(() => {
@@ -646,6 +648,18 @@ const AdvancedDashboard = ({ onLogout }) => {
   const renderKenyaNSE = () => {
     const positionsBySymbol = Object.fromEntries((data.positions || []).map(p => [p.symbol, p]));
     const heldCount = (nseData.quotes || []).filter(q => positionsBySymbol[q.symbol]).length;
+    const sorted = [...(nseData.quotes || [])]
+      .filter(q => nseFilter === 'all' || (nseFilter === 'held' ? positionsBySymbol[q.symbol] : Math.abs(q.change_pct || 0) >= 1))
+      .sort((a, b) => {
+        const va = a[nseSort.key] ?? '', vb = b[nseSort.key] ?? '';
+        return (typeof va === 'number' ? va - vb : String(va).localeCompare(String(vb))) * nseSort.dir;
+      });
+    const sortBtn = (key, label) => (
+      <th key={key} onClick={() => setNseSort(s => ({ key, dir: s.key === key ? -s.dir : 1 }))}
+          style={{ padding: '12px', cursor: 'pointer', userSelect: 'none' }}>
+        {label}{nseSort.key === key ? (nseSort.dir === 1 ? ' ▲' : ' ▼') : ''}
+      </th>
+    );
     return (
     <div style={{ display: 'grid', gap: '30px' }}>
       <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>

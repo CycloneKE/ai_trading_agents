@@ -24,8 +24,9 @@ from datetime import datetime, timedelta, timezone
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 SOURCES = {
+    # order_journal.db also holds the decision journal (same SQLite file —
+    # see DecisionJournal's default db_path in src/agent/decision_journal.py).
     'order_journal.db': os.path.join(ROOT, 'data', 'order_journal.db'),
-    'decision_journal.db': os.path.join(ROOT, 'data', 'decision_journal.db'),
     'paper_trading_state.json': os.path.join(ROOT, 'data', 'paper_trading_state.json'),
     'users.json': os.path.join(ROOT, 'users.json'),
 }
@@ -46,11 +47,12 @@ def backup_sqlite(src_path: str, dest_path: str):
 
 
 def run_backup(keep_days: int) -> str:
-    stamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+    now = datetime.now(timezone.utc)
+    stamp = now.strftime('%Y%m%d_%H%M%S')
     out_dir = os.path.join(ROOT, 'backups', stamp)
     os.makedirs(out_dir, exist_ok=True)
 
-    manifest = {'timestamp_utc': datetime.utcnow().isoformat(), 'files': []}
+    manifest = {'timestamp_utc': now.isoformat(), 'files': []}
     for name, src_path in SOURCES.items():
         if not os.path.exists(src_path):
             print(f"  skip (not found): {src_path}")
@@ -72,7 +74,7 @@ def run_backup(keep_days: int) -> str:
 
 def prune_old(keep_days: int):
     backups_root = os.path.join(ROOT, 'backups')
-    cutoff = datetime.utcnow() - timedelta(days=keep_days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=keep_days)
     if not os.path.isdir(backups_root):
         return
     for entry in os.listdir(backups_root):
@@ -80,7 +82,7 @@ def prune_old(keep_days: int):
         if not os.path.isdir(entry_path):
             continue
         try:
-            stamp = datetime.strptime(entry, '%Y%m%d_%H%M%S')
+            stamp = datetime.strptime(entry, '%Y%m%d_%H%M%S').replace(tzinfo=timezone.utc)
         except ValueError:
             continue  # not one of ours; leave it alone
         if stamp < cutoff:
