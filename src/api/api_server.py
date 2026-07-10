@@ -634,22 +634,10 @@ class TradingAPI:
             """Recent agent actions, sourced from the decision journal (the
             same per-cycle records the symbol drill-down reads)."""
             def produce():
+                from src.api.activity_format import format_agent_activity
                 dj = getattr(self.trading_agent, 'decision_journal', None)
                 decisions = dj.recent(None, limit=50) if dj else []
-                activity = []
-                for d in decisions:
-                    if d.get('executed'):
-                        message = f"{(d.get('action') or '').upper()} executed at {d.get('price')}"
-                    elif d.get('skip_reason'):
-                        message = f"{(d.get('action') or 'hold').upper()} blocked: {d.get('skip_reason')}"
-                    else:
-                        message = f"{(d.get('action') or 'hold').upper()}"
-                    activity.append({
-                        'timestamp': d.get('ts'),
-                        'component': d.get('symbol'),
-                        'message': message,
-                    })
-                return activity
+                return format_agent_activity(decisions)
 
             try:
                 return jsonify(self._cached('agent_activity', 20, produce))
