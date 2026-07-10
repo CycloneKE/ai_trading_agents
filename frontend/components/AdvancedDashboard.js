@@ -54,7 +54,7 @@ const HUDCard = ({ title, value, subValue, icon: Icon, color }) => (
   </div>
 );
 
-const ResearchView = ({ activeTab, fetchData }) => {
+const ResearchView = ({ activeTab, fetchData, onDrill }) => {
   const [uploading, setUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState(null);
   const [selectedFile, setSelectedFile] = useState(null);
@@ -307,7 +307,7 @@ const ResearchView = ({ activeTab, fetchData }) => {
             <tbody>
               {watchlist.length > 0 ? (
                 watchlist.map(item => (
-                  <tr key={item.symbol} style={{ borderBottom: `1px solid ${theme.colors.border}20` }}>
+                  <tr key={item.symbol} onClick={() => onDrill(item.symbol)} title={`Open ${item.symbol} performance drill-down`} style={{ borderBottom: `1px solid ${theme.colors.border}20`, cursor: 'pointer' }}>
                     <td style={{ padding: '12px 0', fontWeight: 'bold' }}>{item.symbol}</td>
                     <td style={{ padding: '12px 0', color: theme.colors.textSecondary }}>{item.market.toUpperCase()}</td>
                     <td style={{ padding: '12px 0', color: theme.colors.primary, fontWeight: '700' }}>{item.recommendation}</td>
@@ -320,11 +320,11 @@ const ResearchView = ({ activeTab, fetchData }) => {
                     </td>
                     <td style={{ padding: '12px 0', textAlign: 'right' }}>
                       {item.status === 'active' ? (
-                        <button onClick={() => handleWatchlistAction(item.symbol, 'pause')} style={{ backgroundColor: 'rgba(245, 158, 11, 0.1)', color: theme.colors.warning, border: `1px solid ${theme.colors.warning}`, padding: '4px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '800', cursor: 'pointer', marginRight: '5px' }}>PAUSE</button>
+                        <button onClick={(e) => { e.stopPropagation(); handleWatchlistAction(item.symbol, 'pause'); }} style={{ backgroundColor: 'rgba(245, 158, 11, 0.1)', color: theme.colors.warning, border: `1px solid ${theme.colors.warning}`, padding: '4px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '800', cursor: 'pointer', marginRight: '5px' }}>PAUSE</button>
                       ) : (
-                        <button onClick={() => handleWatchlistAction(item.symbol, 'resume')} style={{ backgroundColor: 'transparent', color: theme.colors.primary, border: `1px solid ${theme.colors.primary}`, padding: '4px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '800', cursor: 'pointer', marginRight: '5px' }}>RESUME</button>
+                        <button onClick={(e) => { e.stopPropagation(); handleWatchlistAction(item.symbol, 'resume'); }} style={{ backgroundColor: 'transparent', color: theme.colors.primary, border: `1px solid ${theme.colors.primary}`, padding: '4px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '800', cursor: 'pointer', marginRight: '5px' }}>RESUME</button>
                       )}
-                      <button onClick={() => handleWatchlistAction(item.symbol, 'remove')} style={{ backgroundColor: 'transparent', color: theme.colors.danger, border: `1px solid ${theme.colors.danger}`, padding: '4px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '800', cursor: 'pointer' }}>REMOVE</button>
+                      <button onClick={(e) => { e.stopPropagation(); handleWatchlistAction(item.symbol, 'remove'); }} style={{ backgroundColor: 'transparent', color: theme.colors.danger, border: `1px solid ${theme.colors.danger}`, padding: '4px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '800', cursor: 'pointer' }}>REMOVE</button>
                     </td>
                   </tr>
                 ))
@@ -651,8 +651,12 @@ const AdvancedDashboard = ({ onLogout }) => {
         {(() => { const s = nseSession(); return (
           <HUDCard title="NSE Session" value={s.label.split(' · ')[0]} subValue={s.label.includes('·') ? s.label.split(' · ')[1] : `${nseData.quotes?.length || 0} Symbols`} icon={Activity} color={s.color} />
         ); })()}
-        <HUDCard title="Top NSE Gainer" value={nseData.movers?.gainers?.[0]?.symbol || '—'} subValue={`+${nseData.movers?.gainers?.[0]?.change_pct?.toFixed(2) || 0}%`} icon={TrendingUp} color={theme.colors.primary} />
-        <HUDCard title="Top NSE Loser" value={nseData.movers?.losers?.[0]?.symbol || '—'} subValue={`${nseData.movers?.losers?.[0]?.change_pct?.toFixed(2) || 0}%`} icon={TrendingDown} color={theme.colors.danger} />
+        <div onClick={() => nseData.movers?.gainers?.[0]?.symbol && setDrilldownSymbol(nseData.movers.gainers[0].symbol)} style={{ cursor: 'pointer' }}>
+          <HUDCard title="Top NSE Gainer" value={nseData.movers?.gainers?.[0]?.symbol || '—'} subValue={`+${nseData.movers?.gainers?.[0]?.change_pct?.toFixed(2) || 0}%`} icon={TrendingUp} color={theme.colors.primary} />
+        </div>
+        <div onClick={() => nseData.movers?.losers?.[0]?.symbol && setDrilldownSymbol(nseData.movers.losers[0].symbol)} style={{ cursor: 'pointer' }}>
+          <HUDCard title="Top NSE Loser" value={nseData.movers?.losers?.[0]?.symbol || '—'} subValue={`${nseData.movers?.losers?.[0]?.change_pct?.toFixed(2) || 0}%`} icon={TrendingDown} color={theme.colors.danger} />
+        </div>
         <HUDCard title="Your NSE Positions" value={heldCount} subValue={`of ${nseData.quotes?.length || 0} watched`} icon={Shield} color={theme.colors.secondary} />
       </div>
       <div style={glassCard}>
@@ -672,8 +676,13 @@ const AdvancedDashboard = ({ onLogout }) => {
                 nseData.quotes.map((q, i) => {
                   const pos = positionsBySymbol[q.symbol];
                   return (
-                    <tr key={i} style={{ borderBottom: `1px solid ${theme.colors.border}`, background: pos ? `${theme.colors.primary}15` : 'transparent' }}>
-                      <td style={{ padding: '12px', fontWeight: '700' }}>{q.symbol}</td>
+                    <tr key={q.symbol || i}
+                        onClick={() => setDrilldownSymbol(q.symbol)}
+                        title={`Open ${q.symbol} performance drill-down`}
+                        style={{ borderBottom: `1px solid ${theme.colors.border}`, background: pos ? `${theme.colors.primary}15` : 'transparent', cursor: 'pointer' }}
+                        onMouseEnter={(e) => e.currentTarget.style.background = `${theme.colors.primary}25`}
+                        onMouseLeave={(e) => e.currentTarget.style.background = pos ? `${theme.colors.primary}15` : 'transparent'}>
+                      <td style={{ padding: '12px', fontWeight: '700' }}>{q.symbol} <span style={{ color: theme.colors.textMuted, fontSize: '10px' }}>↗</span></td>
                       <td style={{ padding: '12px' }}>{q.price_kes?.toFixed(2)}</td>
                       <td style={{ padding: '12px', color: q.change_pct >= 0 ? theme.colors.primary : theme.colors.danger }}>{q.change_pct >= 0 ? '+' : ''}{q.change_pct?.toFixed(2)}%</td>
                       <td style={{ padding: '12px' }}>{q.volume?.toLocaleString()}</td>
@@ -862,7 +871,7 @@ const AdvancedDashboard = ({ onLogout }) => {
   const tabs = [
     { id: 'overview', label: 'DASHBOARD', icon: Activity, component: renderOverview },
     { id: 'nse', label: 'NSE KENYA', icon: Flag, component: renderKenyaNSE },
-    { id: 'research', label: 'RESEARCH & AUTO-PILOT', icon: FileText, component: () => <ResearchView activeTab={activeTab} fetchData={fetchData} /> },
+    { id: 'research', label: 'RESEARCH & AUTO-PILOT', icon: FileText, component: () => <ResearchView activeTab={activeTab} fetchData={fetchData} onDrill={setDrilldownSymbol} /> },
     { id: 'analytics', label: 'ANALYTICS', icon: TrendingUp, component: renderAnalytics },
     { id: 'risk', label: 'RISK', icon: Shield, component: renderRiskView },
     { id: 'market', label: 'MARKET', icon: Globe, component: renderMarketView },
