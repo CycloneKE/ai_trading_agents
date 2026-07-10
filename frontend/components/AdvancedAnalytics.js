@@ -31,15 +31,22 @@ const AdvancedAnalytics = ({ data }) => {
     return now - ptTime <= rangeMs;
   });
 
+  const fmtTick = (ts) => {
+    const d = new Date(ts);
+    return timeRange === '1d'
+      ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  };
+
   filteredChart.forEach(point => {
     const val = point.portfolio_value || point.equity || 0;
     if (val > peak) peak = val;
     const drawdownPct = peak > 0 ? ((val - peak) / peak) * 100 : 0;
     drawdownAnalysis.push({
-      date: new Date(point.timestamp).toLocaleDateString(),
+      date: fmtTick(point.timestamp),
       equity: val,
       drawdown: parseFloat(drawdownPct.toFixed(2)),
-      underwater: parseFloat((drawdownPct * 1.2).toFixed(2)) // proxy for tail metrics
+      underwater: parseFloat((drawdownPct * 1.2).toFixed(2))
     });
   });
 
@@ -109,7 +116,7 @@ const AdvancedAnalytics = ({ data }) => {
             <ResponsiveContainer width="100%" height={210}>
               <LineChart data={drawdownAnalysis}>
                 <CartesianGrid strokeDasharray="3 3" stroke={`${theme.colors.border}30`} />
-                <XAxis dataKey="date" stroke={theme.colors.textMuted} fontSize={10} />
+                <XAxis dataKey="date" stroke={theme.colors.textMuted} fontSize={10} minTickGap={40} />
                 <YAxis stroke={theme.colors.textMuted} fontSize={10} unit="%" />
                 <Tooltip 
                   contentStyle={{
