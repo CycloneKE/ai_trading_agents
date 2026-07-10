@@ -10,6 +10,7 @@ import {
   Lock, Bell, BarChart as BarChartIcon, LogOut, FileText, CheckCircle, XCircle, Upload
 } from 'lucide-react';
 import AgentActivity from './AgentActivity';
+import AgentFocus from './AgentFocus';
 import MarketClock from './MarketClock';
 import HelpPanel from './HelpPanel';
 import SymbolDrilldown from './SymbolDrilldown';
@@ -531,6 +532,7 @@ const AdvancedDashboard = ({ onLogout }) => {
               </AreaChart>
             </ResponsiveContainer>
           </div>
+          <AgentFocus onDrill={setDrilldownSymbol} />
           <AgentActivity activities={data.agentActivity} />
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
