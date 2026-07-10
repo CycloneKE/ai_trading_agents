@@ -13,6 +13,8 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
+from src.utils.paths import DATA_DIR
+
 logger = logging.getLogger(__name__)
 
 # Fix relative imports
@@ -104,7 +106,7 @@ class StrategyManager:
             # Overlay parameters promoted by the nightly practice session
             # (scripts/practice_session.py). Only values that beat current
             # parameters on BOTH train and test windows land in this file.
-            overlay_path = os.path.join('data', 'strategy_params.json')
+            overlay_path = str(DATA_DIR / 'strategy_params.json')
             overlay = {}
             try:
                 if os.path.exists(overlay_path):

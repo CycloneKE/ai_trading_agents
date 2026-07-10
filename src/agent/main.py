@@ -1,4 +1,5 @@
 from src.utils.config_validator import validate_config
+from src.utils.paths import DATA_DIR
 #!/usr/bin/env python3
 """
 AI Trading Agent - Main Application Entry Point
@@ -1490,7 +1491,7 @@ class TradingAgent:
         """
         try:
             # Store results to file or database
-            results_file = f"data/optimization_results_{datetime.now().strftime('%Y%m%d')}.json"
+            results_file = str(DATA_DIR / f"optimization_results_{datetime.now().strftime('%Y%m%d')}.json")
             
             os.makedirs(os.path.dirname(results_file), exist_ok=True)
             

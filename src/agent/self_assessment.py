@@ -11,6 +11,7 @@ import threading
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 from src.agent.escalation_manager import EscalationManager
+from src.utils.paths import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,7 @@ Ensure the output is strictly valid raw JSON. Do not wrap in markdown blocks, do
 
 class SelfAssessmentEngine:
     def __init__(self, llm_orchestrator, escalation_manager: EscalationManager, config: Dict[str, Any],
-                 db_path: str = os.path.join('data', 'improvements.db')):
+                 db_path: str = str(DATA_DIR / 'improvements.db')):
         self.llm = llm_orchestrator
         self.escalation_manager = escalation_manager
         self.config = config

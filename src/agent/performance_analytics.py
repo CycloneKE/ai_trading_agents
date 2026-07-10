@@ -12,6 +12,8 @@ import pandas as pd
 from dataclasses import dataclass
 from enum import Enum
 
+from src.utils.paths import DATA_DIR
+
 logger = logging.getLogger(__name__)
 
 class BenchmarkType(Enum):
@@ -59,7 +61,7 @@ class PerformanceAnalytics:
         self.last_calculation = None
         
         # Open db connection to persist portfolio history
-        self.db_path = os.path.join('data', 'escalations.db')
+        self.db_path = str(DATA_DIR / 'escalations.db')
         self._init_db()
         self._load_and_seed_history()
         

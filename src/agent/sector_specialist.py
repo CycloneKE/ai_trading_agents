@@ -11,6 +11,8 @@ import threading
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 
+from src.utils.paths import DATA_DIR
+
 logger = logging.getLogger(__name__)
 
 # Default mapping of assets to sectors
@@ -81,7 +83,7 @@ Ensure the output is strictly valid raw JSON. Do not wrap in markdown blocks, do
 
 
 class SectorSpecialistManager:
-    def __init__(self, llm_orchestrator, db_path: str = os.path.join('data', 'escalations.db')):
+    def __init__(self, llm_orchestrator, db_path: str = str(DATA_DIR / 'escalations.db')):
         self.llm = llm_orchestrator
         self.db_path = db_path
         self._lock = threading.Lock()

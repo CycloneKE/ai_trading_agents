@@ -15,6 +15,7 @@ from datetime import datetime
 from functools import wraps
 from typing import Dict, Any, List
 from src.agent.sentiment_analyzer import FinancialSentimentAnalyzer
+from src.utils.paths import DATA_DIR
 # NOTE: token_required is imported via the guarded try/except below, NOT here.
 # A top-level import defeats the fail-closed guard: auth.py raises RuntimeError
 # (not ImportError) when SECRET_KEY is unset, which would crash the whole agent
@@ -926,7 +927,7 @@ class TradingAPI:
                 return jsonify({'error': 'No file selected'}), 400
                 
             if file and file.filename.endswith('.pdf'):
-                upload_dir = self.trading_agent.config.get('research_ingest', {}).get('upload_dir', 'data/research_uploads')
+                upload_dir = self.trading_agent.config.get('research_ingest', {}).get('upload_dir', str(DATA_DIR / 'research_uploads'))
                 os.makedirs(upload_dir, exist_ok=True)
                 
                 filename = secure_filename(file.filename)

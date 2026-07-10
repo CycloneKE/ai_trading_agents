@@ -9,6 +9,8 @@ import threading
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 
+from src.utils.paths import DATA_DIR
+
 logger = logging.getLogger(__name__)
 
 _SCHEMA = """
@@ -71,7 +73,7 @@ CREATE TABLE IF NOT EXISTS portfolio_history (
 
 
 class EscalationManager:
-    def __init__(self, db_path: str = os.path.join('data', 'escalations.db')):
+    def __init__(self, db_path: str = str(DATA_DIR / 'escalations.db')):
         os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
         self._lock = threading.Lock()
         self.db_path = db_path
