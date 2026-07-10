@@ -60,7 +60,7 @@ class DecisionJournal:
     different threads). Change-detection lives here so callers can flush every
     symbol every cycle without flooding the table."""
 
-    def __init__(self, db_path: str = str(DATA_DIR / 'order_journal.db'),
+    def __init__(self, db_path: str = str(DATA_DIR / 'decision_journal.db'),
                  heartbeat_cycles: int = 30):
         os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
         self._lock = threading.Lock()

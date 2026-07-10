@@ -25,6 +25,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 SOURCES = {
     'order_journal.db': os.path.join(ROOT, 'data', 'order_journal.db'),
+    'decision_journal.db': os.path.join(ROOT, 'data', 'decision_journal.db'),
     'paper_trading_state.json': os.path.join(ROOT, 'data', 'paper_trading_state.json'),
     'users.json': os.path.join(ROOT, 'users.json'),
 }
