@@ -526,9 +526,10 @@ class NSEPeriodicScraper:
         while self._running:
             try:
                 now = datetime.now(EAT)
+                from src.connectors.nse_connector import NSE_PREOPEN_START, NSE_CLOSE
                 is_market_hours = (
                     now.weekday() < 5
-                    and 9 <= now.hour < 15
+                    and NSE_PREOPEN_START <= now.timetz().replace(tzinfo=None) < NSE_CLOSE
                 )
                 wait_time = self.interval if is_market_hours else self.off_hours_interval
 
