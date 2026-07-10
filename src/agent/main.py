@@ -1036,8 +1036,13 @@ class TradingAgent:
                             _note(symbol, 'no_account_info')
                             continue
                         portfolio_value = account_info.equity
-                        max_risk_per_trade = 0.02 # 2% Rule
-                        
+                        cash = float(getattr(account_info, 'cash', 0) or 0)
+                        deployed_pct = 1 - (cash / portfolio_value) if portfolio_value else 0.0
+                        if not hasattr(self, 'cash_policy'):
+                            from src.agent.cash_policy import CashDeploymentPolicy
+                            self.cash_policy = CashDeploymentPolicy(self.config)
+                        max_risk_per_trade = self.cash_policy.risk_cap(deployed_pct, confidence)
+
                         # Position value based on signal (confidence * position_size)
                         target_pos_value = portfolio_value * min(position_size, max_risk_per_trade)
 

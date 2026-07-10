@@ -72,6 +72,14 @@
     "max_drawdown": 0.10,
     "max_daily_loss": 0.03
   },
+  "cash_policy": {
+    "enabled": true,
+    "target_deployment": 0.80,
+    "min_cash_buffer": 0.10,
+    "base_risk_per_trade": 0.02,
+    "max_risk_per_trade": 0.05,
+    "min_confidence_to_boost": 0.55
+  },
   "risk_limits": {
     "max_portfolio_var": 0.02,
     "max_position_size": 0.05,
