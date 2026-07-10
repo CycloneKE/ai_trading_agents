@@ -28,7 +28,7 @@ class LLMOrchestrator:
             logger.warning("No LLM API keys found. LLM Orchestrator will be disabled.")
             self.enabled = False
 
-    def validate_trade(self, symbol: str, strategy_signal: Dict[str, Any], market_data: Dict[str, Any], news_data: list = None, research_context: Dict[str, Any] = None, sector_outlook: Dict[str, Any] = None) -> Dict[str, Any]:
+    def validate_trade(self, symbol: str, strategy_signal: Dict[str, Any], market_data: Dict[str, Any], news_data: list = None, research_context: Dict[str, Any] = None, sector_outlook: Dict[str, Any] = None, track_record: str = None) -> Dict[str, Any]:
         """
         Takes the base strategy signal and validates it against current market context using an LLM.
         """
@@ -86,7 +86,10 @@ class LLMOrchestrator:
 
         if news_data:
             user_prompt += f"Recent News Context: {json.dumps(news_data[:3])}\n"
-            
+
+        if track_record:
+            user_prompt += f"Agent Track Record: {track_record}\n"
+
         user_prompt += "\nEvaluate this signal critically. Do you agree with the ensemble? Provide your validated JSON output now."
         
         # Resolve dynamic model config

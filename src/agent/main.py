@@ -766,10 +766,23 @@ class TradingAgent:
                                             except Exception:
                                                 pass
 
+                                    # Compute the agent's own hit-rate track record at most once per
+                                    # ~10 minutes (guarded), then feed it into the LLM validation prompt.
+                                    if not hasattr(self, '_verdict_scores_at') or time.time() - self._verdict_scores_at > 600:
+                                        from src.agent.verdict_scoreboard import score_decisions
+                                        from src.utils.real_price_feed import price_feed
+                                        journal = getattr(self, 'decision_journal', None)
+                                        self._verdict_scores = score_decisions(
+                                            journal.recent(None, limit=500) if journal else [],
+                                            price_feed.get_price)
+                                        self._verdict_scores_at = time.time()
+                                    from src.agent.verdict_scoreboard import summary_line
+
                                     # Validate with LLM Orchestrator
                                     validated_signal = self.components['llm_orchestrator'].validate_trade(
-                                        symbol, symbol_signals, symbol_data, symbol_news, 
-                                        research_context=research_context, sector_outlook=sector_outlook
+                                        symbol, symbol_signals, symbol_data, symbol_news,
+                                        research_context=research_context, sector_outlook=sector_outlook,
+                                        track_record=summary_line(self._verdict_scores, symbol)
                                     )
                                     dec['llm_verdict'] = {
                                         'action': validated_signal.get('action'),
