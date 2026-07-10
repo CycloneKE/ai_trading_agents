@@ -343,7 +343,8 @@ const AdvancedDashboard = ({ onLogout }) => {
 
   const [activeTab, setActiveTab] = useState('overview');
   const [data, setData] = useState({
-    status: { components: {} }, 
+    loading: true,
+    status: { components: {} },
     performance: { portfolio_value: 0, total_pnl: 0, win_rate: 0, sharpe_ratio: 0, max_drawdown: 0, portfolio_chart: [] }, 
     positions: [], 
     alerts: [], 
@@ -411,45 +412,52 @@ const AdvancedDashboard = ({ onLogout }) => {
 
   const fetchData = async () => {
     const endpoints = [
-      'status', 'performance', 'positions', 'alerts', 'news-feed', 
+      'status', 'performance', 'positions', 'alerts', 'news-feed',
       'risk-metrics', 'model-performance', 'strategy-performance',
       'market-heatmap', 'system-health', 'agent-activity', 'portfolio-allocation'
     ];
-    
+
     const token = localStorage.getItem('trading_token');
     if (!token) { onLogout(); return; }
-    
-    const newResponses = [];
-    for (const endpoint of endpoints) {
+
+    let unauthorized = false;
+    const newResponses = await Promise.all(endpoints.map(async (endpoint) => {
       try {
         const res = await fetch(`${getApiBase()}/api/${endpoint}`, {
           headers: { 'Authorization': `Bearer ${token}` }
         });
-        if (res.status === 401) { onLogout(); return; }
-        const json = await res.json();
-        newResponses.push(json);
+        if (res.status === 401) { unauthorized = true; return null; }
+        if (!res.ok) return null;
+        return await res.json();
       } catch (err) {
-        newResponses.push({ error: err.message });
+        return null;
       }
-    }
+    }));
+    if (unauthorized) { onLogout(); return; }
+
+    // A response only replaces cached state when it parsed and isn't an error envelope.
+    const ok = (r) => r != null && !(typeof r === 'object' && !Array.isArray(r) && r.error);
 
     setData(prev => ({
-      status: newResponses[0] || prev.status,
-      performance: newResponses[1] || prev.performance,
+      loading: false,
+      status: ok(newResponses[0]) ? newResponses[0] : prev.status,
+      performance: ok(newResponses[1]) ? newResponses[1] : prev.performance,
       positions: Array.isArray(newResponses[2]) ? newResponses[2] : prev.positions,
       alerts: Array.isArray(newResponses[3]) ? newResponses[3] : prev.alerts,
       news: Array.isArray(newResponses[4]) ? newResponses[4] : prev.news,
-      riskMetrics: newResponses[5] || prev.riskMetrics,
-      modelPerf: newResponses[6] || prev.modelPerf,
-      strategies: Object.entries(newResponses[7] || {})
-        .filter(([, stats]) => stats && typeof stats === 'object' && 'realized_pnl' in stats)
-        .map(([name, stats]) => ({ name, ...stats })),
+      riskMetrics: ok(newResponses[5]) ? newResponses[5] : prev.riskMetrics,
+      modelPerf: ok(newResponses[6]) ? newResponses[6] : prev.modelPerf,
+      strategies: ok(newResponses[7])
+        ? Object.entries(newResponses[7])
+            .filter(([, stats]) => stats && typeof stats === 'object' && 'realized_pnl' in stats)
+            .map(([name, stats]) => ({ name, ...stats }))
+        : prev.strategies,
       heatmap: Array.isArray(newResponses[8]) ? newResponses[8] : prev.heatmap,
-      systemHealth: newResponses[9] || prev.systemHealth,
+      systemHealth: ok(newResponses[9]) ? newResponses[9] : prev.systemHealth,
       agentActivity: Array.isArray(newResponses[10]) ? newResponses[10] : prev.agentActivity,
       allocation: Array.isArray(newResponses[11]) ? newResponses[11] : prev.allocation
     }));
-    setIsConnected(true);
+    setIsConnected(ok(newResponses[0]));
   };
 
   useEffect(() => {
@@ -475,13 +483,22 @@ const AdvancedDashboard = ({ onLogout }) => {
     return () => clearInterval(nseInterval);
   }, []);
 
-  const renderOverview = () => (
+  const renderOverview = () => {
+    if (data.loading) {
+      return (
+        <div style={{ padding: '80px', textAlign: 'center', color: theme.colors.textMuted }}>
+          <div style={{ fontSize: '14px', letterSpacing: '2px' }}>ESTABLISHING SECURE LINK…</div>
+          <div style={{ fontSize: '11px', marginTop: '8px' }}>Loading portfolio, risk and market state</div>
+        </div>
+      );
+    }
+    return (
     <div style={{ display: 'grid', gap: '30px' }}>
       <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
         <HUDCard title="Consolidated Equity" value={`$${(data.performance.portfolio_value || 0).toLocaleString()}`} subValue={data.performance.total_pnl > 0 ? `↗ $${data.performance.total_pnl.toFixed(2)}` : `↘ $${(data.performance.total_pnl || 0).toFixed(2)}`} icon={TrendingUp} color={theme.colors.primary} />
         <HUDCard title="Exposure (VaR)" value={`$${(data.riskMetrics.portfolio_var || 0).toLocaleString()}`} subValue={`Risk Score: ${data.riskMetrics.risk_score?.toFixed(1) || '0.0'}/10`} icon={Shield} color={theme.colors.warning} />
         <HUDCard title="Win Rate" value={`${((data.performance.win_rate || 0) * 100).toFixed(1)}%`} subValue={`${data.performance.total_trades || 0} Trades`} icon={Zap} color={theme.colors.secondary} />
-        <HUDCard title="System Health" value={isConnected ? 'OPTIMAL' : 'OFFLINE'} subValue={`${Object.keys(data.status.components || {}).length} Services Active`} icon={Activity} color={theme.colors.accent} />
+        <HUDCard title="System Health" value={isConnected ? 'OPTIMAL' : 'DEGRADED'} subValue={isConnected ? `${Object.keys(data.status.components || {}).length} Services Active` : 'Reconnecting…'} icon={Activity} color={isConnected ? theme.colors.accent : theme.colors.warning} />
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '24px' }}>
@@ -609,7 +626,8 @@ const AdvancedDashboard = ({ onLogout }) => {
         </div>
       </div>
     </div>
-  );
+    );
+  };
 
   const renderKenyaNSE = () => {
     const positionsBySymbol = Object.fromEntries((data.positions || []).map(p => [p.symbol, p]));
