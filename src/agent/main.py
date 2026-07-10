@@ -876,12 +876,31 @@ class TradingAgent:
                                 # Auto-apply safe changes
                                 auto_applied, escalated = engine.apply_improvements(plan, require_approval=False)
                                 logger.info(f"Retrospective assessment completed: applied {len(auto_applied)} auto-improvements, escalated {len(escalated)} structural proposals.")
-                                
+
                                 # Prune expired local cache entries to prevent memory leaks in local offline mode
                                 if state_store:
                                     pruned = state_store.clear_expired()
                                     if pruned > 0:
                                         logger.info(f"SwarmStateStore: Pruned {pruned} expired local cache entries.")
+
+                            # Universe scout: propose untracked NSE movers as operator escalations.
+                            # This NEVER auto-trades — it only creates a pending escalation; the
+                            # symbol is added to the runtime universe/watchlist solely on operator approval.
+                            try:
+                                from src.agent.universe_scout import propose_candidates
+                                nse = self.components.get('data_manager')
+                                em = self.components.get('escalation_manager')
+                                if em and nse:
+                                    tracked = set(self.config.get('data_manager', {}).get('nse_symbols', []))
+                                    movers = []
+                                    nse_conn = getattr(nse, 'connectors', {}).get('nse')
+                                    if nse_conn:
+                                        quotes = nse_conn.get_all_quotes()
+                                        movers = [{'symbol': q.get('symbol'), 'change_pct': q.get('change_pct')} for q in quotes]
+                                    for cand in propose_candidates(tracked, movers, [])[:3]:
+                                        em.create_escalation(None, cand['symbol'], 'add_symbol', cand['reason'], 'low')
+                            except Exception as e:
+                                logger.warning(f"Universe scout skipped: {e}")
                         except Exception as e:
                             logger.error(f"Error in self-assessment cycle: {e}")
                 

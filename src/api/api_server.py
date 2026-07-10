@@ -1020,13 +1020,25 @@ class TradingAPI:
             if not success:
                 return jsonify({'error': 'Escalation not found or already resolved'}), 404
                 
-            if status == 'approved' and escalation:
+            if status == 'approved' and escalation and escalation.get('action') == 'add_symbol':
+                # Universe-scout escalation: the operator just approved adding a brand-new
+                # symbol to the tracked universe. There is no research_signals row backing
+                # this escalation (signal_id is None), so add it to the runtime NSE universe
+                # and the persistent watchlist directly instead of going through the
+                # research-signal path below (which assumes market/recommendation data).
+                symbol = (escalation.get('symbol') or '').upper()
+                nse_symbols = self.trading_agent.config.setdefault('data_manager', {}).setdefault('nse_symbols', [])
+                if symbol not in nse_symbols:
+                    nse_symbols.append(symbol)
+                    logger.info(f"Added approved symbol {symbol} to config data_manager.nse_symbols")
+                em.add_to_watchlist(symbol, market='kenyan', source='universe_scout')
+            elif status == 'approved' and escalation:
                 symbol = escalation.get('symbol')
                 market = escalation.get('market', 'kenyan')
                 recommendation = escalation.get('recommendation', 'BUY')
                 target_price = escalation.get('target_price', 0.0)
                 rationale = escalation.get('rationale', '')
-                
+
                 em.add_to_watchlist(
                     symbol=symbol,
                     market=market,
@@ -1035,7 +1047,7 @@ class TradingAPI:
                     target_price=target_price,
                     rationale=rationale
                 )
-                
+
                 try:
                     dm = self.trading_agent.components.get('data_manager')
                     if dm:
@@ -1049,7 +1061,7 @@ class TradingAPI:
                                 logger.info(f"Added approved symbol {symbol} to data_manager.symbols")
                 except Exception as e:
                     logger.error(f"Failed to dynamically add approved symbol to data_manager: {e}")
-                    
+
             return jsonify({'success': True, 'escalation': escalation}), 200
 
         @self.app.route('/api/operator/watchlist', methods=['GET'])
