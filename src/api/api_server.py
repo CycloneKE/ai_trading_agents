@@ -679,7 +679,11 @@ class TradingAPI:
                     ]
                 except Exception:
                     pass
-                return build_agent_focus(positions, decisions, cash, equity)
+                payload = build_agent_focus(positions, decisions, cash, equity)
+                cp = self.trading_agent.config.get('cash_policy', {})
+                payload['cash']['target_deployment_pct'] = round(cp.get('target_deployment', 0.8) * 100, 1)
+                payload['cash']['policy_enabled'] = bool(cp.get('enabled'))
+                return payload
             try:
                 return jsonify(self._cached('agent_focus', 15, produce))
             except Exception as e:

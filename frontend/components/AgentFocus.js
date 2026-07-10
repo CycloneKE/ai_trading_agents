@@ -37,7 +37,8 @@ const AgentFocus = ({ onDrill }) => {
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}>
         <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 800, letterSpacing: '1px', color: '#fff' }}>AGENT OPERATIONS — LIVE</h3>
         <span style={{ fontSize: '12px', color: theme.colors.textMuted }}>
-          Capital deployed: <span style={{ color: theme.colors.primary, fontWeight: 800 }}>{focus.cash?.deployed_pct ?? 0}%</span>
+          Deployed: <span style={{ color: theme.colors.primary, fontWeight: 800 }}>{focus.cash?.deployed_pct ?? 0}%</span>
+          {focus.cash?.policy_enabled && <> / target {focus.cash?.target_deployment_pct}%</>}
         </span>
       </div>
       <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap' }}>
