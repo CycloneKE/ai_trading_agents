@@ -651,10 +651,10 @@ const AdvancedDashboard = ({ onLogout }) => {
         {(() => { const s = nseSession(); return (
           <HUDCard title="NSE Session" value={s.label.split(' · ')[0]} subValue={s.label.includes('·') ? s.label.split(' · ')[1] : `${nseData.quotes?.length || 0} Symbols`} icon={Activity} color={s.color} />
         ); })()}
-        <div onClick={() => nseData.movers?.gainers?.[0]?.symbol && setDrilldownSymbol(nseData.movers.gainers[0].symbol)} style={{ cursor: 'pointer' }}>
+        <div onClick={() => nseData.movers?.gainers?.[0]?.symbol && setDrilldownSymbol(nseData.movers.gainers[0].symbol)} style={{ cursor: 'pointer', flex: 1, minWidth: '220px' }}>
           <HUDCard title="Top NSE Gainer" value={nseData.movers?.gainers?.[0]?.symbol || '—'} subValue={`+${nseData.movers?.gainers?.[0]?.change_pct?.toFixed(2) || 0}%`} icon={TrendingUp} color={theme.colors.primary} />
         </div>
-        <div onClick={() => nseData.movers?.losers?.[0]?.symbol && setDrilldownSymbol(nseData.movers.losers[0].symbol)} style={{ cursor: 'pointer' }}>
+        <div onClick={() => nseData.movers?.losers?.[0]?.symbol && setDrilldownSymbol(nseData.movers.losers[0].symbol)} style={{ cursor: 'pointer', flex: 1, minWidth: '220px' }}>
           <HUDCard title="Top NSE Loser" value={nseData.movers?.losers?.[0]?.symbol || '—'} subValue={`${nseData.movers?.losers?.[0]?.change_pct?.toFixed(2) || 0}%`} icon={TrendingDown} color={theme.colors.danger} />
         </div>
         <HUDCard title="Your NSE Positions" value={heldCount} subValue={`of ${nseData.quotes?.length || 0} watched`} icon={Shield} color={theme.colors.secondary} />
