@@ -51,7 +51,7 @@ const SymbolDrilldown = ({ symbol, onClose }) => {
         const res = await fetch(`${getApiBase()}/api/symbol/${symbol}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
-        if (!res.ok) { setError(`HTTP ${res.status}`); return; }
+        if (!res.ok) { setError(res.status === 404 ? 'not_found' : `HTTP ${res.status}`); return; }
         const json = await res.json();
         if (alive) setData(json);
       } catch (e) {
@@ -99,7 +99,13 @@ const SymbolDrilldown = ({ symbol, onClose }) => {
           <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: theme.colors.textSecondary, cursor: 'pointer' }}><X size={22} /></button>
         </div>
 
-        {error && <div style={{ color: theme.colors.danger, padding: '20px' }}>Failed to load: {error}</div>}
+        {error && (
+          <div style={{ color: theme.colors.danger, padding: '20px' }}>
+            {error === 'not_found'
+              ? `"${symbol}" isn't a tracked symbol. Check the ticker — e.g. SCOM, EQTY (NSE) or AAPL, NVDA (US).`
+              : `Failed to load: ${error}`}
+          </div>
+        )}
         {!data && !error && <div style={{ color: theme.colors.textMuted, padding: '40px', textAlign: 'center' }}>Loading…</div>}
 
         {data && (
