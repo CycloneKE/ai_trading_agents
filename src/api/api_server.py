@@ -684,7 +684,8 @@ class TradingAPI:
                 return jsonify(self._cached('agent_focus', 15, produce))
             except Exception as e:
                 logger.error(f"Error building agent focus: {e}")
-                return jsonify({'holding': [], 'reviewing': [], 'traded': [], 'cash': {}})
+                return jsonify({'holding': [], 'reviewing': [], 'traded': [],
+                                 'cash': {'cash': 0, 'equity': 0, 'deployed_pct': 0.0}})
 
         @self.app.route('/api/correlation-matrix', methods=['GET'])
         @require_rate_limit
