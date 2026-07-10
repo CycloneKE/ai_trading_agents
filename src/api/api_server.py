@@ -646,6 +646,46 @@ class TradingAPI:
                 logger.error(f"Error getting agent activity: {e}")
                 return jsonify([])
 
+        @self.app.route('/api/agent-focus', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_agent_focus():
+            """Live board: holdings, symbols under review, today's executions."""
+            def produce():
+                from src.api.agent_focus import build_agent_focus
+                dj = getattr(self.trading_agent, 'decision_journal', None)
+                decisions = dj.recent(None, limit=100) if dj else []
+                positions, cash, equity = [], 0.0, 0.0
+                # Same accessor as /api/positions: broker_manager -> primary broker
+                # -> get_positions()/get_account_info(), so both endpoints agree.
+                broker_manager = self.trading_agent.components.get('broker_manager')
+                primary = broker_manager.get_broker() if broker_manager else None
+                try:
+                    acct = primary.get_account_info() if primary else None
+                    cash = float(acct.cash) if acct else 0.0
+                    equity = float(acct.equity) if acct else 0.0
+                except Exception:
+                    pass
+                try:
+                    raw_positions = primary.get_positions() if primary else []
+                    positions = [
+                        {
+                            'symbol': p.symbol,
+                            'quantity': p.quantity,
+                            'unrealized_pl_pct': (p.unrealized_pl / (p.avg_entry_price * p.quantity)) * 100
+                            if p.avg_entry_price and p.quantity else 0
+                        }
+                        for p in (raw_positions or [])
+                    ]
+                except Exception:
+                    pass
+                return build_agent_focus(positions, decisions, cash, equity)
+            try:
+                return jsonify(self._cached('agent_focus', 15, produce))
+            except Exception as e:
+                logger.error(f"Error building agent focus: {e}")
+                return jsonify({'holding': [], 'reviewing': [], 'traded': [], 'cash': {}})
+
         @self.app.route('/api/correlation-matrix', methods=['GET'])
         @require_rate_limit
         @token_required
