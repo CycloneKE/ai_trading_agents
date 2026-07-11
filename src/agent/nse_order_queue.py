@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS nse_order_tickets (
     fill_quantity         INTEGER,
     fill_at               TEXT,
     operator_notes        TEXT,
-    resolved_by           TEXT
+    resolved_by           TEXT,
+    book                  TEXT DEFAULT 'trading'  -- 'trading' | 'long_term'
 );
 CREATE INDEX IF NOT EXISTS idx_nse_tickets_status ON nse_order_tickets(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_nse_tickets_symbol ON nse_order_tickets(symbol);
@@ -53,16 +54,30 @@ class NseOrderQueue:
         self._conn.execute('PRAGMA journal_mode=WAL')
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        self._migrate_add_book_column()
         logger.info(f"NseOrderQueue initialized at {db_path}")
+
+    def _migrate_add_book_column(self) -> None:
+        """CREATE TABLE IF NOT EXISTS doesn't add columns to a table that
+        already existed before `book` was introduced — do that explicitly so
+        pre-existing escalations.db files keep working."""
+        cols = [row[1] for row in self._conn.execute(
+            "PRAGMA table_info(nse_order_tickets)").fetchall()]
+        if 'book' not in cols:
+            self._conn.execute(
+                "ALTER TABLE nse_order_tickets ADD COLUMN book TEXT DEFAULT 'trading'")
+            self._conn.commit()
 
     def create_ticket(self, symbol: str, side: str, quantity: int,
                       suggested_limit_price: Optional[float] = None,
                       rationale: str = '', ensemble_confidence: Optional[float] = None,
-                      llm_reasoning: str = '') -> Optional[int]:
+                      llm_reasoning: str = '', book: str = 'trading') -> Optional[int]:
         """Create a pending order ticket. Returns the ticket id, or None if an
-        identical pending ticket (same symbol+side) already exists — the agent
-        re-proposes the same NSE trade every scrape while the signal persists,
-        and we don't want a pile of duplicates waiting for the operator."""
+        identical pending ticket (same symbol+side+book) already exists — the
+        agent re-proposes the same trade every scrape/cycle while the signal
+        persists, and we don't want a pile of duplicates waiting for the
+        operator. `book` scopes the dedupe so a trading and a long_term
+        ticket for the same symbol/side never collide."""
         symbol = symbol.upper()
         side = side.lower()
         if side not in ('buy', 'sell') or quantity <= 0:
@@ -70,15 +85,15 @@ class NseOrderQueue:
         with self._lock:
             dup = self._conn.execute(
                 "SELECT id FROM nse_order_tickets WHERE symbol = ? AND side = ?"
-                " AND status = 'pending' LIMIT 1", (symbol, side)).fetchone()
+                " AND status = 'pending' AND book = ? LIMIT 1", (symbol, side, book)).fetchone()
             if dup:
                 return None
             cur = self._conn.execute(
                 "INSERT INTO nse_order_tickets (created_at, symbol, side, quantity,"
                 " suggested_limit_price, rationale, ensemble_confidence, llm_reasoning,"
-                " status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+                " status, book) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
                 (datetime.utcnow().isoformat(), symbol, side, int(quantity),
-                 suggested_limit_price, rationale, ensemble_confidence, llm_reasoning))
+                 suggested_limit_price, rationale, ensemble_confidence, llm_reasoning, book))
             self._conn.commit()
             return cur.lastrowid
 
@@ -175,27 +190,28 @@ class NseOrderQueue:
             self._conn.commit()
             return cur.rowcount
 
-    def positions(self) -> Dict[str, Dict[str, Any]]:
+    def positions(self, book: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
         """Net position per symbol from filled tickets: signed quantity and
-        the volume-weighted average entry price (KES)."""
+        the volume-weighted average entry price (KES). Pass `book` to scope
+        to just 'trading' or 'long_term' fills; omit for the blended view."""
         with self._lock:
-            cur = self._conn.execute(
-                "SELECT symbol, side, fill_quantity, fill_price FROM nse_order_tickets"
-                " WHERE status = 'filled' AND fill_quantity > 0 ORDER BY fill_at ASC")
-            rows = cur.fetchall()
-        book: Dict[str, Dict[str, Any]] = {}
+            query = ("SELECT symbol, side, fill_quantity, fill_price FROM nse_order_tickets"
+                     " WHERE status = 'filled' AND fill_quantity > 0")
+            params: Tuple[Any, ...] = ()
+            if book is not None:
+                query += " AND book = ?"
+                params = (book,)
+            query += " ORDER BY fill_at ASC"
+            rows = self._conn.execute(query, params).fetchall()
+        book_map: Dict[str, Dict[str, Any]] = {}
         for symbol, side, qty, price in rows:
-            b = book.setdefault(symbol, {'quantity': 0, 'buy_qty': 0, 'buy_cost': 0.0})
+            b = book_map.setdefault(symbol, {'quantity': 0, 'buy_qty': 0, 'buy_cost': 0.0})
             b['quantity'] += qty if side == 'buy' else -qty
-            # Average entry is the volume-weighted average of BUY fills; a
-            # sell reduces net quantity but does not change the buy VWAP.
-            # (v1 keeps this simple — realized P&L is derived from the
-            # order_journal, not here.)
             if side == 'buy':
                 b['buy_qty'] += qty
                 b['buy_cost'] += qty * price
         out = {}
-        for symbol, b in book.items():
+        for symbol, b in book_map.items():
             avg = round(b['buy_cost'] / b['buy_qty'], 2) if b['buy_qty'] > 0 else 0.0
             out[symbol] = {'quantity': b['quantity'], 'avg_entry_price_kes': avg}
         return out

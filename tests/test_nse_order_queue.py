@@ -1,5 +1,6 @@
 # tests/test_nse_order_queue.py
 import os
+import sqlite3
 import tempfile
 
 import pytest
@@ -99,3 +100,58 @@ def test_mark_filled_writes_order_journal(queue):
     assert ok is True
     assert len(j.intents) == 1 and j.intents[0][1] == 'EABL'
     assert j.finals[0][1] == 'filled' and j.finals[0][3] == 152.0
+
+
+def test_default_book_is_trading(queue):
+    queue.create_ticket('SCOM', 'buy', 100, suggested_limit_price=15.0)
+    pending = queue.get_pending()
+    assert pending[0]['book'] == 'trading'
+
+
+def test_long_term_book_does_not_collide_with_trading_dup_check(queue):
+    trading_id = queue.create_ticket('SCOM', 'buy', 100, suggested_limit_price=15.0, book='trading')
+    sleeve_id = queue.create_ticket('SCOM', 'buy', 50, suggested_limit_price=15.0, book='long_term')
+    assert trading_id is not None
+    assert sleeve_id is not None
+    books = {t['book'] for t in queue.get_pending()}
+    assert books == {'trading', 'long_term'}
+
+
+def test_positions_filtered_by_book(queue):
+    trading_id = queue.create_ticket('SCOM', 'buy', 1000, book='trading')
+    queue.mark_filled(trading_id, 15.0, 1000)
+    sleeve_id = queue.create_ticket('SCOM', 'buy', 200, book='long_term')
+    queue.mark_filled(sleeve_id, 16.0, 200)
+
+    trading_only = queue.positions(book='trading')
+    sleeve_only = queue.positions(book='long_term')
+    everything = queue.positions()
+
+    assert trading_only['SCOM']['quantity'] == 1000
+    assert sleeve_only['SCOM']['quantity'] == 200
+    assert everything['SCOM']['quantity'] == 1200
+
+
+def test_migrates_existing_db_without_book_column(tmp_path):
+    path = str(tmp_path / 'old_schema.db')
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE nse_order_tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
+            symbol TEXT NOT NULL, side TEXT NOT NULL, quantity INTEGER NOT NULL,
+            suggested_limit_price REAL, rationale TEXT, ensemble_confidence REAL,
+            llm_reasoning TEXT, status TEXT DEFAULT 'pending', fill_price REAL,
+            fill_quantity INTEGER, fill_at TEXT, operator_notes TEXT, resolved_by TEXT
+        );
+    """)
+    conn.execute(
+        "INSERT INTO nse_order_tickets (created_at, symbol, side, quantity, status)"
+        " VALUES ('2026-01-01T00:00:00', 'OLD', 'buy', 10, 'pending')")
+    conn.commit()
+    conn.close()
+
+    q = NseOrderQueue(path)
+    pending = q.get_pending()
+    assert len(pending) == 1
+    assert pending[0]['book'] == 'trading'  # DEFAULT backfilled onto the pre-existing row
+    q.close()
