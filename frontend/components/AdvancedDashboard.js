@@ -340,6 +340,115 @@ const ResearchView = ({ activeTab, fetchData, onDrill }) => {
   );
 };
 
+// NSE order tickets: the agent proposes NSE trades here (no broker API), and
+// the operator keys them into the AIB-AXYS portal and records the fill.
+const NseTicketsPanel = ({ isOperator, activeTab }) => {
+  const [pending, setPending] = useState([]);
+  const [fills, setFills] = useState([]);
+  const token = typeof window !== 'undefined' ? localStorage.getItem('trading_token') : null;
+
+  const load = useCallback(async () => {
+    if (!isOperator) return;
+    try {
+      const res = await fetch(`${getApiBase()}/api/operator/nse-tickets`, { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) {
+        const j = await res.json();
+        setPending(j.pending || []);
+        setFills(j.recent_fills || []);
+      }
+    } catch (e) { /* transient */ }
+  }, [isOperator, token]);
+
+  useEffect(() => {
+    if (activeTab === 'nse' && isOperator) {
+      load();
+      const id = setInterval(load, 20000);
+      return () => clearInterval(id);
+    }
+  }, [activeTab, isOperator, load]);
+
+  const act = async (id, verb, body) => {
+    try {
+      const res = await fetch(`${getApiBase()}/api/operator/nse-tickets/${id}/${verb}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body || {}),
+      });
+      if (res.ok) load();
+      else { const j = await res.json().catch(() => ({})); window.alert(j.error || 'Action failed'); }
+    } catch (e) { window.alert('Request failed'); }
+  };
+
+  const onFill = (t) => {
+    const priceStr = window.prompt(`Actual fill price (KES) for ${t.side.toUpperCase()} ${t.quantity} ${t.symbol}:`, t.suggested_limit_price ?? '');
+    if (priceStr === null) return;
+    const qtyStr = window.prompt(`Actual fill quantity for ${t.symbol}:`, t.quantity);
+    if (qtyStr === null) return;
+    const fill_price = parseFloat(priceStr), fill_quantity = parseInt(qtyStr, 10);
+    if (!(fill_price > 0) || !(fill_quantity > 0)) { window.alert('Fill price and quantity must be positive numbers.'); return; }
+    act(t.id, 'fill', { fill_price, fill_quantity });
+  };
+
+  if (!isOperator) {
+    return (
+      <div style={glassCard}>
+        <SectionHeader title="NSE Order Tickets" icon={Layers} />
+        <div style={{ padding: '20px', textAlign: 'center', color: theme.colors.textMuted }}>Operator view only.</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={glassCard}>
+      <SectionHeader title="NSE Order Tickets" icon={Layers} />
+      <div style={{ marginBottom: '12px', fontSize: '11px', color: theme.colors.textMuted }}>
+        The agent proposes NSE trades here (no broker API). Place the order in your broker portal, then record the fill.
+      </div>
+      {pending.length > 0 ? (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ textAlign: 'left', color: theme.colors.textMuted, fontSize: '12px', borderBottom: `1px solid ${theme.colors.border}` }}>
+                <th style={{ padding: '10px' }}>SYMBOL</th><th style={{ padding: '10px' }}>SIDE</th><th style={{ padding: '10px' }}>QTY</th><th style={{ padding: '10px' }}>LIMIT (KES)</th><th style={{ padding: '10px' }}>CONF</th><th style={{ padding: '10px' }}>STATUS</th><th style={{ padding: '10px' }}>ACTIONS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pending.map((t) => (
+                <tr key={t.id} style={{ borderBottom: `1px solid ${theme.colors.border}` }} title={t.llm_reasoning || t.rationale || ''}>
+                  <td style={{ padding: '10px', fontWeight: 700 }}>{t.symbol}</td>
+                  <td style={{ padding: '10px', color: t.side === 'buy' ? theme.colors.primary : theme.colors.danger, fontWeight: 700 }}>{t.side.toUpperCase()}</td>
+                  <td style={{ padding: '10px' }}>{t.quantity}</td>
+                  <td style={{ padding: '10px' }}>{t.suggested_limit_price?.toFixed?.(2) ?? t.suggested_limit_price}</td>
+                  <td style={{ padding: '10px' }}>{((t.ensemble_confidence || 0) * 100).toFixed(0)}%</td>
+                  <td style={{ padding: '10px', textTransform: 'uppercase', fontSize: '11px', color: t.status === 'placed' ? theme.colors.warning : theme.colors.textMuted }}>{t.status}</td>
+                  <td style={{ padding: '10px', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                    {t.status === 'pending' && <button onClick={() => act(t.id, 'place')} style={{ background: theme.colors.bgSecondary, color: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: '6px', padding: '4px 10px', cursor: 'pointer', fontSize: '11px' }}>Mark Placed</button>}
+                    <button onClick={() => onFill(t)} style={{ background: theme.colors.primary, color: '#000', border: 'none', borderRadius: '6px', padding: '4px 10px', cursor: 'pointer', fontSize: '11px', fontWeight: 700 }}>Mark Filled</button>
+                    <button onClick={() => act(t.id, 'cancel')} style={{ background: 'transparent', color: theme.colors.danger, border: `1px solid ${theme.colors.danger}55`, borderRadius: '6px', padding: '4px 10px', cursor: 'pointer', fontSize: '11px' }}>Cancel</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div style={{ padding: '20px', textAlign: 'center', color: theme.colors.textMuted }}>No pending NSE order tickets.</div>
+      )}
+      {fills.length > 0 && (
+        <div style={{ marginTop: '18px' }}>
+          <div style={{ fontSize: '11px', fontWeight: 800, color: theme.colors.textMuted, marginBottom: '8px' }}>RECENT NSE FILLS</div>
+          {fills.slice(0, 8).map((f) => (
+            <div key={f.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: `1px solid ${theme.colors.border}`, fontSize: '12px' }}>
+              <span><span style={{ fontWeight: 700 }}>{f.symbol}</span> <span style={{ color: f.side === 'buy' ? theme.colors.primary : theme.colors.danger }}>{f.side.toUpperCase()}</span> {f.fill_quantity} @ {f.fill_price} KES</span>
+              <span style={{ color: theme.colors.textMuted }}>{f.fill_at ? new Date(f.fill_at).toLocaleString() : ''}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const AdvancedDashboard = ({ onLogout }) => {
 
   const [activeTab, setActiveTab] = useState('overview');
@@ -715,6 +824,7 @@ const AdvancedDashboard = ({ onLogout }) => {
           </table>
         </div>
       </div>
+      <NseTicketsPanel isOperator={isOperator} activeTab={activeTab} />
     </div>
     );
   };

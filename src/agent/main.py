@@ -222,6 +222,13 @@ class TradingAgent:
                 em,
                 self.config
             )
+
+            # NSE order-ticket queue: NSE has no broker API, so NSE trade
+            # decisions become tickets a human keys into the AIB-AXYS portal.
+            from src.agent.nse_order_queue import NseOrderQueue
+            self.components['nse_order_queue'] = NseOrderQueue()
+            self._last_nse_eval = 0.0
+            self._nse_last_price = {}  # symbol -> last-evaluated price (freshness guard)
             self.components['self_assessment'] = SelfAssessmentEngine(
                 self.components['llm_orchestrator'],
                 em,
@@ -317,6 +324,8 @@ class TradingAgent:
                 self.decision_journal.close()
             if 'escalation_manager' in self.components:
                 self.components['escalation_manager'].close()
+            if 'nse_order_queue' in self.components:
+                self.components['nse_order_queue'].close()
             if 'self_assessment' in self.components:
                 self.components['self_assessment'].close()
             if 'sector_specialist' in self.components:
@@ -413,6 +422,32 @@ class TradingAgent:
                     self.components['strategy_manager'].warm_start(bars_by_symbol)
         except Exception as e:
             logger.warning(f"History warm-start failed (non-fatal): {e}")
+
+        # Warm-start NSE symbols too, from the local historical CSVs the NSE
+        # scraper seeds — otherwise NSE strategies are blind for lookback_period
+        # scrape cycles (many days at a 30-min cadence).
+        try:
+            import csv as _csv
+            from pathlib import Path as _Path
+            nse_symbols = self.config.get('data_manager', {}).get('nse_symbols', [])
+            hist_dir = _Path(__file__).resolve().parent.parent.parent / 'data' / 'nse_historical'
+            nse_bars = {}
+            for sym in nse_symbols:
+                csv_path = hist_dir / f"{sym}.csv"
+                if not csv_path.exists():
+                    continue
+                try:
+                    with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+                        closes = [float(r['close']) for r in _csv.DictReader(f)
+                                  if r.get('close') and float(r['close']) > 0]
+                    if closes:
+                        nse_bars[sym] = closes[-60:]
+                except Exception as e:
+                    logger.debug(f"No NSE warm-start bars for {sym}: {e}")
+            if nse_bars:
+                self.components['strategy_manager'].warm_start(nse_bars)
+        except Exception as e:
+            logger.warning(f"NSE history warm-start failed (non-fatal): {e}")
 
         # LLM weight allocator: proposes ensemble weight tilts from realized
         # attribution on a slow cadence; hard guardrails clamp every proposal
@@ -823,11 +858,26 @@ class TradingAgent:
 
                     # Process signals if any were generated
                     if all_signals:
-                        # Assess risk for all signals
-                        risk_assessment = self.components['risk_calculator'].assess_portfolio_risk(
-                            market_data, all_signals
-                        )
-                        
+                        # Assess risk for all signals. risk_calculator.calculate_portfolio_risk()
+                        # expects historical positions+price_data (a different shape than
+                        # what's available here) and its return shape doesn't match what
+                        # _check_risk_limits reads either — this call was never reachable
+                        # before (all_signals was always empty). Build the flat shape
+                        # _check_risk_limits actually expects from data that's already
+                        # flowing correctly: the live risk manager's current metrics plus
+                        # the position sizes the proposed signals themselves carry.
+                        live_metrics = {}
+                        if getattr(self, 'risk_manager', None):
+                            try:
+                                live_metrics = self.risk_manager.get_risk_report().get('current_metrics', {})
+                            except Exception as e:
+                                logger.debug(f"Risk report unavailable for risk-limit check: {e}")
+                        risk_assessment = {
+                            'portfolio_var': live_metrics.get('portfolio_var', 0),
+                            'current_drawdown': live_metrics.get('max_drawdown', 0),
+                            'position_sizes': {sym: sig.get('position_size', 0) for sym, sig in all_signals.items()},
+                        }
+
                         # Check risk limits
                         if self._check_risk_limits(risk_assessment):
                             # Execute trades
@@ -904,16 +954,138 @@ class TradingAgent:
                         except Exception as e:
                             logger.error(f"Error in self-assessment cycle: {e}")
                 
+                # NSE Kenya decision pass — separate cadence from the US loop
+                # (NSE prices only refresh on the ~30-min scrape). Internally
+                # rate-limited and guarded by market hours + price freshness.
+                try:
+                    self._evaluate_nse_symbols()
+                except Exception as e:
+                    logger.error(f"NSE evaluation error: {e}")
+
                 # Calculate sleep time to maintain consistent loop interval
                 loop_duration = time.time() - loop_start_time
                 sleep_time = max(0, loop_interval - loop_duration)
                 if sleep_time > 0:
                     time.sleep(sleep_time)
-                    
+
             except Exception as e:
                 logger.error(f"Error in trading loop: {str(e)}")
                 time.sleep(loop_interval)  # Wait before retrying
-    
+
+    def _evaluate_nse_symbols(self):
+        """Run the standard decision pipeline over NSE symbols and turn
+        non-hold, LLM-approved signals into operator order tickets (NSE has no
+        broker API to auto-execute against). Rate-limited to the scrape
+        cadence and guarded by market hours + per-symbol price freshness."""
+        queue = self.components.get('nse_order_queue')
+        dm = self.components.get('data_manager')
+        nse = dm.connectors.get('nse') if dm and hasattr(dm, 'connectors') else None
+        strategy_manager = self.components.get('strategy_manager')
+        if not queue or not nse or not strategy_manager:
+            return
+
+        interval = self.config.get('data_manager', {}).get('nse_eval_interval', 1800)
+        now = time.time()
+        if now - getattr(self, '_last_nse_eval', 0) < interval:
+            return
+        if not nse.is_market_open():
+            return
+        self._last_nse_eval = now
+
+        nse_cfg = self.config.get('nse_order_tickets', {})
+        try:
+            queue.expire_stale(nse_cfg.get('max_age_hours', 24))
+        except Exception as e:
+            logger.debug(f"NSE ticket expiry skipped: {e}")
+
+        llm = self.components.get('llm_orchestrator')
+        base_notional = nse_cfg.get('trade_notional_kes', 50000)
+        cycle = int(now // interval)
+        nse_symbols = self.config.get('data_manager', {}).get('nse_symbols', [])
+
+        for symbol in nse_symbols:
+            try:
+                quote = nse.get_quote(symbol)
+                if not quote or quote.get('_stale') or not quote.get('price_kes'):
+                    continue
+                price = float(quote['price_kes'])
+                if price <= 0:
+                    continue
+
+                # Freshness guard: skip a symbol whose price hasn't moved since
+                # last eval so we don't feed a repeated stale price into the
+                # strategies' rolling SMA/RSI buffers.
+                last = self._nse_last_price.get(symbol)
+                if last is not None and abs(price - last) < 1e-9:
+                    continue
+                self._nse_last_price[symbol] = price
+
+                symbol_data = {
+                    'symbol': symbol, 'price': price, 'close': price,
+                    'open': float(quote.get('open_kes') or price),
+                    'volume': quote.get('volume', 0),
+                    'source': quote.get('source', 'nse'), 'market': 'nse',
+                }
+                signals = strategy_manager.generate_signals(symbol_data)
+
+                dec = {
+                    'symbol': symbol, 'cycle': cycle, 'action': 'hold',
+                    'skip_reason': 'hold', 'price': price,
+                    'ensemble_confidence': 0.0, 'per_strategy': {},
+                    'llm_verdict': {}, 'executed': False,
+                }
+                if signals:
+                    dec['action'] = signals.get('action', 'hold')
+                    dec['ensemble_confidence'] = signals.get('confidence', 0.0)
+                    dec['per_strategy'] = {
+                        n: {'action': s.get('action'), 'confidence': s.get('confidence')}
+                        for n, s in (signals.get('per_strategy') or {}).items()
+                    }
+
+                validated = signals
+                if signals and signals.get('action') != 'hold' and llm:
+                    validated = llm.validate_trade(symbol, signals, symbol_data, None)
+                    dec['llm_verdict'] = {
+                        'action': validated.get('action'),
+                        'confidence': validated.get('confidence'),
+                        'reasoning': validated.get('reasoning'),
+                    }
+                    if validated.get('action') == 'hold':
+                        dec['skip_reason'] = 'llm_veto'
+
+                action = (validated or {}).get('action', 'hold')
+                confidence = (validated or {}).get('confidence', 0.0)
+                if action in ('buy', 'sell') and confidence > 0.1 and not self.trading_halted:
+                    position_size = (validated.get('position_size')
+                                     or signals.get('position_size') or 0.1)
+                    notional = base_notional * min(max(position_size, 0.1), 1.0)
+                    qty = int(notional / price)
+                    if qty < 1:
+                        dec['skip_reason'] = 'min_notional'
+                    else:
+                        ticket_id = queue.create_ticket(
+                            symbol, action, qty, suggested_limit_price=round(price, 2),
+                            rationale=f"{action.upper()} signal (ensemble conf {confidence:.2f})",
+                            ensemble_confidence=confidence,
+                            llm_reasoning=(validated.get('reasoning') if validated else '') or '')
+                        if ticket_id:
+                            dec['skip_reason'] = None  # actionable signal, ticket queued
+                            logger.info(
+                                f"NSE order ticket #{ticket_id}: {action} {qty} {symbol} "
+                                f"@ {price:.2f} KES (conf {confidence:.2f})")
+                        else:
+                            dec['skip_reason'] = 'duplicate'
+                elif self.trading_halted and action in ('buy', 'sell'):
+                    dec['skip_reason'] = 'halted'
+
+                if self.decision_journal:
+                    try:
+                        self.decision_journal.record(dec)
+                    except Exception as e:
+                        logger.debug(f"NSE decision record error: {e}")
+            except Exception as e:
+                logger.error(f"Error evaluating NSE symbol {symbol}: {e}")
+
     def _check_risk_limits(self, risk_assessment: Dict[str, Any]) -> bool:
         """
         Check if risk assessment is within acceptable limits.
@@ -1135,6 +1307,22 @@ class TradingAgent:
                         sizing_cfg = self.config.get('trading', {})
                         cycle = int(time.time() // self.config.get('trading_loop_interval', 60))
 
+                        # Alpaca rejects fractional orders that open/extend a
+                        # short position (fractional trading only supports
+                        # going long or closing an existing long). A sell with
+                        # no existing long to close is a short — force whole
+                        # shares for it regardless of the fractional config.
+                        existing_qty = 0.0
+                        if action == 'sell':
+                            try:
+                                existing_qty = next(
+                                    (p.quantity for p in (broker.get_positions() or [])
+                                     if p.symbol == symbol), 0.0)
+                            except Exception as e:
+                                logger.debug(f"Position lookup failed for {symbol}: {e}")
+                        is_short = action == 'sell' and existing_qty <= 0
+                        allow_fractional = sizing_cfg.get('allow_fractional', True) and not is_short
+
                         for strategy_name, target_value in executions:
                             # Dollar-notional sizing with fractional shares,
                             # so small accounts get properly sized positions
@@ -1142,7 +1330,7 @@ class TradingAgent:
                             sized = size_order(
                                 target_value, price,
                                 min_notional=sizing_cfg.get('min_notional', 5.0),
-                                allow_fractional=sizing_cfg.get('allow_fractional', True),
+                                allow_fractional=allow_fractional,
                             )
                             if not sized:
                                 _note(symbol, 'min_notional')

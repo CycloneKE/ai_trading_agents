@@ -1064,6 +1064,76 @@ class TradingAPI:
 
             return jsonify({'success': True, 'escalation': escalation}), 200
 
+        # --- NSE order tickets (Approach A: manual execution via broker portal) ---
+        @self.app.route('/api/operator/nse-tickets', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        @role_required('operator')
+        def get_nse_tickets():
+            """Pending/placed NSE order tickets plus recent fills."""
+            q = self.trading_agent.components.get('nse_order_queue')
+            if not q:
+                return jsonify({'error': 'NSE order queue not initialized'}), 500
+            return jsonify({
+                'pending': q.get_pending(),
+                'recent_fills': q.recent_fills(),
+                'positions': q.positions(),
+            }), 200
+
+        @self.app.route('/api/operator/nse-tickets/<int:ticket_id>/place', methods=['POST'])
+        @require_rate_limit
+        @token_required
+        @role_required('operator')
+        def place_nse_ticket(ticket_id):
+            """Mark a ticket as placed in the broker portal."""
+            q = self.trading_agent.components.get('nse_order_queue')
+            if not q:
+                return jsonify({'error': 'NSE order queue not initialized'}), 500
+            ok = q.mark_placed(ticket_id, resolved_by=getattr(g, 'current_user', 'operator'))
+            if not ok:
+                return jsonify({'error': 'Ticket not found or not pending'}), 404
+            return jsonify({'success': True}), 200
+
+        @self.app.route('/api/operator/nse-tickets/<int:ticket_id>/fill', methods=['POST'])
+        @require_rate_limit
+        @token_required
+        @role_required('operator')
+        def fill_nse_ticket(ticket_id):
+            """Record the actual fill (KES price + quantity) for a ticket."""
+            q = self.trading_agent.components.get('nse_order_queue')
+            if not q:
+                return jsonify({'error': 'NSE order queue not initialized'}), 500
+            data = request.get_json(silent=True) or {}
+            try:
+                fill_price = float(data.get('fill_price'))
+                fill_quantity = int(data.get('fill_quantity'))
+            except (TypeError, ValueError):
+                return jsonify({'error': 'fill_price and fill_quantity are required and numeric'}), 400
+            ok, ticket = q.mark_filled(
+                ticket_id, fill_price, fill_quantity,
+                resolved_by=getattr(g, 'current_user', 'operator'),
+                notes=data.get('notes', ''),
+                order_journal=getattr(self.trading_agent, 'order_journal', None))
+            if not ok:
+                return jsonify({'error': 'Ticket not found, already resolved, or bad fill values'}), 400
+            return jsonify({'success': True, 'ticket': ticket}), 200
+
+        @self.app.route('/api/operator/nse-tickets/<int:ticket_id>/cancel', methods=['POST'])
+        @require_rate_limit
+        @token_required
+        @role_required('operator')
+        def cancel_nse_ticket(ticket_id):
+            """Cancel/reject a pending or placed ticket."""
+            q = self.trading_agent.components.get('nse_order_queue')
+            if not q:
+                return jsonify({'error': 'NSE order queue not initialized'}), 500
+            data = request.get_json(silent=True) or {}
+            ok = q.cancel(ticket_id, resolved_by=getattr(g, 'current_user', 'operator'),
+                          notes=data.get('notes', ''))
+            if not ok:
+                return jsonify({'error': 'Ticket not found or already resolved'}), 404
+            return jsonify({'success': True}), 200
+
         @self.app.route('/api/operator/watchlist', methods=['GET'])
         @require_rate_limit
         @token_required
