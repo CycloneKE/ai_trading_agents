@@ -24,6 +24,7 @@ import sys
 import csv
 import time
 import json
+import re
 import logging
 import random
 import threading
@@ -233,6 +234,59 @@ def scrape_afx_kwayisi(symbols: List[str]) -> Dict[str, DailyBar]:
     except Exception as e:
         logger.warning(f"AFX Kwayisi scrape error: {e}")
     return results
+
+
+_COMPANY_PAGE_FIELDS = {
+    'Earnings Per Share': 'eps',
+    'Price/Earning Ratio': 'pe_ratio',
+    'Dividend Per Share': 'dividend_per_share',
+    'Dividend Yield': 'dividend_yield_pct',
+}
+
+
+def scrape_afx_company_page(symbol: str) -> Optional[Dict[str, Any]]:
+    """Scrape EPS / P-E / dividend fields from a company's afx.kwayisi.org
+    page. Returns None on any network error, non-200, or unrecognized page
+    layout — callers must treat that as "no fundamentals available", never
+    guess a value."""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    url = f"https://afx.kwayisi.org/nse/{symbol.lower()}.html"
+    try:
+        resp = requests.get(url, headers=headers, timeout=20)
+        if resp.status_code != 200:
+            return None
+        html_text = resp.text
+    except Exception as e:
+        logger.warning(f"AFX company page scrape error ({symbol}): {e}")
+        return None
+    return _parse_company_page(html_text, symbol)
+
+
+def _parse_company_page(html_text: str, symbol: str) -> Optional[Dict[str, Any]]:
+    """Pure parser for the "Growth & Valuation" table afx renders as
+    <tr><td>Label</td><td>Value</td></tr> rows. No network, safe to unit test
+    directly against a captured HTML fixture."""
+    marker = html_text.find('Growth &amp; Valuation')
+    if marker == -1:
+        marker = html_text.find('Growth & Valuation')
+    if marker == -1:
+        return None
+    section = html_text[marker:marker + 2000]
+    row_re = re.compile(r'<td>([^<]+)</td>\s*<td[^>]*>([^<]*)</td>', re.IGNORECASE)
+    values: Dict[str, str] = {}
+    for label, value in row_re.findall(section):
+        label = label.strip()
+        if label in _COMPANY_PAGE_FIELDS:
+            values[_COMPANY_PAGE_FIELDS[label]] = value.strip()
+    if 'eps' not in values or 'dividend_yield_pct' not in values:
+        return None
+    return {
+        'symbol': symbol.upper(),
+        'eps': _parse_num(values.get('eps', '0')),
+        'pe_ratio': _parse_num(values.get('pe_ratio', '0')),
+        'dividend_per_share': _parse_num(values.get('dividend_per_share', '0')),
+        'dividend_yield_pct': _parse_num(values.get('dividend_yield_pct', '0')),
+    }
 
 
 def _parse_num(s: str) -> float:
