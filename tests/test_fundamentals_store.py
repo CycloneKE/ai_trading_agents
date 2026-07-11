@@ -104,3 +104,36 @@ def test_get_all_skips_missing_symbols(dividends_file, monkeypatch):
 
     result = store.get_all(['SCOM', 'UNKNOWN'])
     assert [f.symbol for f in result] == ['SCOM']
+
+
+def test_is_stale_true_for_none_last_updated():
+    f = Fundamentals('SCOM', 6.5, 2.3, 2.4, 0.48, 8, 'positive', 100000, None)
+    assert f.is_stale(400) is True
+
+
+def test_is_stale_handles_tz_naive_date():
+    # Old tz-naive date should be stale
+    old_tz_naive = '2020-01-01'
+    f_old = Fundamentals('SCOM', 6.5, 2.3, 2.4, 0.48, 8, 'positive', 100000, old_tz_naive)
+    assert f_old.is_stale(400) is True
+
+    # Recent tz-naive date should not be stale
+    today_tz_naive = datetime.now().isoformat()
+    f_recent = Fundamentals('SCOM', 6.5, 2.3, 2.4, 0.48, 8, 'positive', 100000, today_tz_naive)
+    assert f_recent.is_stale(400) is False
+
+
+def test_scraped_zero_yield_wins_over_operator_and_excludes(dividends_file, monkeypatch):
+    with open(dividends_file, 'w') as f:
+        json.dump({'SCOM': {'yield_ttm_pct': 6.0, 'dividend_per_share_kes': 2.0,
+                            'eps_kes': 2.0, 'years_consecutive_paid': 5,
+                            'eps_trend': 'flat', 'last_updated': '2026-07-01'}}, f)
+    store = FundamentalsStore(dividends_path=dividends_file)
+    monkeypatch.setattr(
+        'src.agent.sleeve.fundamentals_store.scrape_afx_company_page',
+        lambda s: {'symbol': 'SCOM', 'eps': 2.0, 'pe_ratio': 10.0,
+                   'dividend_per_share': 0.0, 'dividend_yield_pct': 0.0})
+    monkeypatch.setattr('src.agent.sleeve.fundamentals_store.load_csv', lambda s: [])
+
+    # Scraped zero yield (suspended dividend) should win and cause exclusion
+    assert store.get('SCOM') is None

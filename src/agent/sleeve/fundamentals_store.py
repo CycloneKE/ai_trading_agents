@@ -37,7 +37,7 @@ class Fundamentals:
     def is_stale(self, stale_days: int) -> bool:
         try:
             updated = datetime.fromisoformat(self.last_updated)
-        except ValueError:
+        except (ValueError, TypeError):
             return True
         if updated.tzinfo is None:
             updated = updated.replace(tzinfo=timezone.utc)
@@ -69,14 +69,19 @@ class FundamentalsStore:
         volumes = [int(float(b.get('volume', 0) or 0)) for b in recent]
         return int(statistics.mean(volumes)) if volumes else 0
 
+    @staticmethod
+    def _prefer_scraped(scraped_val: Any, operator_val: Any) -> Any:
+        """Prefer scraped value over operator value, including legitimate zeros."""
+        return scraped_val if scraped_val is not None else operator_val
+
     def get(self, symbol: str) -> Optional[Fundamentals]:
         operator = self._load_operator_data().get(symbol.upper())
         if not operator:
             return None
         scraped = scrape_afx_company_page(symbol) or {}
-        eps = scraped.get('eps') or operator.get('eps_kes', 0.0)
-        dps = scraped.get('dividend_per_share') or operator.get('dividend_per_share_kes', 0.0)
-        yield_pct = scraped.get('dividend_yield_pct') or operator.get('yield_ttm_pct', 0.0)
+        eps = self._prefer_scraped(scraped.get('eps'), operator.get('eps_kes', 0.0))
+        dps = self._prefer_scraped(scraped.get('dividend_per_share'), operator.get('dividend_per_share_kes', 0.0))
+        yield_pct = self._prefer_scraped(scraped.get('dividend_yield_pct'), operator.get('yield_ttm_pct', 0.0))
         if not yield_pct or not dps:
             return None
         payout_ratio = round(dps / eps, 4) if eps > 0 else operator.get('payout_ratio_override')
