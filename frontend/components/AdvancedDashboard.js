@@ -807,16 +807,25 @@ const AdvancedDashboard = ({ onLogout }) => {
         <div style={{ marginBottom: '12px', fontSize: '11px', color: theme.colors.textMuted }}>
           The agent watches all {nseData.quotes?.length || 0} symbols below every cycle. Rows highlighted are symbols currently held.
         </div>
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+          {[['all', 'ALL'], ['held', 'HELD'], ['movers', 'MOVERS ±1%']].map(([id, label]) => (
+            <button key={id} onClick={() => setNseFilter(id)} style={{
+              backgroundColor: nseFilter === id ? theme.colors.primary : 'rgba(255,255,255,0.05)',
+              color: nseFilter === id ? '#000' : theme.colors.textSecondary,
+              border: 'none', padding: '5px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: 800, cursor: 'pointer'
+            }}>{label}</button>
+          ))}
+        </div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ textAlign: 'left', color: theme.colors.textMuted, fontSize: '12px', borderBottom: `1px solid ${theme.colors.border}` }}>
-                <th style={{ padding: '12px' }}>SYMBOL</th><th style={{ padding: '12px' }}>PRICE (KES)</th><th style={{ padding: '12px' }}>CHANGE</th><th style={{ padding: '12px' }}>VOLUME</th><th style={{ padding: '12px' }}>YOUR POSITION</th>
+                {sortBtn('symbol', 'SYMBOL')}{sortBtn('price_kes', 'PRICE (KES)')}{sortBtn('change_pct', 'CHANGE')}{sortBtn('volume', 'VOLUME')}<th style={{ padding: '12px' }}>YOUR POSITION</th>
               </tr>
             </thead>
             <tbody>
-              {nseData.quotes.length > 0 ? (
-                nseData.quotes.map((q, i) => {
+              {sorted.length > 0 ? (
+                sorted.map((q, i) => {
                   const pos = positionsBySymbol[q.symbol];
                   return (
                     <tr key={q.symbol || i}
