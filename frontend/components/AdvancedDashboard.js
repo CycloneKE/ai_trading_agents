@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import AgentActivity from './AgentActivity';
 import AgentFocus from './AgentFocus';
+import SleeveDashboard from './SleeveDashboard';
 import MarketClock from './MarketClock';
 import HelpPanel from './HelpPanel';
 import SymbolDrilldown from './SymbolDrilldown';
@@ -653,6 +654,7 @@ const AdvancedDashboard = ({ onLogout }) => {
             </ResponsiveContainer>
           </div>
           <AgentFocus onDrill={setDrilldownSymbol} />
+          <SleeveDashboard />
           <AgentActivity activities={data.agentActivity} />
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
