@@ -718,6 +718,32 @@ class TradingAPI:
                 return jsonify({'holding': [], 'reviewing': [], 'traded': [],
                                  'cash': {'cash': 0, 'equity': 0, 'deployed_pct': 0.0}})
 
+        @self.app.route('/api/sleeve', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_sleeve_view():
+            """Long-term dividend sleeve: holdings, pending accumulation
+            tickets (with veto flags), and cumulative dividend income."""
+            def produce():
+                from src.api.sleeve_view import build_sleeve_view
+                queue = self.trading_agent.components.get('nse_order_queue')
+                ledger = self.trading_agent.components.get('dividend_ledger')
+                sleeve = self.trading_agent.components.get('sleeve_manager')
+                if not queue or not sleeve:
+                    return {'holdings': [], 'pending_tickets': [],
+                           'cumulative_dividends_kes': 0, 'capital_target_kes': 0}
+                holdings = queue.positions(book='long_term')
+                pending = queue.get_pending()
+                history = ledger.history() if ledger else []
+                return build_sleeve_view(holdings, pending, history,
+                                         sleeve.nse_capital_kes, sleeve.capital_split_pct)
+            try:
+                return jsonify(self._cached('sleeve_view', 30, produce))
+            except Exception as e:
+                logger.error(f"Error building sleeve view: {e}")
+                return jsonify({'holdings': [], 'pending_tickets': [],
+                               'cumulative_dividends_kes': 0, 'capital_target_kes': 0})
+
         @self.app.route('/api/correlation-matrix', methods=['GET'])
         @require_rate_limit
         @token_required
