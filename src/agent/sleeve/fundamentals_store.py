@@ -100,7 +100,11 @@ class FundamentalsStore:
     def get_all(self, symbols: List[str]) -> List[Fundamentals]:
         out = []
         for s in symbols:
-            f = self.get(s)
+            try:
+                f = self.get(s)
+            except Exception as e:
+                logger.warning(f"Sleeve: excluding {s} from ranking ({e})")
+                continue
             if f:
                 out.append(f)
             else:

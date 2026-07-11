@@ -24,9 +24,13 @@ company's actual dividend/earnings history before adding a symbol here.
 }
 ```
 
-- `yield_ttm_pct` / `dividend_per_share_kes` / `eps_kes`: fallback values used
-  only when the live afx.kwayisi.org scrape fails or omits a field. When the
-  scrape succeeds, its values take precedence.
+- `yield_ttm_pct` / `dividend_per_share_kes` / `eps_kes`: fallback values.
+  When the live afx.kwayisi.org scrape succeeds, its values win for every
+  field it returns — even a scraped `0.0` (e.g. a suspended dividend), which
+  correctly excludes the symbol rather than falling back to a stale operator
+  number. The operator values here are only used when the whole scrape fails
+  (returns nothing) or when a specific field is absent (scraped as `None`)
+  from an otherwise successful scrape.
 - `years_consecutive_paid`: consecutive years the company has paid a
   dividend without a cut. Research this from the company's investor-relations
   page or annual reports — it is not scraped.

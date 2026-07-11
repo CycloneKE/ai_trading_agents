@@ -155,3 +155,17 @@ def test_migrates_existing_db_without_book_column(tmp_path):
     assert len(pending) == 1
     assert pending[0]['book'] == 'trading'  # DEFAULT backfilled onto the pre-existing row
     q.close()
+
+
+def test_expire_stale_spares_long_term_book(queue):
+    tid_trading = queue.create_ticket('SCOM', 'buy', 100, book='trading')
+    tid_sleeve = queue.create_ticket('EQTY', 'buy', 50, book='long_term')
+    # age both tickets far past the cutoff
+    with queue._lock:
+        queue._conn.execute("UPDATE nse_order_tickets SET created_at = '2020-01-01T00:00:00'")
+        queue._conn.commit()
+    expired = queue.expire_stale(max_age_hours=24)
+    assert expired == 1  # only the trading ticket
+    pending = queue.get_pending()
+    assert [t['symbol'] for t in pending] == ['EQTY']
+    assert pending[0]['book'] == 'long_term'

@@ -181,12 +181,23 @@ class NseOrderQueue:
 
     def expire_stale(self, max_age_hours: int = 24) -> int:
         """Expire pending tickets older than max_age_hours so the operator is
-        never shown a day-old signal to key in at a stale price."""
+        never shown a day-old signal to key in at a stale price.
+
+        Scoped to book='trading' only. Sleeve (book='long_term') tickets are
+        monthly, not intraday: the trading loop calls this at every NSE eval
+        (every ~24h), so a sleeve ticket created e.g. over a weekend would
+        otherwise get expired before the operator can act on it — and the
+        SleeveManager's own month-gate then blocks re-issue until next month,
+        silently losing that month's dividend sweep. Long_term tickets are
+        deduped by the sleeve manager itself (create_ticket dedupes on
+        symbol+side+book) and the operator can always cancel one manually if
+        it's genuinely gone stale, so excluding them here is safe."""
         cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat()
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE nse_order_tickets SET status = 'expired'"
-                " WHERE status = 'pending' AND created_at < ?", (cutoff,))
+                " WHERE status = 'pending' AND created_at < ? AND book = 'trading'",
+                (cutoff,))
             self._conn.commit()
             return cur.rowcount
 

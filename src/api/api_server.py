@@ -1131,6 +1131,10 @@ class TradingAPI:
                 'pending': q.get_pending(),
                 'recent_fills': q.recent_fills(),
                 'positions': q.positions(),
+                'positions_by_book': {
+                    'trading': q.positions(book='trading'),
+                    'long_term': q.positions(book='long_term'),
+                },
             }), 200
 
         @self.app.route('/api/operator/nse-tickets/<int:ticket_id>/place', methods=['POST'])

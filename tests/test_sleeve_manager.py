@@ -216,6 +216,59 @@ def test_month_gate_set_even_on_zero_ticket_cycle(db_path):
     mgr.close()
 
 
+def test_cycle_failure_burns_month_gate_without_retry_storm(db_path):
+    class RaisingStore:
+        def __init__(self):
+            self.calls = 0
+
+        def get_all(self, symbols):
+            self.calls += 1
+            raise RuntimeError("network scrape blew up")
+
+    store = RaisingStore()
+    mgr = SleeveManager(make_config(), FakeQueue(), store, FakeDividendLedger(),
+                        FakeOrchestrator(), db_path=db_path)
+    first = mgr.run_monthly_cycle({'SCOM': 20.0, 'EQTY': 40.0}, today=date(2026, 7, 1))
+    assert first == []
+    second = mgr.run_monthly_cycle({'SCOM': 20.0, 'EQTY': 40.0}, today=date(2026, 7, 15))
+    assert second == []
+    assert store.calls == 1  # month gate was set despite the failure — no retry storm
+    mgr.close()
+
+
+def test_empty_quotes_defers_without_burning_month_gate(db_path):
+    class CountingStore(FakeFundamentalsStore):
+        def __init__(self, records):
+            super().__init__(records)
+            self.calls = 0
+
+        def get_all(self, symbols):
+            self.calls += 1
+            return super().get_all(symbols)
+
+    store = CountingStore(make_fundamentals())
+    mgr = SleeveManager(make_config(), FakeQueue(), store, FakeDividendLedger(),
+                        FakeOrchestrator(), db_path=db_path)
+    deferred = mgr.run_monthly_cycle({}, today=date(2026, 7, 1))
+    assert deferred == []
+    assert store.calls == 0  # deferred before the fundamentals fetch
+
+    real = mgr.run_monthly_cycle({'SCOM': 20.0, 'EQTY': 40.0}, today=date(2026, 7, 15))
+    assert {r['symbol'] for r in real} == {'SCOM', 'EQTY'}
+    assert store.calls == 1  # gate was NOT set by the empty-quotes defer
+    mgr.close()
+
+
+def test_zero_config_divisors_are_clamped_not_fatal(db_path):
+    cfg = make_config()
+    cfg['sleeve']['scoring']['years_paid_target'] = 0
+    cfg['sleeve']['scoring']['yield_cap_pct'] = 0
+    mgr = make_manager(db_path, config=cfg)
+    results = mgr.run_monthly_cycle({'SCOM': 20.0, 'EQTY': 40.0})
+    assert {r['symbol'] for r in results} == {'SCOM', 'EQTY'}
+    mgr.close()
+
+
 def test_current_holdings_scoped_to_long_term_book(db_path):
     class BookRecordingQueue(FakeQueue):
         def __init__(self):

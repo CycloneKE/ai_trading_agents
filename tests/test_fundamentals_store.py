@@ -137,3 +137,22 @@ def test_scraped_zero_yield_wins_over_operator_and_excludes(dividends_file, monk
 
     # Scraped zero yield (suspended dividend) should win and cause exclusion
     assert store.get('SCOM') is None
+
+
+def test_get_all_excludes_symbol_whose_get_raises(dividends_file, monkeypatch):
+    with open(dividends_file, 'w') as f:
+        json.dump({
+            'BAD': {'eps_kes': 'not-a-number', 'dividend_per_share_kes': 2.0,
+                    'yield_ttm_pct': 6.0, 'years_consecutive_paid': 5,
+                    'eps_trend': 'flat', 'last_updated': '2026-07-01'},
+            'GOOD': {'yield_ttm_pct': 6.0, 'dividend_per_share_kes': 2.0,
+                     'eps_kes': 2.0, 'years_consecutive_paid': 5,
+                     'eps_trend': 'flat', 'last_updated': '2026-07-01'},
+        }, f)
+    store = FundamentalsStore(dividends_path=dividends_file)
+    monkeypatch.setattr('src.agent.sleeve.fundamentals_store.scrape_afx_company_page',
+                        lambda s: None)
+    monkeypatch.setattr('src.agent.sleeve.fundamentals_store.load_csv', lambda s: [])
+
+    result = store.get_all(['BAD', 'GOOD'])
+    assert [f.symbol for f in result] == ['GOOD']
