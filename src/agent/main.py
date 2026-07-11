@@ -229,6 +229,21 @@ class TradingAgent:
             self.components['nse_order_queue'] = NseOrderQueue()
             self._last_nse_eval = 0.0
             self._nse_last_price = {}  # symbol -> last-evaluated price (freshness guard)
+
+            # Long-term dividend sleeve: separate NSE accumulation book,
+            # isolated from trading positions via the `book` tag on tickets.
+            from src.agent.sleeve.fundamentals_store import FundamentalsStore
+            from src.agent.sleeve.dividend_ledger import DividendLedger
+            from src.agent.sleeve.sleeve_manager import SleeveManager
+            self.components['fundamentals_store'] = FundamentalsStore()
+            self.components['dividend_ledger'] = DividendLedger()
+            self.components['sleeve_manager'] = SleeveManager(
+                self.config,
+                self.components['nse_order_queue'],
+                self.components['fundamentals_store'],
+                self.components['dividend_ledger'],
+                self.components['llm_orchestrator'],
+            )
             self.components['self_assessment'] = SelfAssessmentEngine(
                 self.components['llm_orchestrator'],
                 em,
@@ -326,6 +341,10 @@ class TradingAgent:
                 self.components['escalation_manager'].close()
             if 'nse_order_queue' in self.components:
                 self.components['nse_order_queue'].close()
+            if 'dividend_ledger' in self.components:
+                self.components['dividend_ledger'].close()
+            if 'sleeve_manager' in self.components:
+                self.components['sleeve_manager'].close()
             if 'self_assessment' in self.components:
                 self.components['self_assessment'].close()
             if 'sector_specialist' in self.components:
@@ -974,6 +993,13 @@ class TradingAgent:
                 except Exception as e:
                     logger.error(f"NSE evaluation error: {e}")
 
+                # Long-term dividend sleeve — separate cadence again (at most
+                # once per calendar month; SleeveManager gates itself).
+                try:
+                    self._run_sleeve_cycle()
+                except Exception as e:
+                    logger.error(f"Sleeve cycle error: {e}")
+
                 # Calculate sleep time to maintain consistent loop interval
                 loop_duration = time.time() - loop_start_time
                 sleep_time = max(0, loop_interval - loop_duration)
@@ -1097,6 +1123,27 @@ class TradingAgent:
                         logger.debug(f"NSE decision record error: {e}")
             except Exception as e:
                 logger.error(f"Error evaluating NSE symbol {symbol}: {e}")
+
+    def _run_sleeve_cycle(self):
+        """Monthly dividend-sleeve accumulation pass. Pulls current NSE
+        quotes for the sleeve's configured universe and hands them to
+        SleeveManager, which gates itself to once per calendar month."""
+        sleeve = self.components.get('sleeve_manager')
+        dm = self.components.get('data_manager')
+        nse = dm.connectors.get('nse') if dm and hasattr(dm, 'connectors') else None
+        if not sleeve or not nse:
+            return
+
+        quotes = {}
+        for symbol in sleeve.universe:
+            quote = nse.get_quote(symbol)
+            if quote and not quote.get('_stale') and quote.get('price_kes'):
+                quotes[symbol] = float(quote['price_kes'])
+
+        results = sleeve.run_monthly_cycle(quotes)
+        if results:
+            logger.info(f"Sleeve cycle generated {len(results)} accumulation "
+                       f"ticket(s): {[r['symbol'] for r in results]}")
 
     def _check_risk_limits(self, risk_assessment: Dict[str, Any]) -> bool:
         """
