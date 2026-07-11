@@ -49,3 +49,15 @@ def test_non_dict_response_marks_unavailable():
     orch = FakeOrchestrator(None, enabled=True)
     result = check_candidate(orch, 'SCOM')
     assert result.available is False
+
+
+def test_raising_orchestrator_marks_unavailable_never_raises():
+    class RaisingOrchestrator:
+        enabled = True
+
+        def propose_json(self, system_prompt, user_prompt, model_override=None):
+            raise RuntimeError('provider exploded')
+
+    result = check_candidate(RaisingOrchestrator(), 'SCOM')
+    assert result.available is False
+    assert result.flag is False

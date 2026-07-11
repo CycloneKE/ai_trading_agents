@@ -34,7 +34,11 @@ def check_candidate(llm_orchestrator, symbol: str, company_name: str = '') -> Ve
         return VetoResult(flag=False, reason='', available=False)
 
     user_prompt = f"Symbol: {symbol}\nCompany: {company_name or symbol}\n"
-    result = llm_orchestrator.propose_json(_SYSTEM_PROMPT, user_prompt)
+    try:
+        result = llm_orchestrator.propose_json(_SYSTEM_PROMPT, user_prompt)
+    except Exception as e:
+        logger.debug(f"Sleeve veto unavailable for {symbol}: orchestrator exception: {e}")
+        return VetoResult(flag=False, reason='', available=False)
     if not isinstance(result, dict) or 'flag' not in result:
         logger.debug(f"Sleeve veto unavailable for {symbol}: no usable LLM response")
         return VetoResult(flag=False, reason='', available=False)
