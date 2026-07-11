@@ -240,9 +240,8 @@ class SectorSpecialistManager:
         updated_profile = previous_profile
         if self.llm and getattr(self.llm, "enabled", False):
             try:
-                # Direct Claude 3.5 Sonnet call
-                model_to_use = self.llm.config.get("swarm", {}).get("agents", {}).get("sector_specialist", "anthropic/claude-3.5-sonnet")
-                
+                model_to_use = self.llm.config.get("swarm", {}).get("agents", {}).get("sector_specialist", "meta-llama/llama-3.1-8b-instruct:free")
+
                 # Propose JSON using the dynamic model
                 logger.info(f"Running Sector Specialist analysis for '{sector}' using {model_to_use}...")
                 proposal = self.llm.propose_json(system_prompt, user_prompt, model_override=model_to_use)

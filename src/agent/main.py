@@ -647,10 +647,22 @@ class TradingAgent:
                     # --- Stop-loss enforcement ---
                     self._enforce_stop_losses(stop_loss_pct, trailing_stop_pct)
                     
-                    # Swarm: Run parallel Sector Specialists before the symbol loop
+                    # Swarm: Run parallel Sector Specialists before the symbol loop.
+                    # Rate-limited: sector outlooks change slowly and each pass
+                    # fires one LLM call per sector — running it every 60s cycle
+                    # blew straight through free-tier rate limits. Run at most
+                    # once per sector_analysis_interval cycles (~once per trading
+                    # day by default); the persisted SQLite profiles carry
+                    # between passes.
                     import json
                     swarm_enabled = self.config.get("swarm", {}).get("enabled", True)
-                    if swarm_enabled and 'sector_specialist' in self.components:
+                    # sector_analysis_interval is expressed in loop cycles; convert
+                    # to seconds so the gate doesn't depend on the per-cycle
+                    # `cycle` counter (defined later in the loop body).
+                    sector_interval_s = self.config.get('sector_analysis_interval', 390) * loop_interval
+                    sector_due = (time.time() - getattr(self, '_last_sector_time', 0)) >= sector_interval_s
+                    if swarm_enabled and sector_due and 'sector_specialist' in self.components:
+                        self._last_sector_time = time.time()
                         try:
                             sector_specialist = self.components['sector_specialist']
                             state_store = self.components['swarm_state_store']

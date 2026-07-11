@@ -1,5 +1,8 @@
 {
   "primary_llm_provider": "gemini",
+  "gemini_model": "gemini-2.0-flash",
+  "llm_cooldown_seconds": 60,
+  "sector_analysis_interval": 390,
   "data_manager": {
     "symbols": [
       "AAPL", "GOOGL", "MSFT", "TSLA", "NVDA",
@@ -187,10 +190,10 @@
     "enabled": true,
     "redis_enabled": true,
     "agents": {
-      "pdf_extractor": "anthropic/claude-sonnet-4.6",
-      "sector_specialist": "anthropic/claude-sonnet-4.6",
-      "sentiment_analyst": "meta-llama/llama-3.3-70b-instruct",
-      "synthesizer": "deepseek/deepseek-r1"
+      "pdf_extractor": "meta-llama/llama-3.3-70b-instruct:free",
+      "sector_specialist": "meta-llama/llama-3.3-70b-instruct:free",
+      "sentiment_analyst": "meta-llama/llama-3.3-70b-instruct:free",
+      "synthesizer": "meta-llama/llama-3.3-70b-instruct:free"
     }
   }
 }

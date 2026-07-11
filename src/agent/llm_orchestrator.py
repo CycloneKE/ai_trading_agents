@@ -16,17 +16,65 @@ class LLMOrchestrator:
         self.config = config
         self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
         self.gemini_api_key = os.getenv("GEMINI_API_KEY")
-        
+
         # Determine primary model strategy
         self.primary_provider = config.get("primary_llm_provider", "openrouter")
         self.enabled = config.get("llm_enabled", True)
 
+        # Valid free Gemini model (the old default gemini-2.5-flash-lite 404s
+        # on the v1beta endpoint). Override with config 'gemini_model'.
+        self.gemini_model = config.get("gemini_model", "gemini-2.0-flash")
+
         self.cache_ttl = config.get('llm_cache_ttl', 900)  # 15 min default
         self._verdict_cache: Dict[str, tuple] = {}  # key -> (expires_at, verdict)
+
+        # Per-provider 429 circuit-breaker: when a provider rate-limits us, skip
+        # it for a cooldown window (and use the other provider) instead of
+        # hammering it every cycle and flooding the log.
+        self.cooldown_seconds = config.get('llm_cooldown_seconds', 60)
+        self._cooldown_until: Dict[str, float] = {}  # provider -> epoch
 
         if not self.openrouter_api_key and not self.gemini_api_key:
             logger.warning("No LLM API keys found. LLM Orchestrator will be disabled.")
             self.enabled = False
+
+    def _provider_order(self):
+        """Primary provider first, then the other — each included only if its
+        key is set. Enables bidirectional fallback regardless of which is
+        primary (the old code only fell back openrouter->gemini)."""
+        order = ([self.primary_provider] +
+                 [p for p in ('gemini', 'openrouter') if p != self.primary_provider])
+        return [p for p in order
+                if (p == 'gemini' and self.gemini_api_key)
+                or (p == 'openrouter' and self.openrouter_api_key)]
+
+    def _status_code(self, err) -> Optional[int]:
+        resp = getattr(err, 'response', None)
+        return getattr(resp, 'status_code', None) if resp is not None else None
+
+    def _complete(self, system_prompt: str, user_prompt: str,
+                  fallback, model_override: Optional[str] = None):
+        """Try each usable provider in order; on 429 put that provider on
+        cooldown and try the next; on any other error try the next. Returns
+        the first success, else `fallback`. Providers on cooldown are skipped
+        without a call."""
+        import time as _time
+        now = _time.time()
+        callers = {'gemini': self._call_gemini, 'openrouter': self._call_openrouter}
+        for provider in self._provider_order():
+            if self._cooldown_until.get(provider, 0) > now:
+                continue
+            try:
+                return callers[provider](system_prompt, user_prompt, fallback,
+                                         model_override=model_override)
+            except Exception as e:
+                if self._status_code(e) == 429:
+                    self._cooldown_until[provider] = now + self.cooldown_seconds
+                    logger.warning(f"LLM provider '{provider}' rate-limited (429); "
+                                   f"cooling down {self.cooldown_seconds}s, using fallback provider.")
+                else:
+                    logger.debug(f"LLM provider '{provider}' failed: {e}")
+        return fallback
 
     def validate_trade(self, symbol: str, strategy_signal: Dict[str, Any], market_data: Dict[str, Any], news_data: list = None, research_context: Dict[str, Any] = None, sector_outlook: Dict[str, Any] = None, track_record: str = None) -> Dict[str, Any]:
         """
@@ -110,20 +158,10 @@ class LLMOrchestrator:
                 self._verdict_cache[cache_key] = (time.time() + self.cache_ttl, dict(verdict))
             return verdict
 
-        try:
-            if self.primary_provider == "openrouter" and self.openrouter_api_key:
-                try:
-                    return _remember(self._call_openrouter(system_prompt, user_prompt, strategy_signal, model_override=model))
-                except Exception as openrouter_err:
-                    logger.warning(f"OpenRouter validation failed ({openrouter_err}). Falling back to Gemini...")
-
-            if self.gemini_api_key:
-                return _remember(self._call_gemini(system_prompt, user_prompt, strategy_signal, model_override=model))
-
-            return strategy_signal
-        except Exception as e:
-            logger.error(f"LLM validation failed: {str(e)}. Falling back to base signal.")
-            return strategy_signal
+        # All-providers-down returns the base signal: a trade is never
+        # force-held by an LLM outage.
+        return _remember(self._complete(system_prompt, user_prompt,
+                                        strategy_signal, model_override=model))
 
     def propose_json(self, system_prompt: str, user_prompt: str, model_override: Optional[str] = None):
         """Generic JSON completion (used by the weight allocator and sector specialists).
@@ -133,23 +171,9 @@ class LLMOrchestrator:
         """
         if not self.enabled:
             return None
-        try:
-            if self.primary_provider == "openrouter" and self.openrouter_api_key:
-                try:
-                    result = self._call_openrouter(system_prompt, user_prompt, None, model_override=model_override)
-                    if result:
-                        return result if isinstance(result, dict) else None
-                except Exception as openrouter_err:
-                    logger.warning(f"OpenRouter propose_json failed ({openrouter_err}). Falling back to Gemini...")
-            
-            if self.gemini_api_key:
-                result = self._call_gemini(system_prompt, user_prompt, None, model_override=model_override)
-                return result if isinstance(result, dict) else None
-            
-            return None
-        except Exception as e:
-            logger.error(f"LLM propose_json failed: {e}")
-            return None
+        result = self._complete(system_prompt, user_prompt, None,
+                                model_override=model_override)
+        return result if isinstance(result, dict) else None
 
     def _call_openrouter(self, system_prompt: str, user_prompt: str, fallback_signal: Optional[Dict[str, Any]], model_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
         url = "https://openrouter.ai/api/v1/chat/completions"
@@ -188,10 +212,11 @@ class LLMOrchestrator:
 
     def _call_gemini(self, system_prompt: str, user_prompt: str, fallback_signal: Optional[Dict[str, Any]], model_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
         # Map dynamic model to gemini endpoints if applicable, otherwise default
-        model = model_override or "gemini-2.5-flash-lite"
+        model = model_override or self.gemini_model
         if "/" in model:
-            # e.g. openrouter model passed to gemini override: fall back to default
-            model = "gemini-2.5-flash-lite"
+            # An OpenRouter-style id (vendor/model) reached the Gemini path —
+            # use the configured valid Gemini model instead.
+            model = self.gemini_model
             
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.gemini_api_key}"
         headers = {
