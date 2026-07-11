@@ -22,6 +22,21 @@ NSE_PREOPEN_START = dtime(9, 0)
 NSE_OPEN = dtime(9, 30)
 NSE_CLOSE = dtime(15, 0)
 
+# Kenya's fixed-date public holidays, 2026 (NSE closes on all gazetted public
+# holidays). Easter-linked (Good Friday, Easter Monday) and Eid al-Fitr/
+# al-Adha move every year and are deliberately NOT included — add them (and
+# refresh this list annually) via config.data_manager.nse_holidays.
+_DEFAULT_NSE_HOLIDAYS_2026 = {
+    "2026-01-01",  # New Year's Day
+    "2026-05-01",  # Labour Day
+    "2026-06-01",  # Madaraka Day
+    "2026-10-10",  # Utamaduni Day
+    "2026-10-20",  # Mashujaa Day
+    "2026-12-12",  # Jamhuri Day
+    "2026-12-25",  # Christmas Day
+    "2026-12-26",  # Boxing Day
+}
+
 # -------------------------------------------------------------------
 # Target NSE Symbols
 # -------------------------------------------------------------------
@@ -88,6 +103,14 @@ class NSEConnector:
         # KES/USD
         self._kes_usd_rate: float = _DEFAULT_KES_USD
 
+        # Gazetted NSE closure dates (ISO 'YYYY-MM-DD'), config-overridable.
+        # The default covers Kenya's fixed-date public holidays for the
+        # current year; Easter-linked (Good Friday/Easter Monday) and Eid
+        # dates move every year and are NOT auto-computed here — update
+        # config.data_manager.nse_holidays annually / when the government
+        # gazettes moveable dates.
+        self._holidays = set(config.get("nse_holidays", _DEFAULT_NSE_HOLIDAYS_2026))
+
         logger.info(
             f"NSEConnector initialized - DB: {'yes' if self.db else 'no'}, "
             f"tracking {len(ALL_NSE_SYMBOLS)} symbols"
@@ -112,6 +135,8 @@ class NSEConnector:
     def market_phase(self, now=None) -> str:
         now = now or datetime.now(EAT_OFFSET)
         if now.weekday() > 4:
+            return 'closed'
+        if now.date().isoformat() in getattr(self, '_holidays', ()):
             return 'closed'
         t = now.timetz().replace(tzinfo=None)
         if NSE_PREOPEN_START <= t < NSE_OPEN:

@@ -288,6 +288,33 @@ class TradingAPI:
                 report['total_trades'] = metrics.get('total_trades', 0)
                 report['sharpe_ratio'] = metrics.get('sharpe_ratio', 0)
                 report['max_drawdown'] = metrics.get('max_drawdown', 0)
+
+                # Consolidated equity: US (Alpaca paper, simulated) + NSE
+                # (AIB-AXYS, real money the operator actually executes) in
+                # USD. Kept separate from `portfolio_value`/Sharpe/drawdown
+                # above — those stay pure US-paper so risk metrics aren't
+                # corrupted by blending simulated and real, single-point NSE
+                # value into a return series. This is a headline-number-only
+                # addition, clearly broken out so paper vs real is never
+                # ambiguous on the dashboard.
+                nse_value_usd = 0.0
+                try:
+                    nse_q = self.trading_agent.components.get('nse_order_queue')
+                    dm = self.trading_agent.components.get('data_manager')
+                    nse_conn = dm.connectors.get('nse') if dm and hasattr(dm, 'connectors') else None
+                    if nse_q and nse_conn:
+                        kes_usd = nse_conn.get_kes_usd_rate()
+                        for symbol, pos in nse_q.positions().items():
+                            qty = pos.get('quantity', 0)
+                            if qty > 0:
+                                quote = nse_conn.get_quote(symbol) or {}
+                                nse_value_usd += qty * (quote.get('price_kes') or 0) * kes_usd
+                except Exception as e:
+                    logger.debug(f"NSE equity contribution unavailable: {e}")
+
+                report['us_paper_value'] = round(current_value, 2)
+                report['nse_value_usd'] = round(nse_value_usd, 2)
+                report['consolidated_equity'] = round(current_value + nse_value_usd, 2)
                 return jsonify(report)
             except Exception as e:
                 logger.error(f"Error getting performance: {e}")

@@ -37,7 +37,7 @@ const SectionHeader = ({ title, icon: Icon }) => (
   </div>
 );
 
-const HUDCard = ({ title, value, subValue, icon: Icon, color }) => (
+const HUDCard = ({ title, value, subValue, icon: Icon, color, footer }) => (
   <div style={{ ...glassCard, flex: 1, minWidth: '220px', position: 'relative', overflow: 'hidden' }}>
     <div style={{ position: 'absolute', right: '-10px', bottom: '-10px', opacity: 0.05 }}>
       <Icon size={100} color={color} />
@@ -52,6 +52,11 @@ const HUDCard = ({ title, value, subValue, icon: Icon, color }) => (
     <p style={{ fontSize: '13px', margin: '4px 0 0 0', color: subValue?.includes('-') || subValue?.includes('↘') ? theme.colors.danger : theme.colors.primary }}>
       {subValue}
     </p>
+    {footer && (
+      <p style={{ fontSize: '11px', margin: '6px 0 0 0', color: theme.colors.textMuted, position: 'relative', zIndex: 1 }}>
+        {footer}
+      </p>
+    )}
   </div>
 );
 
@@ -607,7 +612,11 @@ const AdvancedDashboard = ({ onLogout }) => {
     return (
     <div style={{ display: 'grid', gap: '30px' }}>
       <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
-        <HUDCard title="Consolidated Equity" value={`$${(data.performance.portfolio_value || 0).toLocaleString()}`} subValue={data.performance.total_pnl > 0 ? `↗ $${data.performance.total_pnl.toFixed(2)}` : `↘ $${(data.performance.total_pnl || 0).toFixed(2)}`} icon={TrendingUp} color={theme.colors.primary} />
+        <HUDCard title="Consolidated Equity"
+          value={`$${(data.performance.consolidated_equity ?? data.performance.portfolio_value ?? 0).toLocaleString()}`}
+          subValue={data.performance.total_pnl > 0 ? `↗ $${data.performance.total_pnl.toFixed(2)}` : `↘ $${(data.performance.total_pnl || 0).toFixed(2)}`}
+          footer={`Paper (US): $${(data.performance.us_paper_value ?? data.performance.portfolio_value ?? 0).toLocaleString()} · Real (NSE): $${(data.performance.nse_value_usd ?? 0).toLocaleString()}`}
+          icon={TrendingUp} color={theme.colors.primary} />
         <HUDCard title="Exposure (VaR)" value={`$${(data.riskMetrics.portfolio_var || 0).toLocaleString()}`} subValue={`Risk Score: ${data.riskMetrics.risk_score?.toFixed(1) || '0.0'}/10`} icon={Shield} color={theme.colors.warning} />
         <HUDCard title="Win Rate" value={`${((data.performance.win_rate || 0) * 100).toFixed(1)}%`} subValue={`${data.performance.total_trades || 0} Trades`} icon={Zap} color={theme.colors.secondary} />
         <HUDCard title="System Health" value={isConnected ? 'OPTIMAL' : 'DEGRADED'} subValue={isConnected ? `${Object.keys(data.status.components || {}).length} Services Active` : 'Reconnecting…'} icon={Activity} color={isConnected ? theme.colors.accent : theme.colors.warning} />
@@ -748,6 +757,15 @@ const AdvancedDashboard = ({ onLogout }) => {
     const day = (now.getUTCDay() + (now.getUTCHours() + 3 >= 24 ? 1 : 0)) % 7;
     const OPEN = 9 * 60 + 30, CLOSE = 15 * 60, PRE = 9 * 60;
     if (day === 0 || day === 6) return { label: 'CLOSED · WEEKEND', color: theme.colors.textMuted };
+    // Local time/weekday logic doesn't know gazetted public holidays — the
+    // backend's is_market_open() does. If local math says we're inside
+    // trading hours on a weekday but the backend disagrees, that gap is a
+    // holiday closure; defer to the backend rather than showing a bogus
+    // "OPEN · CLOSES IN Xh" countdown.
+    const inHoursLocally = eatMin >= PRE && eatMin < CLOSE;
+    if (inHoursLocally && !nseData.market_open) {
+      return { label: 'CLOSED · HOLIDAY', color: theme.colors.textMuted };
+    }
     if (eatMin < PRE) return { label: `PRE-OPEN IN ${Math.floor((PRE - eatMin) / 60)}h ${(PRE - eatMin) % 60}m`, color: theme.colors.textMuted };
     if (eatMin < OPEN) return { label: `PRE-OPEN · TRADING IN ${OPEN - eatMin}m`, color: theme.colors.warning };
     if (eatMin < CLOSE) return { label: `OPEN · CLOSES IN ${Math.floor((CLOSE - eatMin) / 60)}h ${(CLOSE - eatMin) % 60}m`, color: theme.colors.primary };
