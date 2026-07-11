@@ -32,3 +32,28 @@ def test_different_action_bypasses_cache(monkeypatch):
     orch.validate_trade('SCOM', {'action': 'buy', 'confidence': 0.7}, {'close': 34.0})
     orch.validate_trade('SCOM', {'action': 'sell', 'confidence': 0.7}, {'close': 34.0})
     assert calls['n'] == 2
+
+
+def test_fallback_verdict_is_not_cached(monkeypatch):
+    # Simulate an all-providers-down outage: _complete returns the exact
+    # `strategy_signal` object it was handed (same identity), which is what
+    # happens when every provider fails/cools-down or JSON decoding fails.
+    # That un-validated base signal must NOT be cached, so a real LLM
+    # validation is retried on the very next call once a provider recovers.
+    orch = _orch(monkeypatch)
+    calls = {'n': 0}
+
+    def fake_complete(sysp, usrp, fallback, model_override=None):
+        calls['n'] += 1
+        return fallback  # same object identity as strategy_signal
+
+    monkeypatch.setattr(orch, '_complete', fake_complete)
+    sig = {'action': 'buy', 'confidence': 0.71}
+    r1 = orch.validate_trade('SCOM', sig, {'close': 34.0})
+    r2 = orch.validate_trade('SCOM', sig, {'close': 34.1})
+
+    assert calls['n'] == 2  # NOT served from cache on the second call
+    assert r1 is sig and r2 is sig
+    conf_bucket = round(sig['confidence'] * 10)
+    cache_key = f"SCOM:{sig['action']}:{conf_bucket}"
+    assert cache_key not in orch._verdict_cache

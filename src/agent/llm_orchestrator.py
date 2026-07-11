@@ -154,7 +154,12 @@ class LLMOrchestrator:
         model = self.config.get("swarm", {}).get("agents", {}).get("synthesizer", "meta-llama/llama-3.1-8b-instruct")
         
         def _remember(verdict):
-            if isinstance(verdict, dict):
+            # Only cache genuine LLM verdicts. _complete returns the base
+            # strategy_signal object unchanged on an all-providers-down outage
+            # (or a JSON-decode failure); caching that would suppress real LLM
+            # validation for this (symbol, action, confidence) bucket for the
+            # full TTL even after the provider recovers from a brief 429.
+            if isinstance(verdict, dict) and verdict is not strategy_signal:
                 self._verdict_cache[cache_key] = (time.time() + self.cache_ttl, dict(verdict))
             return verdict
 
