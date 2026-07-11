@@ -163,3 +163,72 @@ def test_disabled_sleeve_returns_no_tickets(db_path):
     mgr = make_manager(db_path, config=cfg)
     assert mgr.run_monthly_cycle({'SCOM': 20.0, 'EQTY': 40.0}) == []
     mgr.close()
+
+
+def test_deduped_ticket_excluded_from_results_and_sweep(db_path):
+    class DedupingQueue(FakeQueue):
+        def create_ticket(self, symbol, side, quantity, suggested_limit_price=None,
+                          rationale='', ensemble_confidence=None, llm_reasoning='', book='trading'):
+            return None  # identical pending ticket already exists
+
+    ledger = FakeDividendLedger(unswept=50000.0)
+    mgr = make_manager(db_path, dividend_ledger=ledger, queue=DedupingQueue())
+    results = mgr.run_monthly_cycle({'SCOM': 20.0, 'EQTY': 40.0})
+    assert results == []          # no phantom ticket_id=None entries
+    assert ledger.swept_calls == 0  # cash rolls forward, not swept
+    mgr.close()
+
+
+def test_partial_dedupe_still_sweeps_and_reports_real_tickets(db_path):
+    class PartialDedupeQueue(FakeQueue):
+        def create_ticket(self, symbol, side, quantity, suggested_limit_price=None,
+                          rationale='', ensemble_confidence=None, llm_reasoning='', book='trading'):
+            if symbol == 'SCOM':
+                return None
+            return super().create_ticket(symbol, side, quantity, suggested_limit_price,
+                                         rationale, ensemble_confidence, llm_reasoning, book)
+
+    ledger = FakeDividendLedger(unswept=1000.0)
+    mgr = make_manager(db_path, dividend_ledger=ledger, queue=PartialDedupeQueue())
+    results = mgr.run_monthly_cycle({'SCOM': 20.0, 'EQTY': 40.0})
+    assert [r['symbol'] for r in results] == ['EQTY']
+    assert all(r['ticket_id'] is not None for r in results)
+    assert ledger.swept_calls == 1
+    mgr.close()
+
+
+def test_month_gate_set_even_on_zero_ticket_cycle(db_path):
+    class CountingStore(FakeFundamentalsStore):
+        def __init__(self, records):
+            super().__init__(records)
+            self.calls = 0
+
+        def get_all(self, symbols):
+            self.calls += 1
+            return super().get_all(symbols)
+
+    store = CountingStore([])  # no fundamentals -> zero tickets
+    mgr = SleeveManager(make_config(), FakeQueue(), store, FakeDividendLedger(),
+                        FakeOrchestrator(), db_path=db_path)
+    assert mgr.run_monthly_cycle({'SCOM': 20.0}, today=date(2026, 7, 1)) == []
+    assert mgr.run_monthly_cycle({'SCOM': 20.0}, today=date(2026, 7, 15)) == []
+    assert store.calls == 1  # month gate blocked the second fundamentals fetch
+    mgr.close()
+
+
+def test_current_holdings_scoped_to_long_term_book(db_path):
+    class BookRecordingQueue(FakeQueue):
+        def __init__(self):
+            super().__init__()
+            self.positions_calls = []
+
+        def positions(self, book=None):
+            self.positions_calls.append(book)
+            return {'SCOM': {'quantity': 100, 'avg_entry_price_kes': 15.0}}
+
+    q = BookRecordingQueue()
+    mgr = make_manager(db_path, queue=q)
+    holdings = mgr.current_holdings()
+    assert q.positions_calls == ['long_term']
+    assert holdings['SCOM']['quantity'] == 100
+    mgr.close()

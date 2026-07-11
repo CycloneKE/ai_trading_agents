@@ -140,6 +140,11 @@ class SleeveManager:
                 symbol, 'buy', quantity, suggested_limit_price=price,
                 rationale=rationale, ensemble_confidence=candidate.combined_score,
                 llm_reasoning=veto.reason, book='long_term')
+            if ticket_id is None:
+                logger.debug(
+                    "Sleeve: skipping %s — identical pending long_term ticket already exists",
+                    symbol)
+                continue
 
             results.append({
                 'symbol': symbol, 'quantity': quantity, 'price': price,
