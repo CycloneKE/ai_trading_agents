@@ -77,12 +77,16 @@ class AlpacaBroker(BaseBroker):
                 if not self.connect():
                     return None
             
+            tif = order.time_in_force
+            if isinstance(order.quantity, (int, float)) and (order.quantity % 1 != 0):
+                tif = "day"
+
             alpaca_order = self.api.submit_order(
                 symbol=order.symbol,
                 qty=order.quantity,
                 side=order.side,
                 type=order.order_type,
-                time_in_force=order.time_in_force,
+                time_in_force=tif,
                 limit_price=order.limit_price,
                 stop_price=order.stop_price,
                 client_order_id=order.client_order_id,

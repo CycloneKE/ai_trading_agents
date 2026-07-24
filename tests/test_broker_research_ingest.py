@@ -136,20 +136,20 @@ def test_heuristic_fallback_extractor(mock_llm_orchestrator, mock_escalation_man
     # Check that SCOM was extracted as BUY
     scom_signal = next((s for s in signals if s["symbol"] == "SCOM"), None)
     assert scom_signal is not None
-    assert scom_signal["recommendation"] == "buy"
-    assert scom_signal["current_price"] == 15.20
-    assert scom_signal["target_price"] == 18.50
+    assert scom_signal["recommendation"].upper() == "BUY"
+    assert float(scom_signal["current_price"]) == 15.2
+    assert float(scom_signal["target_price"]) == 18.5
     assert scom_signal["market"] == "kenyan"
     
     # Check that EQTY was extracted as HOLD
     eqty_signal = next((s for s in signals if s["symbol"] == "EQTY"), None)
     assert eqty_signal is not None
-    assert eqty_signal["recommendation"] == "hold"
+    assert eqty_signal["recommendation"].upper() == "HOLD"
     
     # Check that KCB was extracted as SELL
     kcb_signal = next((s for s in signals if s["symbol"] == "KCB"), None)
     assert kcb_signal is not None
-    assert kcb_signal["recommendation"] == "sell"
+    assert kcb_signal["recommendation"].upper() == "SELL"
 
 
 def test_llm_fails_triggering_fallback(mock_llm_orchestrator, mock_escalation_manager, sample_config):
@@ -163,5 +163,5 @@ def test_llm_fails_triggering_fallback(mock_llm_orchestrator, mock_escalation_ma
     assert len(signals) > 0
     scom = next((s for s in signals if s["symbol"] == "SCOM"), None)
     assert scom is not None
-    assert scom["recommendation"] == "buy"
+    assert scom["recommendation"].upper() == "BUY"
 

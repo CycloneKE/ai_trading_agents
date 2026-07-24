@@ -6,7 +6,11 @@
   "data_manager": {
     "symbols": [
       "AAPL", "GOOGL", "MSFT", "TSLA", "NVDA",
-      "SPY", "QQQ", "XLF", "XLV", "XLE", "DIA"
+      "SPY", "QQQ", "XLF", "XLV", "XLE", "DIA",
+      "BTC-USD", "ETH-USD", "SOL-USD"
+    ],
+    "crypto_symbols": [
+      "BTC-USD", "ETH-USD", "SOL-USD"
     ],
     "nse_symbols": [
       "SCOM", "EQTY", "KCB", "COOP", "SCBK", "SBIC", "ABSA",
@@ -21,6 +25,9 @@
       "db": 0
     },
     "connectors": {
+      "coinbase": {
+        "enabled": true
+      },
       "fmp": {
         "enabled": true,
         "api_key": "${TRADING_FMP_API_KEY}"

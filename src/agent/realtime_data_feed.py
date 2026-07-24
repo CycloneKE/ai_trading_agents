@@ -65,14 +65,65 @@ class RealTimeDataFeed:
         logger.info("Real-time data feeds stopped")
     
     def _start_websocket(self, source_config: Dict[str, Any]):
-        """Start WebSocket connection for a data source"""
-        try:
-            if source_config['type'] == 'alpaca':
-                self._connect_alpaca(source_config)
-            elif source_config['type'] == 'polygon':
-                self._connect_polygon(source_config)
-        except Exception as e:
-            logger.error(f"Failed to start WebSocket for {source_config['type']}: {e}")
+        """Start WebSocket connection for a data source with auto-reconnect."""
+        source_type = source_config.get('type')
+        while self.running:
+            try:
+                logger.info(f"Connecting to {source_type} WebSocket feed...")
+                if source_type == 'alpaca':
+                    self._connect_alpaca(source_config)
+                elif source_type == 'polygon':
+                    self._connect_polygon(source_config)
+                elif source_type == 'coinbase':
+                    self._connect_coinbase(source_config)
+                else:
+                    logger.warning(f"Unknown WebSocket source type: {source_type}")
+                    break
+            except Exception as e:
+                logger.error(f"WebSocket connection error for {source_type}: {e}")
+            
+            if self.running:
+                logger.info(f"Reconnecting to {source_type} WebSocket in 5 seconds...")
+                time.sleep(5)
+
+    def _connect_coinbase(self, config: Dict[str, Any]):
+        """Connect to Coinbase Advanced Trade WebSocket"""
+        def on_message(ws, message):
+            try:
+                data = json.loads(message)
+                self._process_coinbase_message(data)
+            except Exception as e:
+                logger.error(f"Error processing Coinbase message: {e}")
+        
+        def on_open(ws):
+            symbols = config.get('symbols', ['BTC-USD', 'ETH-USD'])
+            subscribe_msg = {
+                "type": "subscribe",
+                "product_ids": symbols,
+                "channels": ["ticker"]
+            }
+            ws.send(json.dumps(subscribe_msg))
+            logger.info(f"Subscribed to Coinbase feed for {symbols}")
+
+        ws_url = config.get('websocket_url', 'wss://ws-feed.exchange.coinbase.com')
+        ws = websocket.WebSocketApp(ws_url, on_message=on_message, on_open=on_open)
+        self.connections['coinbase'] = ws
+        ws.run_forever()
+
+    def _process_coinbase_message(self, data: Dict[str, Any]):
+        """Process Coinbase WebSocket ticker message"""
+        if data.get('type') == 'ticker':
+            symbol = data.get('product_id')
+            ticker_data = {
+                'symbol': symbol,
+                'price': float(data.get('price', 0)),
+                'bid': float(data.get('best_bid', 0)),
+                'ask': float(data.get('best_ask', 0)),
+                'volume': float(data.get('volume_24h', 0)),
+                'timestamp': data.get('time'),
+                'type': 'trade'
+            }
+            self._notify_subscribers(symbol, ticker_data)
     
     def _connect_alpaca(self, config: Dict[str, Any]):
         """Connect to Alpaca WebSocket"""

@@ -17,6 +17,7 @@ import HelpPanel from './HelpPanel';
 import SymbolDrilldown from './SymbolDrilldown';
 import SectorDrilldown from './SectorDrilldown';
 import AdvancedAnalytics from './AdvancedAnalytics';
+import UnifiedPortfolio from './UnifiedPortfolio';
 import { theme, glassCard } from './DashboardStyles';
 import { getApiBase } from '../utils/apiBase';
 
@@ -278,9 +279,14 @@ const ResearchView = ({ activeTab, fetchData, onDrill }) => {
                         <span style={{ color: theme.colors.textMuted }}>N/A</span>
                       )}
                     </td>
-                    <td style={{ padding: '12px 0', maxWidth: '300px', whiteSpace: 'normal', fontSize: '12px' }}>
+                    <td style={{ padding: '12px 0', maxWidth: '380px', whiteSpace: 'normal', fontSize: '12px' }}>
                       <span style={{ color: theme.colors.warning, fontWeight: '700', marginRight: '5px' }}>[{esc.risk_level.toUpperCase()}]</span>
-                      <span style={{ color: theme.colors.textSecondary }}>{esc.reason}</span>
+                      <span style={{ color: theme.colors.textSecondary, fontWeight: '600' }}>{esc.reason}</span>
+                      {esc.rationale && (
+                        <p style={{ margin: '4px 0 0 0', fontSize: '11px', color: theme.colors.textMuted, fontStyle: 'italic', lineHeight: '1.4' }}>
+                          "{esc.rationale}"
+                        </p>
+                      )}
                     </td>
                     <td style={{ padding: '12px 0', textAlign: 'right' }}>
                       <button onClick={() => handleResolveEscalation(esc.id, 'approved')} style={{ backgroundColor: theme.colors.primary, color: '#000', border: 'none', padding: '6px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: '800', cursor: 'pointer', marginRight: '8px' }}>APPROVE</button>
@@ -1024,52 +1030,100 @@ const AdvancedDashboard = ({ onLogout }) => {
   );
 
   const tabs = [
-    { id: 'overview', label: 'DASHBOARD', icon: Activity, component: renderOverview },
-    { id: 'nse', label: 'NSE KENYA', icon: Flag, component: renderKenyaNSE },
+    { id: 'portfolio', label: 'PORTFOLIO & WEALTH', icon: Globe, component: () => <UnifiedPortfolio onDrill={setDrilldownSymbol} /> },
+    { id: 'overview', label: 'COMMAND DESK', icon: Activity, component: renderOverview },
     { id: 'research', label: 'RESEARCH & AUTO-PILOT', icon: FileText, component: () => <ResearchView activeTab={activeTab} fetchData={fetchData} onDrill={setDrilldownSymbol} /> },
+    { id: 'nse', label: 'NSE KENYA', icon: Flag, component: renderKenyaNSE },
     { id: 'analytics', label: 'ANALYTICS', icon: TrendingUp, component: renderAnalytics },
-    { id: 'risk', label: 'RISK', icon: Shield, component: renderRiskView },
-    { id: 'market', label: 'MARKET', icon: Globe, component: renderMarketView },
-    { id: 'system', label: 'SYSTEM', icon: Cpu, component: renderPulseView }
+    { id: 'risk', label: 'RISK & CONTROLS', icon: Shield, component: renderRiskView },
+    { id: 'market', label: 'MARKET FEEDS', icon: Globe, component: renderMarketView },
+    { id: 'system', label: 'SYSTEM PULSE', icon: Cpu, component: renderPulseView }
   ];
 
   return (
     <div style={{ minHeight: '100vh', backgroundColor: theme.colors.bg, color: theme.colors.text, fontFamily: 'Outfit, sans-serif' }}>
-      <header style={{ ...theme.glass, borderRadius: 0, padding: '20px 40px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-          <div style={{ backgroundColor: theme.colors.primary, padding: '10px', borderRadius: '10px' }}><Zap color="#000" size={20} /></div>
-          <h1 style={{ fontSize: '18px', fontWeight: '800', margin: 0 }}>AEGIS AI</h1>
+      {/* EMPIRE SLY VAULT Executive Header */}
+      <header style={{ 
+        ...theme.glass, borderRadius: 0, padding: '16px 32px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        borderBottom: `1px solid ${theme.colors.border}`, background: 'rgba(2, 6, 23, 0.95)', backdropFilter: 'blur(16px)',
+        flexWrap: 'wrap', gap: '16px'
+      }}>
+        {/* Brand Title */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+          <div style={{ 
+            background: 'linear-gradient(135deg, #10b981 0%, #3b82f6 100%)', 
+            padding: '10px 12px', borderRadius: '12px', boxShadow: '0 0 15px rgba(16, 185, 129, 0.3)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center'
+          }}>
+            <Shield color="#000" size={22} strokeWidth={2.5} />
+          </div>
+          <div>
+            <h1 style={{ fontSize: '20px', fontWeight: '900', margin: 0, letterSpacing: '1.5px', color: '#fff', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              EMPIRE SLY VAULT
+              <span style={{ fontSize: '10px', backgroundColor: 'rgba(16,185,129,0.15)', color: theme.colors.primary, padding: '2px 8px', borderRadius: '4px', border: `1px solid ${theme.colors.primary}40`, fontWeight: '800' }}>
+                QUANTUM AI
+              </span>
+            </h1>
+            <div style={{ fontSize: '11px', color: theme.colors.textMuted, fontWeight: '700', letterSpacing: '0.5px' }}>
+              MULTI-REGION WEALTH & AUTONOMOUS DESK
+            </div>
+          </div>
         </div>
-        <nav style={{ display: 'flex', gap: '30px' }}>
-          {tabs.map(tab => (
-            <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{ background: 'transparent', border: 'none', color: activeTab === tab.id ? theme.colors.primary : theme.colors.textSecondary, fontSize: '12px', fontWeight: '800', cursor: 'pointer', borderBottom: activeTab === tab.id ? `2px solid ${theme.colors.primary}` : '2px solid transparent', padding: '5px 0' }}>{tab.label}</button>
-          ))}
+
+        {/* Grouped Sleek Navigation Pills */}
+        <nav style={{ 
+          display: 'flex', gap: '4px', backgroundColor: 'rgba(0, 0, 0, 0.4)', padding: '5px', 
+          borderRadius: '12px', border: `1px solid ${theme.colors.border}60`
+        }}>
+          {tabs.map(tab => {
+            const Icon = tab.icon;
+            const isActive = activeTab === tab.id;
+            return (
+              <button 
+                key={tab.id} 
+                onClick={() => setActiveTab(tab.id)} 
+                style={{ 
+                  background: isActive ? 'linear-gradient(135deg, rgba(16,185,129,0.2) 0%, rgba(59,130,246,0.2) 100%)' : 'transparent', 
+                  border: isActive ? `1px solid ${theme.colors.primary}60` : '1px solid transparent', 
+                  color: isActive ? '#fff' : theme.colors.textSecondary, 
+                  fontSize: '11px', fontWeight: '800', cursor: 'pointer', 
+                  borderRadius: '8px', padding: '8px 14px', display: 'flex', alignItems: 'center', gap: '6px',
+                  transition: 'all 0.2s ease', letterSpacing: '0.5px'
+                }}
+              >
+                <Icon size={14} color={isActive ? theme.colors.primary : theme.colors.textMuted} />
+                {tab.label}
+              </button>
+            );
+          })}
         </nav>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+
+        {/* Controls & Quick Drill */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <MarketClock />
           <input
             placeholder="Drill symbol…"
             title="Type a ticker + Enter to open its drill-down"
             onKeyDown={(e) => { if (e.key === 'Enter' && e.target.value.trim()) { setDrilldownSymbol(e.target.value.trim().toUpperCase()); e.target.value = ''; } }}
-            style={{ background: theme.colors.bgSecondary, border: `1px solid ${theme.colors.border}`, color: theme.colors.text, padding: '7px 12px', borderRadius: '8px', fontSize: '12px', width: '120px', outline: 'none' }}
+            style={{ background: 'rgba(255,255,255,0.05)', border: `1px solid ${theme.colors.border}`, color: theme.colors.text, padding: '7px 12px', borderRadius: '8px', fontSize: '11px', width: '110px', outline: 'none' }}
           />
           {isOperator && (
             <button
               onClick={toggleHalt}
               title={isHalted ? 'Resume automated trading' : 'Stop all new orders immediately'}
               style={{
-                background: isHalted ? theme.colors.warning : 'transparent',
+                background: isHalted ? theme.colors.warning : 'rgba(244, 63, 94, 0.12)',
                 border: `1px solid ${isHalted ? theme.colors.warning : theme.colors.danger}`,
                 color: isHalted ? '#000' : theme.colors.danger,
-                padding: '8px 15px', borderRadius: '8px', cursor: 'pointer',
-                fontSize: '12px', fontWeight: 800, letterSpacing: '0.5px',
+                padding: '7px 14px', borderRadius: '8px', cursor: 'pointer',
+                fontSize: '11px', fontWeight: 800, letterSpacing: '0.5px',
               }}
             >
               {isHalted ? 'RESUME' : 'HALT'}
             </button>
           )}
-          <button onClick={() => setShowHelp(true)} title="Getting started guide" style={{ background: 'transparent', border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, width: '34px', height: '34px', borderRadius: '8px', cursor: 'pointer', fontSize: '14px', fontWeight: 800 }}>?</button>
-          <button onClick={onLogout} style={{ background: 'transparent', border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, padding: '8px 15px', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}><LogOut size={16} /> SIGN OUT</button>
+          <button onClick={() => setShowHelp(true)} title="Getting started guide" style={{ background: 'transparent', border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, width: '32px', height: '32px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', fontWeight: 800 }}>?</button>
+          <button onClick={onLogout} style={{ background: 'transparent', border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, padding: '7px 12px', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', fontWeight: '800' }}><LogOut size={14} /> EXIT</button>
         </div>
       </header>
       {isHalted && (

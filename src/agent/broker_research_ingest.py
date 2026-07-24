@@ -13,9 +13,14 @@ logger = logging.getLogger(__name__)
 
 _EXTRACTION_SYSTEM_PROMPT = """
 You are an expert financial analyst extraction system.
-Extract all target asset recommendations, ratings, and price targets from the provided broker research text.
-For each asset/company found, output a JSON object containing details about the recommendation.
-Extract the symbol (e.g. SCOM, EQTY, RIVN, AAPL, BABA), market type, current price, target price, recommendations, and rationale.
+Extract all target asset recommendations, ratings, price targets, and full detailed investment rationales from the provided broker research text.
+For each asset/company found, output a JSON object containing complete details about the recommendation.
+
+CRITICAL INSTRUCTIONS FOR RATIONALE & CONTEXT PRESERVATION:
+- Do NOT summarize loosely or omit key analytical details.
+- In "rationale", extract the FULL detailed investment reasoning ("reason why") from the report text, including key financial growth drivers, profit margins, loan/revenue growth, dividend yield per share, and strategic catalysts.
+- In "risk_factors", extract an array of specific risk factors and headwinds mentioned in the analysis.
+- In "document_links", extract any embedded URLs or document links (e.g. audited financials, AGM results, public announcements) associated with this company.
 
 Your output must be a single valid JSON list of objects, where each object matches this schema:
 {
@@ -25,13 +30,14 @@ Your output must be a single valid JSON list of objects, where each object match
   "target_price": float_value or null,
   "upside_pct": float_value or null,
   "recommendation": "BUY" or "SELL" or "HOLD" or "ACCUMULATE" or "REDUCE",
-  "rationale": "detailed reason or investment rationale from text",
+  "rationale": "complete detailed investment reasoning and earnings growth catalysts from report text",
   "risk_factors": ["risk factor 1", "risk factor 2"],
+  "document_links": ["https://link1.com", "https://link2.com"],
   "time_horizon": "short_term" or "medium_term" or "long_term",
   "confidence": float_value_between_0_and_1
 }
 
-Ensure the output is strictly valid raw JSON. Do not wrap in markdown blocks, do not add trailing text or comments.
+Ensure the output is strictly valid raw JSON without markdown formatting or trailing text.
 """
 
 
@@ -62,16 +68,16 @@ class BrokerResearchIngest:
         upload_id = self.escalation_manager.record_upload(os.path.basename(file_path), source)
         
         try:
-            # 1. Parse PDF
+            # 1. Parse PDF with full table & page structure
             extracted = pdf_parser.extract_all(file_path)
             text = extracted.get("text", "")
             
             if not text:
                 raise ValueError("No text could be extracted from the PDF.")
                 
-            # 2. Extract signals via LLM
-            signals = self._extract_signals_via_llm(text)
-            logger.info(f"Extracted {len(signals)} signals from research PDF.")
+            # 2. Extract signals via LLM across all page chunks
+            signals = self._extract_signals_via_llm(extracted)
+            logger.info(f"Extracted {len(signals)} total signals from research PDF across all pages.")
             
             processed_count = 0
             auto_followed = []
@@ -137,103 +143,164 @@ class BrokerResearchIngest:
             }
 
     def _extract_signals_fallback(self, text: str) -> List[Dict[str, Any]]:
-        """Fallback heuristic regex matcher to extract signals when LLMs fail or are rate-limited."""
-        logger.info("Running regex-based fallback signal extractor...")
-        symbols = ["SCOM", "EQTY", "KCB", "COOP", "SCBK", "SBIC", "ABSA", "BAT", "EABL", "KEGN", 
-                   "KNRE", "BAMB", "TOTL", "CTUM", "NMG", "NCBA", "BRIT", "CIC"]
+        """Fallback heuristic matcher to extract signals across all known company names and symbols."""
+        logger.info("Running enhanced heuristic signal extractor across all NSE company profiles...")
+        
+        COMPANY_MAP = {
+            "ABSA": ["ABSA", "ABSA BANK"],
+            "COOP": ["COOP", "CO-OPERATIVE BANK", "COOPERATIVE BANK"],
+            "DTB": ["DTB", "DIAMOND TRUST", "DTB-K"],
+            "EABL": ["EABL", "EAST AFRICAN BREWERIES"],
+            "PORTLAND": ["PORTLAND", "E.A PORTLAND", "EAST AFRICAN PORTLAND"],
+            "EQTY": ["EQTY", "EQUITY GROUP", "EQUITY BANK"],
+            "I&M": ["I&M", "I&M GROUP", "I&M BANK"],
+            "KAPCHORUA": ["KAPCHORUA", "KAPCHORUA TEA"],
+            "KCB": ["KCB", "KCB GROUP", "KCB BANK"],
+            "KPLC": ["KPLC", "KENYA POWER"],
+            "NCBA": ["NCBA", "NCBA GROUP"],
+            "SCOM": ["SCOM", "SAFARICOM"],
+            "SBIC": ["STANBIC", "STANBIC BANK"],
+            "SCBK": ["STANDARD CHARTERED", "STANCHART"],
+            "WILLIAMSON": ["WILLIAMSON", "WILLIAMSON TEA"],
+            "LIBERTY": ["LIBERTY", "LIBERTY KENYA"],
+            "CIC": ["CIC", "CIC INSURANCE"],
+            "JUBILEE": ["JUBILEE", "JUBILEE HOLDINGS", "JUBILEE INSURANCE"],
+            "KEGN": ["KENGEN", "KENYA ELECTRICITY"],
+            "SASINI": ["SASINI", "SASINI PLC"],
+            "BOC": ["BOC", "B.O.C KENYA"],
+            "BAT": ["BAT", "BAT KENYA", "BRITISH AMERICAN TOBACCO"],
+            "BRIT": ["BRITAM", "BRITAM HOLDINGS"]
+        }
         
         extracted = []
         import re
-        
-        for sym in symbols:
-            # Find symbol as a separate word
-            matches = list(re.finditer(rf"\b{sym}\b", text, re.IGNORECASE))
-            if not matches:
-                continue
-                
-            # If found, extract surrounding context (20 characters before and 120 after to prevent overlap)
-            first_match = matches[0]
-            start = max(0, first_match.start() - 20)
-            end = min(len(text), first_match.end() + 120)
-            context = text[start:end].replace('\n', ' ').strip()
+        seen_symbols = set()
+
+        for canonical_sym, aliases in COMPANY_MAP.items():
+            for alias in aliases:
+                matches = list(re.finditer(rf"\b{re.escape(alias)}\b", text, re.IGNORECASE))
+                if not matches or canonical_sym in seen_symbols:
+                    continue
+                    
+                for match in matches:
+                    start = max(0, match.start() - 20)
+                    end = min(len(text), match.end() + 100)
+                    context = text[start:end].replace('\n', ' ').strip()
+                    context_lower = context.lower()
+
+                    sentiment_map = {
+                        "buy": "BUY", "accumulate": "BUY", "overweight": "BUY", "outperform": "BUY",
+                        "sell": "SELL", "reduce": "SELL", "underweight": "SELL", "underperform": "SELL",
+                        "hold": "HOLD", "neutral": "HOLD", "maintain": "HOLD"
+                    }
+                    recommendation = "HOLD"
+                    min_dist = float('inf')
+                    sym_pos = context_lower.find(alias.lower())
+                    if sym_pos != -1:
+                        for kw, category in sentiment_map.items():
+                            for kw_match in re.finditer(rf"\b{kw}\b", context_lower):
+                                dist = abs(kw_match.start() - sym_pos)
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    recommendation = category
+
+                    # Target price / Current price parsing - exclude 4-digit years like 2024-2027 and percentage values
+                    price_matches = re.findall(r"(?:price|target|kes|closing|@|\$)\s*:?\s*(\d+(?:\.\d+)?)", context, re.IGNORECASE)
+                    if not price_matches:
+                        raw_nums = re.findall(r"\b(?:\d{1,3}(?:\.\d+)?|\d+\.\d+)\b", context)
+                        price_matches = [n for n in raw_nums if not (len(n) == 4 and n.startswith("202"))]
+
+                    current_price = None
+                    target_price = None
+                    if len(price_matches) >= 2:
+                        try:
+                            p1 = float(price_matches[0])
+                            p2 = float(price_matches[1])
+                            if recommendation == "BUY":
+                                current_price = min(p1, p2)
+                                target_price = max(p1, p2)
+                            else:
+                                current_price = p1
+                                target_price = p2
+                        except ValueError:
+                            pass
+                    elif len(price_matches) == 1:
+                        try:
+                            current_price = float(price_matches[0])
+                        except ValueError:
+                            pass
+
+                    # Extract any URLs near this context
+                    doc_links = re.findall(r"https?://[^\s\)\>]+", context)
+
+                    # Clean rationale text
+                    clean_rationale = re.sub(r"https?://[^\s\)\>]+", "", context).strip()
+
+                    extracted.append({
+                        "symbol": canonical_sym,
+                        "market": "kenyan",
+                        "current_price": current_price,
+                        "target_price": target_price,
+                        "upside_pct": round(((target_price - current_price) / current_price * 100), 2) if (target_price and current_price and current_price > 0) else None,
+                        "recommendation": recommendation,
+                        "rationale": f"[Extracted Analyst Rationale]: {clean_rationale[:350]}",
+                        "document_links": doc_links
+                    })
+                    seen_symbols.add(canonical_sym)
+                    break
             
-            # Determine recommendation based on closest keyword to the symbol match to prevent cross-talk
-            context_lower = context.lower()
-            sentiment_map = {
-                "buy": "buy", "accumulate": "buy", "overweight": "buy", "outperform": "buy",
-                "sell": "sell", "reduce": "sell", "underweight": "sell", "underperform": "sell",
-                "hold": "hold", "neutral": "hold", "maintain": "hold"
-            }
-            recommendation = "hold"
-            min_dist = float('inf')
-            sym_pos_in_context = context_lower.find(sym.lower())
-            if sym_pos_in_context != -1:
-                for kw, category in sentiment_map.items():
-                    for kw_match in re.finditer(rf"\b{kw}\b", context_lower):
-                        dist = abs(kw_match.start() - sym_pos_in_context)
-                        if dist < min_dist:
-                            min_dist = dist
-                            recommendation = category
-                
-            # Try to find a target price or current price (numbers)
-            numbers = re.findall(r"\b\d+(?:\.\d+)?\b", context)
-            current_price = None
-            target_price = None
-            if len(numbers) >= 2:
-                try:
-                    num1 = float(numbers[0])
-                    num2 = float(numbers[1])
-                    if recommendation == "buy":
-                        current_price = min(num1, num2)
-                        target_price = max(num1, num2)
-                    else:
-                        current_price = num1
-                        target_price = num2
-                except ValueError:
-                    pass
-            
-            extracted.append({
-                "symbol": sym,
-                "market": "kenyan",
-                "current_price": current_price,
-                "target_price": target_price,
-                "upside_pct": round(((target_price - current_price) / current_price * 100), 2) if (target_price and current_price) else None,
-                "recommendation": recommendation,
-                "rationale": f"[Heuristic Extraction] Found symbol {sym} in context: '... {context[:120]} ...'"
-            })
-            
-        logger.info(f"Fallback regex extractor recovered {len(extracted)} potential recommendations.")
+        logger.info(f"Enhanced heuristic extractor recovered {len(extracted)} distinct recommendations.")
         return extracted
 
-    def _extract_signals_via_llm(self, text: str) -> List[Dict[str, Any]]:
-        """Extract structured signal JSON from unstructured text via LLM."""
+    def _extract_signals_via_llm(self, input_data: Any) -> List[Dict[str, Any]]:
+        """Extract structured signal JSON by processing PDF content in page chunks."""
         if not self.llm or not getattr(self.llm, "enabled", False):
-            logger.warning("LLM Orchestrator is not active. Cannot extract research signals.")
-            return []
-            
-        # Call LLM to propose parsed JSON with the dynamic pdf_extractor model from config
-        pdf_extractor_model = self.config.get("swarm", {}).get("agents", {}).get("pdf_extractor", "anthropic/claude-sonnet-4.6")
-        proposal = self.llm.propose_json(_EXTRACTION_SYSTEM_PROMPT, text, model_override=pdf_extractor_model)
+            logger.warning("LLM Orchestrator is not active. Using fallback extractor.")
+            text = input_data.get("text", "") if isinstance(input_data, dict) else str(input_data)
+            return self._extract_signals_fallback(text)
 
-        # Parse output
-        results = []
-        if not proposal:
-            logger.warning("LLM proposal returned empty or invalid JSON. Triggering heuristic fallback.")
+        pdf_extractor_model = self.config.get("swarm", {}).get("agents", {}).get("pdf_extractor", "anthropic/claude-sonnet-4.6")
+        all_signals = []
+        seen_symbols = set()
+
+        if isinstance(input_data, dict) and input_data.get("pages"):
+            pages = input_data["pages"]
+            # Process in 2-page chunks so output token limits are never hit
+            chunk_size = 2
+            for i in range(0, len(pages), chunk_size):
+                chunk_pages = pages[i:i+chunk_size]
+                chunk_text = "\n\n".join([p["combined"] for p in chunk_pages])
+                
+                proposal = self.llm.propose_json(_EXTRACTION_SYSTEM_PROMPT, chunk_text, model_override=pdf_extractor_model)
+                results = []
+                if isinstance(proposal, list):
+                    results = proposal
+                elif isinstance(proposal, dict) and "recommendations" in proposal:
+                    results = proposal["recommendations"]
+                elif isinstance(proposal, dict):
+                    results = [proposal]
+                
+                for item in results:
+                    sym = item.get("symbol", "").upper()
+                    if sym and sym not in seen_symbols:
+                        seen_symbols.add(sym)
+                        all_signals.append(item)
+        else:
+            text = input_data.get("text", "") if isinstance(input_data, dict) else str(input_data)
+            proposal = self.llm.propose_json(_EXTRACTION_SYSTEM_PROMPT, text, model_override=pdf_extractor_model)
+            if isinstance(proposal, list):
+                all_signals = proposal
+            elif isinstance(proposal, dict) and "recommendations" in proposal:
+                all_signals = proposal["recommendations"]
+            elif isinstance(proposal, dict):
+                all_signals = [proposal]
+
+        if not all_signals:
+            logger.warning("LLM returned no recommendation items. Triggering enhanced fallback.")
+            text = input_data.get("text", "") if isinstance(input_data, dict) else str(input_data)
             return self._extract_signals_fallback(text)
             
-        if isinstance(proposal, list):
-            results = proposal
-        elif isinstance(proposal, dict) and "recommendations" in proposal:
-            results = proposal["recommendations"]
-        elif isinstance(proposal, dict):
-            # Sometimes LLM outputs dictionary instead of list
-            results = [proposal]
-            
-        if not results:
-            logger.warning("LLM returned no recommendation items. Triggering heuristic fallback.")
-            return self._extract_signals_fallback(text)
-            
-        return results
+        return all_signals
 
     def _evaluate_signal(self, signal: Dict[str, Any]) -> Tuple[str, str, str]:
         """

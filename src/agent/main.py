@@ -142,6 +142,14 @@ class TradingAgent:
                 self.monitoring_service.start(port=monitoring_port)
                 logger.info(f"Monitoring service started on port {monitoring_port}")
             
+            # Initialize Immutable Audit Journal & Decoupled Task Queue Engine
+            from src.agent.audit_journal import AuditJournal
+            from src.agent.task_queue import TaskQueueEngine
+            self.components['audit_journal'] = AuditJournal()
+            self.task_queue_engine = TaskQueueEngine(num_workers=4)
+            self.task_queue_engine.start()
+            self.components['task_queue_engine'] = self.task_queue_engine
+
             # Broker Integration (initialize first)
             self.components['broker_manager'] = BrokerManager(self.config)
             
@@ -1111,6 +1119,20 @@ class TradingAgent:
                             logger.info(
                                 f"NSE order ticket #{ticket_id}: {action} {qty} {symbol} "
                                 f"@ {price:.2f} KES (conf {confidence:.2f})")
+                            
+                            # Automatically simulate paper fills for NSE when nse_auto_paper_trade is enabled
+                            if self.config.get('nse_auto_paper_trade', True):
+                                ok_fill, fill_data = queue.mark_filled(
+                                    ticket_id,
+                                    fill_price=round(price, 2),
+                                    fill_quantity=qty,
+                                    resolved_by='auto_paper_trader',
+                                    notes='Automated Paper Trade Simulation Fill',
+                                    order_journal=self.order_journal
+                                )
+                                if ok_fill:
+                                    dec['executed'] = True
+                                    logger.info(f"NSE Automated Paper Fill executed for ticket #{ticket_id}: {action} {qty} {symbol} @ {price:.2f} KES")
                         else:
                             dec['skip_reason'] = 'duplicate'
                 elif self.trading_halted and action in ('buy', 'sell'):
@@ -1279,8 +1301,12 @@ class TradingAgent:
                         broker = None
                         if asset_type == 'crypto':
                             broker = broker_manager.get_broker('coinbase_broker')
+                            if not broker or not getattr(broker, 'is_connected', False):
+                                broker = broker_manager.get_broker()  # Fallback to paper broker
                         elif asset_type == 'forex':
                             broker = broker_manager.get_broker('oanda_broker')
+                            if not broker or not getattr(broker, 'is_connected', False):
+                                broker = broker_manager.get_broker()  # Fallback to paper broker
                         else:
                             broker = broker_manager.get_broker()  # primary
                             

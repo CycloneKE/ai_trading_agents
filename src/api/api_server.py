@@ -404,33 +404,122 @@ class TradingAPI:
         @require_rate_limit
         @token_required
         def get_portfolio():
-            """Get portfolio data (protected)."""
+            """Get unified multi-region portfolio data (US, Crypto, Kenya/Africa)."""
             try:
-                broker = self.trading_agent.components.get('broker_manager')
-                if broker:
-                    primary = broker.get_broker()
+                all_positions = []
+                cash_usd = 100000.0
+                equity_usd = 100000.0
+                
+                # 1. Primary US / International broker
+                broker_mgr = self.trading_agent.components.get('broker_manager')
+                if broker_mgr:
+                    primary = broker_mgr.get_broker()
                     if primary:
                         account = primary.get_account_info()
-                        positions = primary.get_positions()
-                        return jsonify({
-                            'account': {
-                                'cash': account.cash if account else 0,
-                                'equity': account.equity if account else 0,
-                                # AccountInfo has no currency field; Alpaca accounts are USD
-                                'currency': getattr(account, 'currency', 'USD') or 'USD'
-                            },
-                            'positions': [
-                                {
-                                    'symbol': p.symbol,
-                                    'quantity': p.quantity,
-                                    'avg_entry_price': p.avg_entry_price,
-                                    'current_price': p.current_price,
-                                    'unrealized_pl': p.unrealized_pl,
-                                }
-                                for p in (positions or [])
-                            ]
-                        })
-                return jsonify({'error': 'No broker available'}), 503
+                        if account:
+                            cash_usd = account.cash
+                            equity_usd = account.equity
+                        
+                        raw_positions = primary.get_positions() or []
+                        for p in raw_positions:
+                            qty = float(getattr(p, 'quantity', 0) or 0)
+                            entry = float(getattr(p, 'avg_entry_price', 0) or 0)
+                            curr = float(getattr(p, 'current_price', 0) or entry or 0)
+                            unrealized = float(getattr(p, 'unrealized_pl', 0) or 0)
+                            unrealized_pct = (unrealized / (entry * qty)) * 100 if entry and qty else 0.0
+                            mkt_val = round(qty * curr, 2)
+                            
+                            sym_str = getattr(p, 'symbol', '').upper()
+                            region = 'Crypto' if any(c in sym_str for c in ['BTC', 'ETH', 'SOL', 'AVAX', 'DOGE', '-USD']) else 'US'
+                            all_positions.append({
+                                'symbol': getattr(p, 'symbol', 'UNKNOWN'),
+                                'quantity': qty,
+                                'avg_entry_price': round(entry, 2),
+                                'current_price': round(curr, 2),
+                                'unrealized_pl': round(unrealized, 2),
+                                'unrealized_pl_pct': round(unrealized_pct, 2),
+                                'market_value': mkt_val,
+                                'currency': 'USD',
+                                'region': region,
+                                'market_name': 'Crypto' if region == 'Crypto' else 'US Equities',
+                                'flag': '🪙' if region == 'Crypto' else '🇺🇸'
+                            })
+                
+                # 2. NSE Kenya & African filled holdings from NseOrderQueue & Sleeve
+                nse_queue = self.trading_agent.components.get('nse_order_queue')
+                dm = self.trading_agent.components.get('data_manager')
+                nse_connector = dm.connectors.get('nse') if dm and hasattr(dm, 'connectors') else None
+                
+                if nse_queue:
+                    fills = nse_queue.recent_fills(limit=100)
+                    nse_holdings = {}
+                    for fill in fills:
+                        sym = fill['symbol']
+                        side = fill['side']
+                        qty = fill.get('fill_quantity') or fill.get('quantity') or 0
+                        price = fill.get('fill_price') or fill.get('suggested_limit_price') or 0
+                        
+                        if sym not in nse_holdings:
+                            nse_holdings[sym] = {'qty': 0, 'total_cost': 0.0, 'book': fill.get('book', 'trading')}
+                        
+                        if side == 'buy':
+                            nse_holdings[sym]['qty'] += qty
+                            nse_holdings[sym]['total_cost'] += qty * price
+                        elif side == 'sell':
+                            nse_holdings[sym]['qty'] = max(0, nse_holdings[sym]['qty'] - qty)
+
+                    for sym, data in nse_holdings.items():
+                        qty = data['qty']
+                        if qty > 0:
+                            avg_entry = data['total_cost'] / qty if qty > 0 else 0.0
+                            # Live price lookup
+                            live_price = avg_entry
+                            if nse_connector:
+                                try:
+                                    quote = nse_connector.get_quote(sym)
+                                    if quote and quote.get('price_kes'):
+                                        live_price = float(quote['price_kes'])
+                                except Exception:
+                                    pass
+                            
+                            mkt_val_kes = qty * live_price
+                            unrealized_kes = mkt_val_kes - data['total_cost']
+                            unrealized_pct = (unrealized_kes / data['total_cost']) * 100 if data['total_cost'] > 0 else 0.0
+                            
+                            all_positions.append({
+                                'symbol': sym,
+                                'quantity': qty,
+                                'avg_entry_price': round(avg_entry, 2),
+                                'current_price': round(live_price, 2),
+                                'unrealized_pl': round(unrealized_kes, 2),
+                                'unrealized_pl_pct': round(unrealized_pct, 2),
+                                'market_value': round(mkt_val_kes, 2),
+                                'currency': 'KES',
+                                'region': 'Kenya/Africa',
+                                'market_name': 'NSE Kenya' if data['book'] == 'trading' else 'NSE Dividend Sleeve',
+                                'flag': '🇰🇪'
+                            })
+
+                # Region allocation summary
+                region_summary = {'US': 0.0, 'Crypto': 0.0, 'Kenya/Africa': 0.0}
+                for pos in all_positions:
+                    # Convert KES to approximate USD for allocation pie chart (1 USD ~ 130 KES)
+                    val_usd = pos['market_value'] if pos['currency'] == 'USD' else pos['market_value'] / 130.0
+                    reg = pos['region']
+                    region_summary[reg] = region_summary.get(reg, 0.0) + val_usd
+
+                return jsonify({
+                    'account': {
+                        'cash': round(cash_usd, 2),
+                        'equity': round(equity_usd, 2),
+                        'currency': 'USD',
+                    },
+                    'positions': all_positions,
+                    'summary': {
+                        'total_positions': len(all_positions),
+                        'regional_allocation_usd': region_summary
+                    }
+                })
             except Exception as e:
                 logger.error(f"Error getting portfolio: {e}")
                 return jsonify({'error': str(e)}), 500
@@ -439,28 +528,64 @@ class TradingAPI:
         @require_rate_limit
         @token_required
         def get_positions():
-            """Alias for portfolio positions."""
+            """Alias for multi-region portfolio positions."""
             try:
-                broker = self.trading_agent.components.get('broker_manager')
-                if broker:
-                    primary = broker.get_broker()
-                    if primary:
-                        positions = primary.get_positions()
-                        return jsonify([
-                            {
-                                'symbol': p.symbol,
-                                'quantity': p.quantity,
-                                'avg_entry_price': p.avg_entry_price,
-                                'current_price': p.current_price,
-                                'unrealized_pl': p.unrealized_pl,
-                                'unrealized_pl_pct': (p.unrealized_pl / (p.avg_entry_price * p.quantity)) * 100 if p.avg_entry_price and p.quantity else 0
-                            }
-                            for p in (positions or [])
-                        ])
-                return jsonify([])
+                res = get_portfolio()
+                if isinstance(res, tuple):
+                    return res
+                data = res.get_json() or {}
+                return jsonify(data.get('positions', []))
             except Exception as e:
                 logger.error(f"Error getting positions: {e}")
                 return jsonify({'error': str(e)}), 500
+
+        @self.app.route('/api/operator/recent-fills', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_recent_fills():
+            """Get recent filled orders across US and NSE markets."""
+            try:
+                fills = []
+                # 1. NSE fills
+                nse_queue = self.trading_agent.components.get('nse_order_queue')
+                if nse_queue:
+                    raw_nse = nse_queue.recent_fills(limit=50)
+                    for f in raw_nse:
+                        fills.append({
+                            'id': f.get('id'),
+                            'symbol': f.get('symbol'),
+                            'side': f.get('side'),
+                            'quantity': f.get('fill_quantity') or f.get('quantity'),
+                            'fill_price': f.get('fill_price') or f.get('suggested_limit_price'),
+                            'currency': 'KES',
+                            'region': 'Kenya/Africa',
+                            'timestamp': f.get('fill_at') or f.get('created_at'),
+                            'resolved_by': f.get('resolved_by', 'auto_paper_trader')
+                        })
+
+                # 2. US Order Journal fills
+                oj = getattr(self.trading_agent, 'order_journal', None)
+                if oj and hasattr(oj, 'filled_orders'):
+                    raw_oj = oj.filled_orders() or []
+                    for f in raw_oj:
+                        fills.append({
+                            'id': f.get('order_id') or f.get('client_order_id'),
+                            'symbol': f.get('symbol'),
+                            'side': f.get('side'),
+                            'quantity': f.get('filled_qty') or f.get('quantity'),
+                            'fill_price': f.get('filled_avg_price') or f.get('limit_price'),
+                            'currency': 'USD',
+                            'region': 'US',
+                            'timestamp': f.get('filled_at') or f.get('created_at'),
+                            'resolved_by': 'alpaca_broker'
+                        })
+
+                # Sort by timestamp desc
+                fills.sort(key=lambda x: str(x.get('timestamp') or ''), reverse=True)
+                return jsonify({'fills': fills[:50]})
+            except Exception as e:
+                logger.error(f"Error getting recent fills: {e}")
+                return jsonify({'fills': []}), 500
 
         @self.app.route('/api/risk-metrics', methods=['GET'])
         @require_rate_limit

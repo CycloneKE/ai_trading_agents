@@ -53,7 +53,7 @@ class SleeveManager:
     def __init__(self, config: Dict[str, Any], nse_order_queue, fundamentals_store,
                 dividend_ledger, llm_orchestrator=None,
                 db_path: str = str(DATA_DIR / 'sleeve.db')):
-        sc = config.get('sleeve', {})
+        sc = config.get('sleeve') if isinstance(config.get('sleeve'), dict) else config
         self.enabled = sc.get('enabled', False)
         self.nse_capital_kes = sc.get('nse_capital_kes', 0.0)
         self.capital_split_pct = sc.get('capital_split_pct', 0.0)
@@ -66,6 +66,8 @@ class SleeveManager:
         self.fundamentals_store = fundamentals_store
         self.dividend_ledger = dividend_ledger
         self.llm_orchestrator = llm_orchestrator
+        self._db_path = db_path
+        self.db_path = db_path
 
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(db_path, check_same_thread=False)

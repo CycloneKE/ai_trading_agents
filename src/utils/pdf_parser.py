@@ -87,21 +87,54 @@ def extract_all(file_path: str) -> Dict[str, Any]:
     try:
         text_content = []
         all_tables = []
+        all_links = []
+        pages_detail = []
+        
         with pdfplumber.open(file_path) as pdf:
             metadata["pages_count"] = len(pdf.pages)
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text_content.append(page_text)
-                    
-                tables = page.extract_tables()
+            for idx, page in enumerate(pdf.pages):
+                page_text = page.extract_text() or ""
+                tables = page.extract_tables() or []
+                
+                # Extract embedded hyperlinks
+                page_links = []
+                if hasattr(page, 'hyperlinks') and page.hyperlinks:
+                    for link in page.hyperlinks:
+                        uri = link.get('uri')
+                        if uri and uri not in page_links:
+                            page_links.append(uri)
+                            if uri not in all_links:
+                                all_links.append(uri)
+
+                table_md_list = []
                 for table in tables:
-                    if table:
+                    if table and len(table) > 0:
                         all_tables.append(table)
+                        # Convert table grid to Markdown table format
+                        md_rows = []
+                        for row in table:
+                            cleaned_row = [str(cell).replace('\n', ' ').strip() if cell is not None else "" for cell in row]
+                            md_rows.append("| " + " | ".join(cleaned_row) + " |")
+                        if len(md_rows) > 0:
+                            table_md_list.append("\n".join(md_rows))
+                
+                table_str = "\n\n".join(table_md_list)
+                links_str = "\n".join([f"Embedded Link: {l}" for l in page_links]) if page_links else ""
+                combined_page = f"--- PAGE {idx+1} ---\n{page_text}\n\n{table_str}\n\n{links_str}".strip()
+                text_content.append(combined_page)
+                pages_detail.append({
+                    "page_number": idx + 1,
+                    "text": page_text,
+                    "tables_markdown": table_str,
+                    "links": page_links,
+                    "combined": combined_page
+                })
                         
         return {
-            "text": "\n".join(text_content),
+            "text": "\n\n".join(text_content),
             "tables": all_tables,
+            "links": all_links,
+            "pages": pages_detail,
             "metadata": metadata
         }
     except Exception as e:

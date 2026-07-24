@@ -62,9 +62,11 @@ class RealTimeRiskManager:
         self.confidence_level = config.get('confidence_level', 0.95)
         self.rebalance_threshold = config.get('rebalance_threshold', 0.05)
         
-        # Emergency controls
+        # Emergency controls & Persistent Kill Switch
         self.emergency_stop = False
         self.risk_alerts = []
+        self._init_persistent_risk_state()
+        
         # Prometheus counters (optional)
         try:
             from prometheus_client import Counter
@@ -74,6 +76,39 @@ class RealTimeRiskManager:
             # prometheus_client not installed or failed to import; use no-op placeholders
             self.trade_attempts_counter = None
             self.trade_success_counter = None
+            
+    def _init_persistent_risk_state(self):
+        """Initialize and read persistent kill switch state from SQLite."""
+        try:
+            import sqlite3
+            import os
+            from src.utils.paths import DATA_DIR
+            db_path = str(DATA_DIR / 'risk_state.db')
+            os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
+            self._risk_db_conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
+            self._risk_db_conn.execute("CREATE TABLE IF NOT EXISTS risk_state (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
+            self._risk_db_conn.commit()
+            
+            cur = self._risk_db_conn.execute("SELECT value FROM risk_state WHERE key='kill_switch_active'")
+            row = cur.fetchone()
+            if row and row[0] == 'true':
+                self.emergency_stop = True
+                logger.warning("Persistent Kill Switch active: emergency stop restored from DB")
+        except Exception as e:
+            logger.error(f"Failed to initialize persistent risk state DB: {e}")
+
+    def set_persistent_kill_switch(self, active: bool, reason: str = ""):
+        """Set kill switch state in memory and persist to DB."""
+        self.emergency_stop = active
+        try:
+            if hasattr(self, '_risk_db_conn') and self._risk_db_conn:
+                now = datetime.utcnow().isoformat()
+                val = 'true' if active else 'false'
+                self._risk_db_conn.execute("INSERT OR REPLACE INTO risk_state (key, value, updated_at) VALUES ('kill_switch_active', ?, ?)", (val, now))
+                self._risk_db_conn.commit()
+                logger.warning(f"Persistent Kill Switch set to {val}: {reason}")
+        except Exception as e:
+            logger.error(f"Error persisting kill switch state: {e}")
         
     def _initialize_risk_limits(self) -> List[RiskLimit]:
         """Initialize risk limits from configuration"""
@@ -577,7 +612,7 @@ class RealTimeRiskManager:
                 logger.warning("Cannot reset emergency stop: critical risk breaches still active")
                 return False
             
-            self.emergency_stop = False
+            self.set_persistent_kill_switch(False, "Reset via reset_emergency_stop")
             logger.info("Emergency stop reset")
             return True
             

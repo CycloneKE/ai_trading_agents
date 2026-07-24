@@ -50,7 +50,7 @@ class NseOrderQueue:
     def __init__(self, db_path: str = str(DATA_DIR / 'escalations.db')):
         self._lock = threading.Lock()
         self.db_path = db_path
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
         self._conn.execute('PRAGMA journal_mode=WAL')
         self._conn.executescript(_SCHEMA)
         self._conn.commit()

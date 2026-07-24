@@ -67,6 +67,33 @@ class PortfolioOptimizer:
         
         logger.info("Portfolio optimizer initialized")
     
+    def _ensure_dataframe(self, price_data: Any) -> pd.DataFrame:
+        """Ensure input price_data is a valid pandas DataFrame."""
+        if isinstance(price_data, pd.DataFrame):
+            return price_data
+        if isinstance(price_data, dict):
+            try:
+                df_dict = {}
+                for k, v in price_data.items():
+                    if isinstance(v, pd.Series):
+                        df_dict[k] = v
+                    elif isinstance(v, (list, tuple)):
+                        df_dict[k] = pd.Series(v)
+                    elif isinstance(v, dict):
+                        if 'close' in v:
+                            df_dict[k] = pd.Series(v['close'])
+                        elif 'price' in v:
+                            df_dict[k] = pd.Series(v['price'])
+                        else:
+                            df_dict[k] = pd.Series(v)
+                    else:
+                        df_dict[k] = pd.Series(v)
+                return pd.DataFrame(df_dict)
+            except Exception as e:
+                logger.error(f"Failed to convert price_data dict to DataFrame: {e}")
+                return pd.DataFrame()
+        return pd.DataFrame()
+
     def calculate_expected_returns(self, price_data: pd.DataFrame, 
                                  method: str = 'historical') -> pd.Series:
         """
@@ -80,6 +107,10 @@ class PortfolioOptimizer:
             Expected returns for each asset
         """
         try:
+            price_data = self._ensure_dataframe(price_data)
+            if price_data.empty or len(price_data.columns) == 0:
+                return pd.Series()
+
             if method == 'historical':
                 # Simple historical mean
                 returns = price_data.pct_change().dropna()
@@ -129,6 +160,9 @@ class PortfolioOptimizer:
             Covariance matrix
         """
         try:
+            price_data = self._ensure_dataframe(price_data)
+            if price_data.empty or len(price_data.columns) == 0:
+                return pd.DataFrame()
             returns = price_data.pct_change().dropna()
             
             if self.covariance_method == 'sample':
