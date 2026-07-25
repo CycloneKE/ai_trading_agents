@@ -48,6 +48,7 @@ from src.agent.broker_manager import BrokerManager
 from src.agent.order_execution_engine import OrderExecutionEngine
 from src.agent.realtime_risk_manager import RealTimeRiskManager
 from src.agent.performance_analytics import PerformanceAnalytics
+from src.agent.heartbeat_monitor import HeartbeatMonitor
 from src.agent.risk_calculator import RiskCalculator
 from src.agent.llm_orchestrator import LLMOrchestrator
 from src.agent.bias_detector import BiasDetector
@@ -308,6 +309,20 @@ class TradingAgent:
                 if hasattr(self.monitoring_service, 'refresh_health_cache'):
                     self.monitoring_service.refresh_health_cache()
             
+            # Dead-Man's Switch Heartbeat Monitor
+            try:
+                self.heartbeat_monitor = HeartbeatMonitor(
+                    risk_manager=self.risk_manager,
+                    broker_manager=self.components.get('broker_manager'),
+                    audit_journal=self.components.get('audit_journal'),
+                    timeout_seconds=self.config.get('heartbeat_timeout_seconds', 180)
+                )
+                self.heartbeat_monitor.start_watchdog()
+                logger.info("Dead-Man's Switch heartbeat monitor activated (timeout=%ds)", self.config.get('heartbeat_timeout_seconds', 180))
+            except Exception as e:
+                logger.error(f"Heartbeat monitor initialization failed: {e}")
+                self.heartbeat_monitor = None
+
             logger.info("All components initialized successfully")
             
         except Exception as e:
@@ -1007,6 +1022,10 @@ class TradingAgent:
                     self._run_sleeve_cycle()
                 except Exception as e:
                     logger.error(f"Sleeve cycle error: {e}")
+
+                # Dead-Man's Switch heartbeat ping
+                if getattr(self, 'heartbeat_monitor', None):
+                    self.heartbeat_monitor.ping()
 
                 # Calculate sleep time to maintain consistent loop interval
                 loop_duration = time.time() - loop_start_time

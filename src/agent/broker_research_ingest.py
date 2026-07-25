@@ -342,5 +342,42 @@ class BrokerResearchIngest:
         if confidence < 0.6:
             return "escalate", f"LLM extraction confidence ({confidence:.2f}) is too low (requires >= 0.6).", "low"
 
-        # If it passes all checks, it's safe to follow automatically
-        return "auto_follow", f"Asset matches all auto-follow criteria.", "low"
+        # Multi-Model Consensus Voting for high-stakes BUY signals
+        rec_upper = signal.get('recommendation', '').upper()
+        if rec_upper in ('BUY', 'ACCUMULATE') and getattr(self, 'llm', None):
+            try:
+                consensus_prompt = (
+                    f"You are an independent financial analyst. A broker report recommends "
+                    f"{rec_upper} on {signal.get('symbol')} at {signal.get('current_price')} "
+                    f"with target {signal.get('target_price')}. "
+                    f"Reason: {signal.get('reason', 'N/A')}. "
+                    f"Do you agree? Reply with JSON: {{\"agree\": true/false, \"recommendation\": \"BUY\"/\"HOLD\"/\"SELL\", \"reasoning\": \"...\"}}"
+                )
+                secondary_opinion = self.llm.propose_json_secondary(
+                    "You are a risk-aware equity analyst providing independent signal verification.",
+                    consensus_prompt
+                )
+                if secondary_opinion and isinstance(secondary_opinion, dict):
+                    sec_rec = secondary_opinion.get('recommendation', '').upper()
+                    agrees = secondary_opinion.get('agree', False)
+                    signal['consensus_verified'] = agrees and sec_rec in ('BUY', 'ACCUMULATE')
+                    signal['secondary_recommendation'] = sec_rec
+                    signal['secondary_reasoning'] = secondary_opinion.get('reasoning', '')
+                    
+                    if signal['consensus_verified']:
+                        signal['confidence'] = min(0.95, signal.get('confidence', 0.7) + 0.15)
+                        logger.info(f"✅ Multi-model consensus VERIFIED for {signal.get('symbol')}: "
+                                   f"Primary={rec_upper}, Secondary={sec_rec}")
+                        return ("auto_follow", "Dual-model consensus verified. Both LLMs agree on recommendation.", "low")
+                    else:
+                        logger.warning(f"⚠️ Multi-model consensus DISAGREEMENT for {signal.get('symbol')}: "
+                                      f"Primary={rec_upper}, Secondary={sec_rec}")
+                        return ("escalate", f"Multi-model disagreement: Primary says {rec_upper} but secondary says {sec_rec}. Requires operator review.", "medium")
+                else:
+                    signal['consensus_verified'] = None
+                    logger.info(f"Multi-model consensus unavailable for {signal.get('symbol')}, proceeding with single-model auto-follow.")
+            except Exception as e:
+                logger.warning(f"Consensus voting error for {signal.get('symbol')}: {e}")
+                signal['consensus_verified'] = None
+        
+        return ("auto_follow", "Asset matches all auto-follow criteria.", "low")

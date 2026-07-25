@@ -1363,6 +1363,17 @@ class TradingAPI:
                 return jsonify({'error': 'Escalation manager not initialized'}), 500
             return jsonify({'uploads': em.get_upload_history()}), 200
 
+        @self.app.route('/api/heartbeat', methods=['GET'])
+        @require_rate_limit
+        def heartbeat_status():
+            """Dead-Man's Switch heartbeat monitor status."""
+            hb = getattr(self.trading_agent, 'heartbeat_monitor', None) if self.trading_agent else None
+            if not hb:
+                return jsonify({'healthy': True, 'elapsed_seconds': 0, 'timeout_seconds': 180, 'triggered': False, 'status': 'not_initialized'})
+            status = hb.status()
+            status['status'] = 'ok' if status['healthy'] else 'TIMEOUT'
+            return jsonify(status)
+
         # --- Error handlers ---
         @self.app.errorhandler(429)
         def rate_limit_exceeded(error):

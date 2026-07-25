@@ -487,6 +487,7 @@ const AdvancedDashboard = ({ onLogout }) => {
   const [anomalies, setAnomalies] = useState([]);
   const [nseSort, setNseSort] = useState({ key: 'symbol', dir: 1 });
   const [nseFilter, setNseFilter] = useState('all'); // all | held | movers
+  const [heartbeat, setHeartbeat] = useState({ healthy: true, elapsed_seconds: 0, triggered: false });
 
   // First login: open the getting-started guide automatically.
   useEffect(() => {
@@ -516,6 +517,21 @@ const AdvancedDashboard = ({ onLogout }) => {
     const id = setInterval(load, 30000);
     return () => { alive = false; clearInterval(id); };
   }, [isOperator]);
+
+  // Heartbeat monitor polling
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const token = localStorage.getItem('trading_token');
+        const res = await fetch(`${getApiBase()}/api/heartbeat`, { headers: { Authorization: `Bearer ${token}` } });
+        if (res.ok) { const json = await res.json(); if (alive) setHeartbeat(json); }
+      } catch (e) {}
+    };
+    poll();
+    const id = setInterval(poll, 10000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
 
   const toggleHalt = async () => {
     const message = isHalted
@@ -1100,6 +1116,20 @@ const AdvancedDashboard = ({ onLogout }) => {
 
         {/* Controls & Quick Drill */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          {/* Heartbeat Badge */}
+          <div title={heartbeat.triggered ? 'HEARTBEAT TIMEOUT — Kill switch activated!' : `Agent loop alive (${heartbeat.elapsed_seconds}s ago)`} style={{
+            display: 'flex', alignItems: 'center', gap: '6px', padding: '5px 10px', borderRadius: '8px', fontSize: '10px', fontWeight: '800',
+            background: heartbeat.triggered ? 'rgba(244,63,94,0.15)' : (heartbeat.healthy ? 'rgba(16,185,129,0.1)' : 'rgba(251,191,36,0.15)'),
+            border: `1px solid ${heartbeat.triggered ? '#f43f5e' : (heartbeat.healthy ? '#10b98140' : '#fbbf2440')}`,
+            color: heartbeat.triggered ? '#f43f5e' : (heartbeat.healthy ? theme.colors.primary : '#fbbf24'),
+          }}>
+            <span style={{ width: '8px', height: '8px', borderRadius: '50%', display: 'inline-block',
+              background: heartbeat.triggered ? '#f43f5e' : (heartbeat.healthy ? theme.colors.primary : '#fbbf24'),
+              animation: heartbeat.healthy && !heartbeat.triggered ? 'pulse 2s infinite' : 'none',
+              boxShadow: heartbeat.healthy && !heartbeat.triggered ? `0 0 6px ${theme.colors.primary}` : 'none'
+            }} />
+            {heartbeat.triggered ? 'TIMEOUT' : (heartbeat.healthy ? `${Math.round(heartbeat.elapsed_seconds)}s` : 'STALE')}
+          </div>
           <MarketClock />
           <input
             placeholder="Drill symbol…"

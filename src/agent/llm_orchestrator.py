@@ -180,6 +180,36 @@ class LLMOrchestrator:
                                 model_override=model_override)
         return result if isinstance(result, dict) else None
 
+    def propose_json_secondary(self, system_prompt: str, user_prompt: str) -> Optional[Dict[str, Any]]:
+        """Query the secondary LLM provider for cross-validation consensus voting.
+        
+        This forces a call to the non-primary provider to get an independent
+        opinion for multi-model consensus verification.
+        """
+        if not self.enabled:
+            return None
+        
+        providers = self._provider_order()
+        if len(providers) < 2:
+            logger.warning("Multi-model consensus unavailable: only one LLM provider configured.")
+            return None
+        
+        secondary = providers[1]
+        try:
+            dispatch = {'openrouter': self._call_openrouter, 'gemini': self._call_gemini}
+            fn = dispatch.get(secondary)
+            if fn:
+                result = fn(system_prompt, user_prompt, None)
+                if result:
+                    try:
+                        import json as _json
+                        return _json.loads(result) if isinstance(result, str) else result
+                    except (ValueError, TypeError):
+                        return None
+        except Exception as e:
+            logger.warning(f"Secondary LLM provider ({secondary}) consensus call failed: {e}")
+        return None
+
     def _call_openrouter(self, system_prompt: str, user_prompt: str, fallback_signal: Optional[Dict[str, Any]], model_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
         url = "https://openrouter.ai/api/v1/chat/completions"
         headers = {
