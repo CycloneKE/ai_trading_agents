@@ -26,6 +26,8 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from src.utils.paths import DATA_DIR
+
 logger = logging.getLogger(__name__)
 
 FINAL_STATUSES = {'filled', 'canceled', 'cancelled', 'rejected', 'expired', 'failed', 'aborted'}
@@ -68,10 +70,10 @@ class OrderJournal:
     (the trading loop, stop-loss enforcement and reconcile can run from
     different threads)."""
 
-    def __init__(self, db_path: str = os.path.join('data', 'order_journal.db')):
+    def __init__(self, db_path: str = str(DATA_DIR / 'order_journal.db')):
         os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
         self._conn.execute('PRAGMA journal_mode=WAL')
         self._conn.executescript(_SCHEMA)
         self._conn.commit()

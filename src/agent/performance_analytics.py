@@ -3,6 +3,7 @@ Performance Analytics Engine
 Comprehensive performance analysis and reporting for trading strategies
 """
 
+import os
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timedelta
@@ -10,6 +11,8 @@ import numpy as np
 import pandas as pd
 from dataclasses import dataclass
 from enum import Enum
+
+from src.utils.paths import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +60,58 @@ class PerformanceAnalytics:
         self.cached_metrics = {}
         self.last_calculation = None
         
+        # Open db connection to persist portfolio history
+        self.db_path = str(DATA_DIR / 'escalations.db')
+        self._init_db()
+        self._load_and_seed_history()
+        
+    def _init_db(self):
+        """Initialize SQLite table inside escalations.db for portfolio history."""
+        try:
+            os.makedirs(os.path.dirname(self.db_path) or '.', exist_ok=True)
+            import sqlite3
+            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS portfolio_history (
+                timestamp TEXT PRIMARY KEY,
+                value REAL NOT NULL
+            );
+            """)
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error initializing portfolio history db: {e}")
+
+    def _load_and_seed_history(self):
+        """Load real portfolio history from SQLite. Starts empty if none exists yet —
+        real values accumulate via record_portfolio_value() as the agent trades."""
+        try:
+            import sqlite3
+            conn = sqlite3.connect(self.db_path, timeout=10)
+            cur = conn.execute("SELECT timestamp, value FROM portfolio_history ORDER BY timestamp ASC")
+            rows = cur.fetchall()
+            conn.close()
+
+            if rows:
+                for r_ts, r_val in rows:
+                    ts = datetime.fromisoformat(r_ts)
+                    self.portfolio_values.append({'timestamp': ts, 'value': r_val})
+                # Re-calculate returns history from loaded values
+                for i in range(1, len(self.portfolio_values)):
+                    prev_value = self.portfolio_values[i-1]['value']
+                    curr_value = self.portfolio_values[i]['value']
+                    if prev_value > 0:
+                        self.returns_history.append({
+                            'timestamp': self.portfolio_values[i]['timestamp'],
+                            'return': (curr_value - prev_value) / prev_value
+                        })
+                logger.info(f"Loaded {len(self.portfolio_values)} portfolio value points from database.")
+            else:
+                logger.info("Portfolio history is empty; will accumulate from real trading activity.")
+
+        except Exception as e:
+            logger.error(f"Error loading portfolio history: {e}")
+
     def seed_history(self, history: Dict[str, Any]):
         """Seed performance history from external source (e.g., broker or DB)."""
         try:
@@ -84,6 +139,19 @@ class PerformanceAnalytics:
                 'timestamp': timestamp,
                 'value': value
             })
+            
+            # Persist to database
+            try:
+                import sqlite3
+                conn = sqlite3.connect(self.db_path, timeout=10)
+                conn.execute(
+                    "INSERT OR REPLACE INTO portfolio_history (timestamp, value) VALUES (?, ?)",
+                    (timestamp.isoformat(), value)
+                )
+                conn.commit()
+                conn.close()
+            except Exception as db_err:
+                logger.error(f"Error persisting portfolio value to database: {db_err}")
             
             # Calculate return if we have previous value
             if len(self.portfolio_values) > 1:

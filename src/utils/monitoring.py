@@ -15,6 +15,8 @@ from datetime import datetime
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
+from src.utils.paths import DATA_DIR
+
 try:
     import psutil
     PSUTIL_AVAILABLE = True
@@ -710,7 +712,7 @@ class MonitoringService:
                 """Handle portfolio endpoint."""
                 try:
                     # Get paper trading state
-                    state_file = "data/paper_trading_state.json"
+                    state_file = str(DATA_DIR / "paper_trading_state.json")
                     portfolio_data = {
                         'cash': 0,
                         'positions': {},
@@ -748,7 +750,7 @@ class MonitoringService:
                     trades = monitoring_service.metrics['trading']['orders']
                     
                     # Also get trades from paper trading state
-                    state_file = "data/paper_trading_state.json"
+                    state_file = str(DATA_DIR / "paper_trading_state.json")
                     if os.path.exists(state_file):
                         with open(state_file, 'r') as f:
                             state = json.load(f)

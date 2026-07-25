@@ -1,4 +1,5 @@
 from src.utils.config_validator import validate_config
+from src.utils.paths import DATA_DIR
 #!/usr/bin/env python3
 """
 AI Trading Agent - Main Application Entry Point
@@ -47,6 +48,7 @@ from src.agent.broker_manager import BrokerManager
 from src.agent.order_execution_engine import OrderExecutionEngine
 from src.agent.realtime_risk_manager import RealTimeRiskManager
 from src.agent.performance_analytics import PerformanceAnalytics
+from src.agent.heartbeat_monitor import HeartbeatMonitor
 from src.agent.risk_calculator import RiskCalculator
 from src.agent.llm_orchestrator import LLMOrchestrator
 from src.agent.bias_detector import BiasDetector
@@ -106,6 +108,7 @@ class TradingAgent:
         # derives the required env vars from the enabled config (self.config).
         self._validate_secrets()
         self.running = False
+        self.start_time = time.time()  # for /api/system-health uptime
         self.trading_halted = False  # kill switch: blocks all NEW orders when True
         self.components = {}
         self.order_journal = None  # initialized in start() after brokers connect
@@ -140,6 +143,14 @@ class TradingAgent:
                 self.monitoring_service.start(port=monitoring_port)
                 logger.info(f"Monitoring service started on port {monitoring_port}")
             
+            # Initialize Immutable Audit Journal & Decoupled Task Queue Engine
+            from src.agent.audit_journal import AuditJournal
+            from src.agent.task_queue import TaskQueueEngine
+            self.components['audit_journal'] = AuditJournal()
+            self.task_queue_engine = TaskQueueEngine(num_workers=4)
+            self.task_queue_engine.start()
+            self.components['task_queue_engine'] = self.task_queue_engine
+
             # Broker Integration (initialize first)
             self.components['broker_manager'] = BrokerManager(self.config)
             
@@ -206,6 +217,59 @@ class TradingAgent:
             self.components['bias_detector'] = BiasDetector(self.config)
             self.components['adaptive_integration'] = AdaptiveStrategyIntegration(self.config)
 
+            # Watchlist, Escalation, Ingest, and Self-Assessment Components
+            from src.agent.escalation_manager import EscalationManager
+            from src.agent.broker_research_ingest import BrokerResearchIngest
+            from src.agent.self_assessment import SelfAssessmentEngine
+            from src.agent.swarm_state_store import SwarmStateStore
+            from src.agent.sector_specialist import SectorSpecialistManager
+            
+            em = EscalationManager()
+            self.components['escalation_manager'] = em
+            self.components['research_ingest'] = BrokerResearchIngest(
+                self.components['llm_orchestrator'],
+                em,
+                self.config
+            )
+
+            # NSE order-ticket queue: NSE has no broker API, so NSE trade
+            # decisions become tickets a human keys into the AIB-AXYS portal.
+            from src.agent.nse_order_queue import NseOrderQueue
+            self.components['nse_order_queue'] = NseOrderQueue()
+            self._last_nse_eval = 0.0
+            self._nse_last_price = {}  # symbol -> last-evaluated price (freshness guard)
+
+            # Long-term dividend sleeve: separate NSE accumulation book,
+            # isolated from trading positions via the `book` tag on tickets.
+            from src.agent.sleeve.fundamentals_store import FundamentalsStore
+            from src.agent.sleeve.dividend_ledger import DividendLedger
+            from src.agent.sleeve.sleeve_manager import SleeveManager
+            self.components['fundamentals_store'] = FundamentalsStore()
+            self.components['dividend_ledger'] = DividendLedger()
+            self.components['sleeve_manager'] = SleeveManager(
+                self.config,
+                self.components['nse_order_queue'],
+                self.components['fundamentals_store'],
+                self.components['dividend_ledger'],
+                self.components['llm_orchestrator'],
+            )
+            self.components['self_assessment'] = SelfAssessmentEngine(
+                self.components['llm_orchestrator'],
+                em,
+                self.config
+            )
+            
+            # Swarm Infrastructure & Specialist Components
+            redis_client = None
+            dm = self.components.get('data_manager')
+            if dm and getattr(dm, 'redis_client', None) is not None:
+                redis_client = dm.redis_client
+                
+            self.components['swarm_state_store'] = SwarmStateStore(redis_client)
+            self.components['sector_specialist'] = SectorSpecialistManager(
+                self.components['llm_orchestrator']
+            )
+
             
             # NLP Engine
             if NLPManager is not None:
@@ -245,6 +309,20 @@ class TradingAgent:
                 if hasattr(self.monitoring_service, 'refresh_health_cache'):
                     self.monitoring_service.refresh_health_cache()
             
+            # Dead-Man's Switch Heartbeat Monitor
+            try:
+                self.heartbeat_monitor = HeartbeatMonitor(
+                    risk_manager=self.risk_manager,
+                    broker_manager=self.components.get('broker_manager'),
+                    audit_journal=self.components.get('audit_journal'),
+                    timeout_seconds=self.config.get('heartbeat_timeout_seconds', 180)
+                )
+                self.heartbeat_monitor.start_watchdog()
+                logger.info("Dead-Man's Switch heartbeat monitor activated (timeout=%ds)", self.config.get('heartbeat_timeout_seconds', 180))
+            except Exception as e:
+                logger.error(f"Heartbeat monitor initialization failed: {e}")
+                self.heartbeat_monitor = None
+
             logger.info("All components initialized successfully")
             
         except Exception as e:
@@ -282,8 +360,20 @@ class TradingAgent:
                 self.order_journal.close()
             if getattr(self, 'decision_journal', None):
                 self.decision_journal.close()
+            if 'escalation_manager' in self.components:
+                self.components['escalation_manager'].close()
+            if 'nse_order_queue' in self.components:
+                self.components['nse_order_queue'].close()
+            if 'dividend_ledger' in self.components:
+                self.components['dividend_ledger'].close()
+            if 'sleeve_manager' in self.components:
+                self.components['sleeve_manager'].close()
+            if 'self_assessment' in self.components:
+                self.components['self_assessment'].close()
+            if 'sector_specialist' in self.components:
+                self.components['sector_specialist'].close()
         except Exception as e:
-            logger.warning(f"Error closing journals: {e}")
+            logger.warning(f"Error closing journals and swarm components: {e}")
         # Stop the monitoring service (HTTP server + metrics threads) so the
         # port is released and background threads don't outlive the agent.
         try:
@@ -374,6 +464,32 @@ class TradingAgent:
                     self.components['strategy_manager'].warm_start(bars_by_symbol)
         except Exception as e:
             logger.warning(f"History warm-start failed (non-fatal): {e}")
+
+        # Warm-start NSE symbols too, from the local historical CSVs the NSE
+        # scraper seeds — otherwise NSE strategies are blind for lookback_period
+        # scrape cycles (many days at a 30-min cadence).
+        try:
+            import csv as _csv
+            from pathlib import Path as _Path
+            nse_symbols = self.config.get('data_manager', {}).get('nse_symbols', [])
+            hist_dir = _Path(__file__).resolve().parent.parent.parent / 'data' / 'nse_historical'
+            nse_bars = {}
+            for sym in nse_symbols:
+                csv_path = hist_dir / f"{sym}.csv"
+                if not csv_path.exists():
+                    continue
+                try:
+                    with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+                        closes = [float(r['close']) for r in _csv.DictReader(f)
+                                  if r.get('close') and float(r['close']) > 0]
+                    if closes:
+                        nse_bars[sym] = closes[-60:]
+                except Exception as e:
+                    logger.debug(f"No NSE warm-start bars for {sym}: {e}")
+            if nse_bars:
+                self.components['strategy_manager'].warm_start(nse_bars)
+        except Exception as e:
+            logger.warning(f"NSE history warm-start failed (non-fatal): {e}")
 
         # LLM weight allocator: proposes ensemble weight tilts from realized
         # attribution on a slow cadence; hard guardrails clamp every proposal
@@ -540,6 +656,21 @@ class TradingAgent:
                     except Exception as e:
                         logger.debug(f"Position/fill sync error: {e}")
 
+                # Record current equity every cycle so the performance chart
+                # and consolidated-equity card reflect live state. Startup
+                # only seeds history from the broker's own equity curve
+                # (paper accounts return none), so without this the chart
+                # and equity figure stay frozen at zero for paper sessions.
+                try:
+                    broker_manager = self.components.get('broker_manager')
+                    primary = broker_manager.get_broker() if broker_manager else None
+                    if primary and primary.is_connected:
+                        acct = primary.get_account_info()
+                        if acct is not None and acct.equity is not None:
+                            self.performance_analytics.record_portfolio_value(float(acct.equity))
+                except Exception as e:
+                    logger.debug(f"Portfolio value recording error: {e}")
+
                 # Refresh strategy performance from REAL journal attribution
                 # every 5 minutes, so performance-weighted decisions and the
                 # status API run on realized results, not placeholders.
@@ -557,6 +688,66 @@ class TradingAgent:
                 if market_data:
                     # --- Stop-loss enforcement ---
                     self._enforce_stop_losses(stop_loss_pct, trailing_stop_pct)
+                    
+                    # Swarm: Run parallel Sector Specialists before the symbol loop.
+                    # Rate-limited: sector outlooks change slowly and each pass
+                    # fires one LLM call per sector — running it every 60s cycle
+                    # blew straight through free-tier rate limits. Run at most
+                    # once per sector_analysis_interval cycles (~once per trading
+                    # day by default); the persisted SQLite profiles carry
+                    # between passes.
+                    import json
+                    swarm_enabled = self.config.get("swarm", {}).get("enabled", True)
+                    # sector_analysis_interval is expressed in loop cycles; convert
+                    # to seconds so the gate doesn't depend on the per-cycle
+                    # `cycle` counter (defined later in the loop body).
+                    sector_interval_s = self.config.get('sector_analysis_interval', 390) * loop_interval
+                    sector_due = (time.time() - getattr(self, '_last_sector_time', 0)) >= sector_interval_s
+                    if swarm_enabled and sector_due and 'sector_specialist' in self.components:
+                        self._last_sector_time = time.time()
+                        try:
+                            sector_specialist = self.components['sector_specialist']
+                            state_store = self.components['swarm_state_store']
+                            
+                            symbols_by_sector = {}
+                            for sym in symbols:
+                                sect = sector_specialist.get_sector_for_symbol(sym)
+                                if sect not in symbols_by_sector:
+                                    symbols_by_sector[sect] = []
+                                symbols_by_sector[sect].append(sym)
+                                
+                            import concurrent.futures
+                            
+                            def run_sector_analysis_task(sect, syms):
+                                sect_news = []
+                                for sym in syms:
+                                    if isinstance(market_data, dict) and 'news_data' in market_data:
+                                        for source, source_data in market_data['news_data'].items():
+                                            data = source_data.get('data', [])
+                                            if isinstance(data, dict):
+                                                sect_news.extend([n for n in (data.get(sym) or []) if isinstance(n, dict)])
+                                            else:
+                                                sect_news.extend([n for n in data if isinstance(n, dict) and n.get('symbol') == sym])
+                                res = sector_specialist.run_sector_analysis(sect, sect_news)
+                                state_store.set(f"swarm:sector_outlook:{sect}", json.dumps(res), ttl_seconds=900)
+                                return sect, res
+                                
+                            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                                futures = {
+                                    executor.submit(run_sector_analysis_task, sect, syms): sect
+                                    for sect, syms in symbols_by_sector.items()
+                                }
+                                try:
+                                    for fut in concurrent.futures.as_completed(futures, timeout=25.0):
+                                        sect = futures[fut]
+                                        try:
+                                            fut.result()
+                                        except Exception as e:
+                                            logger.error(f"Failed parallel sector specialist for {sect}: {e}")
+                                except concurrent.futures.TimeoutError:
+                                    logger.warning("Parallel sector specialist analysis timed out after 25s. Continuing cycle.")
+                        except Exception as e:
+                            logger.error(f"Error in parallel swarm sector execution: {e}")
 
                     # Process each symbol individually
                     all_signals = {}
@@ -602,6 +793,13 @@ class TradingAgent:
 
                                 # Apply Adaptive Goals to strategy execution
                                 modified_params = self.components['adaptive_integration'].get_strategy_parameters('technical')
+                                if modified_params:
+                                    # Update momentum & reversion weights if adjusted by goals/performance
+                                    mw = modified_params.get('momentum_weight')
+                                    mr = modified_params.get('mean_reversion_weight')
+                                    if mw is not None and mr is not None:
+                                        self.components['strategy_manager'].strategy_weights['momentum'] = mw
+                                        self.components['strategy_manager'].strategy_weights['mean_reversion'] = mr
                                 
                                 # Generate trading signals for this symbol
                                 symbol_signals = self.components['strategy_manager'].generate_signals(symbol_data)
@@ -616,8 +814,65 @@ class TradingAgent:
                                     }
 
                                 if symbol_signals and symbol_signals.get('action') != 'hold':
+                                    # Modify position size dynamically based on adaptive integration
+                                    confidence = symbol_signals.get('confidence', 0.5)
+                                    broker_manager = self.components.get('broker_manager')
+                                    account_val = 100000.0
+                                    if broker_manager:
+                                        primary = broker_manager.get_broker()
+                                        if primary:
+                                            try:
+                                                info = primary.get_account_info()
+                                                if info:
+                                                    account_val = info.equity
+                                            except Exception:
+                                                pass
+                                    pos_value = self.components['adaptive_integration'].get_position_size(
+                                        symbol, confidence, account_val
+                                    )
+                                    symbol_signals['position_size'] = pos_value / account_val if account_val > 0 else 0.0
+
+                                    # Fetch active research context for this symbol if available in watchlist
+                                    research_context = None
+                                    em = self.components.get('escalation_manager')
+                                    if em:
+                                        watchlist_items = em.get_active_watchlist()
+                                        for item in watchlist_items:
+                                            if item.get('symbol') == symbol:
+                                                research_context = item
+                                                break
+                                    
+                                    # Retrieve sector outlook from SwarmStateStore
+                                    sector_outlook = None
+                                    ss = self.components.get('sector_specialist')
+                                    state_store = self.components.get('swarm_state_store')
+                                    if ss and state_store:
+                                        sect = ss.get_sector_for_symbol(symbol)
+                                        cached_out = state_store.get(f"swarm:sector_outlook:{sect}")
+                                        if cached_out:
+                                            try:
+                                                sector_outlook = json.loads(cached_out)
+                                            except Exception:
+                                                pass
+
+                                    # Compute the agent's own hit-rate track record at most once per
+                                    # ~10 minutes (guarded), then feed it into the LLM validation prompt.
+                                    if not hasattr(self, '_verdict_scores_at') or time.time() - self._verdict_scores_at > 600:
+                                        from src.agent.verdict_scoreboard import score_decisions
+                                        from src.utils.real_price_feed import price_feed
+                                        journal = getattr(self, 'decision_journal', None)
+                                        self._verdict_scores = score_decisions(
+                                            journal.recent(None, limit=500) if journal else [],
+                                            price_feed.get_price)
+                                        self._verdict_scores_at = time.time()
+                                    from src.agent.verdict_scoreboard import summary_line
+
                                     # Validate with LLM Orchestrator
-                                    validated_signal = self.components['llm_orchestrator'].validate_trade(symbol, symbol_signals, symbol_data, symbol_news)
+                                    validated_signal = self.components['llm_orchestrator'].validate_trade(
+                                        symbol, symbol_signals, symbol_data, symbol_news,
+                                        research_context=research_context, sector_outlook=sector_outlook,
+                                        track_record=summary_line(self._verdict_scores, symbol)
+                                    )
                                     dec['llm_verdict'] = {
                                         'action': validated_signal.get('action'),
                                         'confidence': validated_signal.get('confidence'),
@@ -657,11 +912,26 @@ class TradingAgent:
 
                     # Process signals if any were generated
                     if all_signals:
-                        # Assess risk for all signals
-                        risk_assessment = self.components['risk_calculator'].assess_portfolio_risk(
-                            market_data, all_signals
-                        )
-                        
+                        # Assess risk for all signals. risk_calculator.calculate_portfolio_risk()
+                        # expects historical positions+price_data (a different shape than
+                        # what's available here) and its return shape doesn't match what
+                        # _check_risk_limits reads either — this call was never reachable
+                        # before (all_signals was always empty). Build the flat shape
+                        # _check_risk_limits actually expects from data that's already
+                        # flowing correctly: the live risk manager's current metrics plus
+                        # the position sizes the proposed signals themselves carry.
+                        live_metrics = {}
+                        if getattr(self, 'risk_manager', None):
+                            try:
+                                live_metrics = self.risk_manager.get_risk_report().get('current_metrics', {})
+                            except Exception as e:
+                                logger.debug(f"Risk report unavailable for risk-limit check: {e}")
+                        risk_assessment = {
+                            'portfolio_var': live_metrics.get('portfolio_var', 0),
+                            'current_drawdown': live_metrics.get('max_drawdown', 0),
+                            'position_sizes': {sym: sig.get('position_size', 0) for sym, sig in all_signals.items()},
+                        }
+
                         # Check risk limits
                         if self._check_risk_limits(risk_assessment):
                             # Execute trades
@@ -693,17 +963,229 @@ class TradingAgent:
 
                     # Update portfolio optimization (once daily, not every loop)
                     self._update_portfolio_optimization(market_data)
+
+                    # Self-assessment: once daily (aligned to end-of-day).
+                    assessment_interval = self.config.get('self_assessment', {}).get('assessment_interval', 390)
+                    if cycle > 0 and cycle % assessment_interval == 0:
+                        try:
+                            logger.info("Executing periodic self-assessment and self-improvement loop...")
+                            engine = self.components.get('self_assessment')
+                            if engine:
+                                plan = engine.run_assessment(
+                                    self.decision_journal,
+                                    self.order_journal,
+                                    self.performance_analytics,
+                                    cycles_to_review=assessment_interval
+                                )
+                                # Auto-apply safe changes
+                                auto_applied, escalated = engine.apply_improvements(plan, require_approval=False)
+                                logger.info(f"Retrospective assessment completed: applied {len(auto_applied)} auto-improvements, escalated {len(escalated)} structural proposals.")
+
+                                # Prune expired local cache entries to prevent memory leaks in local offline mode
+                                if state_store:
+                                    pruned = state_store.clear_expired()
+                                    if pruned > 0:
+                                        logger.info(f"SwarmStateStore: Pruned {pruned} expired local cache entries.")
+
+                            # Universe scout: propose untracked NSE movers as operator escalations.
+                            # This NEVER auto-trades — it only creates a pending escalation; the
+                            # symbol is added to the runtime universe/watchlist solely on operator approval.
+                            try:
+                                from src.agent.universe_scout import propose_candidates
+                                nse = self.components.get('data_manager')
+                                em = self.components.get('escalation_manager')
+                                if em and nse:
+                                    tracked = set(self.config.get('data_manager', {}).get('nse_symbols', []))
+                                    movers = []
+                                    nse_conn = getattr(nse, 'connectors', {}).get('nse')
+                                    if nse_conn:
+                                        quotes = nse_conn.get_all_quotes()
+                                        movers = [{'symbol': q.get('symbol'), 'change_pct': q.get('change_pct')} for q in quotes]
+                                    for cand in propose_candidates(tracked, movers, [])[:3]:
+                                        em.create_escalation(None, cand['symbol'], 'add_symbol', cand['reason'], 'low')
+                            except Exception as e:
+                                logger.warning(f"Universe scout skipped: {e}")
+                        except Exception as e:
+                            logger.error(f"Error in self-assessment cycle: {e}")
                 
+                # NSE Kenya decision pass — separate cadence from the US loop
+                # (NSE prices only refresh on the ~30-min scrape). Internally
+                # rate-limited and guarded by market hours + price freshness.
+                try:
+                    self._evaluate_nse_symbols()
+                except Exception as e:
+                    logger.error(f"NSE evaluation error: {e}")
+
+                # Long-term dividend sleeve — separate cadence again (at most
+                # once per calendar month; SleeveManager gates itself).
+                try:
+                    self._run_sleeve_cycle()
+                except Exception as e:
+                    logger.error(f"Sleeve cycle error: {e}")
+
+                # Dead-Man's Switch heartbeat ping
+                if getattr(self, 'heartbeat_monitor', None):
+                    self.heartbeat_monitor.ping()
+
                 # Calculate sleep time to maintain consistent loop interval
                 loop_duration = time.time() - loop_start_time
                 sleep_time = max(0, loop_interval - loop_duration)
                 if sleep_time > 0:
                     time.sleep(sleep_time)
-                    
+
             except Exception as e:
                 logger.error(f"Error in trading loop: {str(e)}")
                 time.sleep(loop_interval)  # Wait before retrying
-    
+
+    def _evaluate_nse_symbols(self):
+        """Run the standard decision pipeline over NSE symbols and turn
+        non-hold, LLM-approved signals into operator order tickets (NSE has no
+        broker API to auto-execute against). Rate-limited to the scrape
+        cadence and guarded by market hours + per-symbol price freshness."""
+        queue = self.components.get('nse_order_queue')
+        dm = self.components.get('data_manager')
+        nse = dm.connectors.get('nse') if dm and hasattr(dm, 'connectors') else None
+        strategy_manager = self.components.get('strategy_manager')
+        if not queue or not nse or not strategy_manager:
+            return
+
+        interval = self.config.get('data_manager', {}).get('nse_eval_interval', 1800)
+        now = time.time()
+        if now - getattr(self, '_last_nse_eval', 0) < interval:
+            return
+        if not nse.is_market_open():
+            return
+        self._last_nse_eval = now
+
+        nse_cfg = self.config.get('nse_order_tickets', {})
+        try:
+            queue.expire_stale(nse_cfg.get('max_age_hours', 24))
+        except Exception as e:
+            logger.debug(f"NSE ticket expiry skipped: {e}")
+
+        llm = self.components.get('llm_orchestrator')
+        base_notional = nse_cfg.get('trade_notional_kes', 50000)
+        cycle = int(now // interval)
+        nse_symbols = self.config.get('data_manager', {}).get('nse_symbols', [])
+
+        for symbol in nse_symbols:
+            try:
+                quote = nse.get_quote(symbol)
+                if not quote or quote.get('_stale') or not quote.get('price_kes'):
+                    continue
+                price = float(quote['price_kes'])
+                if price <= 0:
+                    continue
+
+                # Freshness guard: skip a symbol whose price hasn't moved since
+                # last eval so we don't feed a repeated stale price into the
+                # strategies' rolling SMA/RSI buffers.
+                last = self._nse_last_price.get(symbol)
+                if last is not None and abs(price - last) < 1e-9:
+                    continue
+                self._nse_last_price[symbol] = price
+
+                symbol_data = {
+                    'symbol': symbol, 'price': price, 'close': price,
+                    'open': float(quote.get('open_kes') or price),
+                    'volume': quote.get('volume', 0),
+                    'source': quote.get('source', 'nse'), 'market': 'nse',
+                }
+                signals = strategy_manager.generate_signals(symbol_data)
+
+                dec = {
+                    'symbol': symbol, 'cycle': cycle, 'action': 'hold',
+                    'skip_reason': 'hold', 'price': price,
+                    'ensemble_confidence': 0.0, 'per_strategy': {},
+                    'llm_verdict': {}, 'executed': False,
+                }
+                if signals:
+                    dec['action'] = signals.get('action', 'hold')
+                    dec['ensemble_confidence'] = signals.get('confidence', 0.0)
+                    dec['per_strategy'] = {
+                        n: {'action': s.get('action'), 'confidence': s.get('confidence')}
+                        for n, s in (signals.get('per_strategy') or {}).items()
+                    }
+
+                validated = signals
+                if signals and signals.get('action') != 'hold' and llm:
+                    validated = llm.validate_trade(symbol, signals, symbol_data, None)
+                    dec['llm_verdict'] = {
+                        'action': validated.get('action'),
+                        'confidence': validated.get('confidence'),
+                        'reasoning': validated.get('reasoning'),
+                    }
+                    if validated.get('action') == 'hold':
+                        dec['skip_reason'] = 'llm_veto'
+
+                action = (validated or {}).get('action', 'hold')
+                confidence = (validated or {}).get('confidence', 0.0)
+                if action in ('buy', 'sell') and confidence > 0.1 and not self.trading_halted:
+                    position_size = (validated.get('position_size')
+                                     or signals.get('position_size') or 0.1)
+                    notional = base_notional * min(max(position_size, 0.1), 1.0)
+                    qty = int(notional / price)
+                    if qty < 1:
+                        dec['skip_reason'] = 'min_notional'
+                    else:
+                        ticket_id = queue.create_ticket(
+                            symbol, action, qty, suggested_limit_price=round(price, 2),
+                            rationale=f"{action.upper()} signal (ensemble conf {confidence:.2f})",
+                            ensemble_confidence=confidence,
+                            llm_reasoning=(validated.get('reasoning') if validated else '') or '')
+                        if ticket_id:
+                            dec['skip_reason'] = None  # actionable signal, ticket queued
+                            logger.info(
+                                f"NSE order ticket #{ticket_id}: {action} {qty} {symbol} "
+                                f"@ {price:.2f} KES (conf {confidence:.2f})")
+                            
+                            # Automatically simulate paper fills for NSE when nse_auto_paper_trade is enabled
+                            if self.config.get('nse_auto_paper_trade', True):
+                                ok_fill, fill_data = queue.mark_filled(
+                                    ticket_id,
+                                    fill_price=round(price, 2),
+                                    fill_quantity=qty,
+                                    resolved_by='auto_paper_trader',
+                                    notes='Automated Paper Trade Simulation Fill',
+                                    order_journal=self.order_journal
+                                )
+                                if ok_fill:
+                                    dec['executed'] = True
+                                    logger.info(f"NSE Automated Paper Fill executed for ticket #{ticket_id}: {action} {qty} {symbol} @ {price:.2f} KES")
+                        else:
+                            dec['skip_reason'] = 'duplicate'
+                elif self.trading_halted and action in ('buy', 'sell'):
+                    dec['skip_reason'] = 'halted'
+
+                if self.decision_journal:
+                    try:
+                        self.decision_journal.record(dec)
+                    except Exception as e:
+                        logger.debug(f"NSE decision record error: {e}")
+            except Exception as e:
+                logger.error(f"Error evaluating NSE symbol {symbol}: {e}")
+
+    def _run_sleeve_cycle(self):
+        """Monthly dividend-sleeve accumulation pass. Pulls current NSE
+        quotes for the sleeve's configured universe and hands them to
+        SleeveManager, which gates itself to once per calendar month."""
+        sleeve = self.components.get('sleeve_manager')
+        dm = self.components.get('data_manager')
+        nse = dm.connectors.get('nse') if dm and hasattr(dm, 'connectors') else None
+        if not sleeve or not nse:
+            return
+
+        quotes = {}
+        for symbol in sleeve.universe:
+            quote = nse.get_quote(symbol)
+            if quote and not quote.get('_stale') and quote.get('price_kes'):
+                quotes[symbol] = float(quote['price_kes'])
+
+        results = sleeve.run_monthly_cycle(quotes)
+        if results:
+            logger.info(f"Sleeve cycle generated {len(results)} accumulation "
+                       f"ticket(s): {[r['symbol'] for r in results]}")
+
     def _check_risk_limits(self, risk_assessment: Dict[str, Any]) -> bool:
         """
         Check if risk assessment is within acceptable limits.
@@ -838,8 +1320,12 @@ class TradingAgent:
                         broker = None
                         if asset_type == 'crypto':
                             broker = broker_manager.get_broker('coinbase_broker')
+                            if not broker or not getattr(broker, 'is_connected', False):
+                                broker = broker_manager.get_broker()  # Fallback to paper broker
                         elif asset_type == 'forex':
                             broker = broker_manager.get_broker('oanda_broker')
+                            if not broker or not getattr(broker, 'is_connected', False):
+                                broker = broker_manager.get_broker()  # Fallback to paper broker
                         else:
                             broker = broker_manager.get_broker()  # primary
                             
@@ -858,8 +1344,13 @@ class TradingAgent:
                             _note(symbol, 'no_account_info')
                             continue
                         portfolio_value = account_info.equity
-                        max_risk_per_trade = 0.02 # 2% Rule
-                        
+                        cash = float(getattr(account_info, 'cash', 0) or 0)
+                        deployed_pct = 1 - (cash / portfolio_value) if portfolio_value else 0.0
+                        if not hasattr(self, 'cash_policy'):
+                            from src.agent.cash_policy import CashDeploymentPolicy
+                            self.cash_policy = CashDeploymentPolicy(self.config)
+                        max_risk_per_trade = self.cash_policy.risk_cap(deployed_pct, confidence)
+
                         # Position value based on signal (confidence * position_size)
                         target_pos_value = portfolio_value * min(position_size, max_risk_per_trade)
 
@@ -920,6 +1411,22 @@ class TradingAgent:
                         sizing_cfg = self.config.get('trading', {})
                         cycle = int(time.time() // self.config.get('trading_loop_interval', 60))
 
+                        # Alpaca rejects fractional orders that open/extend a
+                        # short position (fractional trading only supports
+                        # going long or closing an existing long). A sell with
+                        # no existing long to close is a short — force whole
+                        # shares for it regardless of the fractional config.
+                        existing_qty = 0.0
+                        if action == 'sell':
+                            try:
+                                existing_qty = next(
+                                    (p.quantity for p in (broker.get_positions() or [])
+                                     if p.symbol == symbol), 0.0)
+                            except Exception as e:
+                                logger.debug(f"Position lookup failed for {symbol}: {e}")
+                        is_short = action == 'sell' and existing_qty <= 0
+                        allow_fractional = sizing_cfg.get('allow_fractional', True) and not is_short
+
                         for strategy_name, target_value in executions:
                             # Dollar-notional sizing with fractional shares,
                             # so small accounts get properly sized positions
@@ -927,7 +1434,7 @@ class TradingAgent:
                             sized = size_order(
                                 target_value, price,
                                 min_notional=sizing_cfg.get('min_notional', 5.0),
-                                allow_fractional=sizing_cfg.get('allow_fractional', True),
+                                allow_fractional=allow_fractional,
                             )
                             if not sized:
                                 _note(symbol, 'min_notional')
@@ -1313,7 +1820,7 @@ class TradingAgent:
         """
         try:
             # Store results to file or database
-            results_file = f"data/optimization_results_{datetime.now().strftime('%Y%m%d')}.json"
+            results_file = str(DATA_DIR / f"optimization_results_{datetime.now().strftime('%Y%m%d')}.json")
             
             os.makedirs(os.path.dirname(results_file), exist_ok=True)
             

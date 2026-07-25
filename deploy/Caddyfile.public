@@ -1,0 +1,34 @@
+# Public-internet TLS reverse proxy (real Let's Encrypt certs), for
+# murzak.tech. Use this instead of Caddyfile once:
+#   1. DNS: murzak.tech (and www.murzak.tech if used) has an A record
+#      pointing at this host's public IP.
+#   2. Router: ports 80 and 443 are forwarded to this machine's LAN IP.
+#   3. That public IP is stable (static, or kept current via Dynamic DNS) —
+#      otherwise DNS and cert renewal will silently break when it changes.
+#
+#   Run from the repo root:  caddy run --config deploy\Caddyfile.public
+#
+# No `tls internal` here — Caddy automatically requests and renews a real
+# certificate from Let's Encrypt for a public domain name, no extra config
+# needed. Traders/browsers get https://murzak.tech with no cert warning.
+#
+# Also update CORS_ALLOWED_ORIGINS in .env to include
+# https://murzak.tech (and https://www.murzak.tech if used), or the API
+# will reject requests from the dashboard.
+
+murzak.tech, www.murzak.tech {
+	# API (Flask/waitress on 5001)
+	handle /api/* {
+		reverse_proxy 127.0.0.1:5001
+	}
+
+	# Dashboard (Next.js on 3001)
+	handle {
+		reverse_proxy 127.0.0.1:3001
+	}
+}
+
+# Redirect plain HTTP to HTTPS
+http://murzak.tech, http://www.murzak.tech {
+	redir https://{host}{uri} permanent
+}

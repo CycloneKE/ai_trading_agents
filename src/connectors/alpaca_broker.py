@@ -77,12 +77,16 @@ class AlpacaBroker(BaseBroker):
                 if not self.connect():
                     return None
             
+            tif = order.time_in_force
+            if isinstance(order.quantity, (int, float)) and (order.quantity % 1 != 0):
+                tif = "day"
+
             alpaca_order = self.api.submit_order(
                 symbol=order.symbol,
                 qty=order.quantity,
                 side=order.side,
                 type=order.order_type,
-                time_in_force=order.time_in_force,
+                time_in_force=tif,
                 limit_price=order.limit_price,
                 stop_price=order.stop_price,
                 client_order_id=order.client_order_id,
@@ -131,7 +135,7 @@ class AlpacaBroker(BaseBroker):
                 buying_power=float(acc.buying_power),
                 initial_margin=float(getattr(acc, 'initial_margin', 0) or 0),
                 maintenance_margin=float(getattr(acc, 'maintenance_margin', 0) or 0),
-                day_trade_count=int(acc.daytrade_count),
+                day_trade_count=int(getattr(acc, 'daytrade_count', 0) or getattr(acc, 'daytrading_count', 0) or 0),
                 last_updated=datetime.utcnow(),
                 broker_name=self.broker_name
             )

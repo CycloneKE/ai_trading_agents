@@ -14,6 +14,7 @@ import random
 
 from src.connectors.base_broker import BaseBroker, OrderRequest, OrderResponse, Position, AccountInfo
 from src.utils.real_price_feed import price_feed  # Import the new real price feed
+from src.utils.paths import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -612,9 +613,9 @@ class PaperTradingBroker(BaseBroker):
             }
             
             # Create directory if it doesn't exist
-            os.makedirs('data', exist_ok=True)
-            
-            with open('data/paper_trading_state.json', 'w') as f:
+            os.makedirs(str(DATA_DIR), exist_ok=True)
+
+            with open(str(DATA_DIR / 'paper_trading_state.json'), 'w') as f:
                 json.dump(state, f, indent=2)
                 
         except Exception as e:
@@ -623,8 +624,8 @@ class PaperTradingBroker(BaseBroker):
     def _load_state(self):
         """Load paper trading state from file."""
         try:
-            if os.path.exists('data/paper_trading_state.json'):
-                with open('data/paper_trading_state.json', 'r') as f:
+            if os.path.exists(str(DATA_DIR / 'paper_trading_state.json')):
+                with open(str(DATA_DIR / 'paper_trading_state.json'), 'r') as f:
                     state = json.load(f)
                 
                 self.cash = state.get('cash', self.initial_cash)

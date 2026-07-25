@@ -1,8 +1,16 @@
 {
+  "primary_llm_provider": "gemini",
+  "gemini_model": "gemini-2.0-flash",
+  "llm_cooldown_seconds": 60,
+  "sector_analysis_interval": 390,
   "data_manager": {
     "symbols": [
       "AAPL", "GOOGL", "MSFT", "TSLA", "NVDA",
-      "SPY", "QQQ", "XLF", "XLV", "XLE", "DIA"
+      "SPY", "QQQ", "XLF", "XLV", "XLE", "DIA",
+      "BTC-USD", "ETH-USD", "SOL-USD"
+    ],
+    "crypto_symbols": [
+      "BTC-USD", "ETH-USD", "SOL-USD"
     ],
     "nse_symbols": [
       "SCOM", "EQTY", "KCB", "COOP", "SCBK", "SBIC", "ABSA",
@@ -17,6 +25,9 @@
       "db": 0
     },
     "connectors": {
+      "coinbase": {
+        "enabled": true
+      },
       "fmp": {
         "enabled": true,
         "api_key": "${TRADING_FMP_API_KEY}"
@@ -71,6 +82,32 @@
     "max_portfolio_var": 0.02,
     "max_drawdown": 0.10,
     "max_daily_loss": 0.03
+  },
+  "cash_policy": {
+    "enabled": true,
+    "target_deployment": 0.80,
+    "min_cash_buffer": 0.10,
+    "base_risk_per_trade": 0.02,
+    "max_risk_per_trade": 0.05,
+    "min_confidence_to_boost": 0.55
+  },
+  "sleeve": {
+    "enabled": false,
+    "nse_capital_kes": 0,
+    "capital_split_pct": 0.5,
+    "top_n": 5,
+    "weighting_mode": "equal",
+    "universe": ["SCOM", "EQTY", "KCB", "COOP", "SCBK", "ABSA", "BAT", "EABL", "NCBA"],
+    "scoring": {
+      "yield_cap_pct": 12.0,
+      "yield_weight": 0.5,
+      "quality_weight": 0.5,
+      "payout_ratio_min": 0.30,
+      "payout_ratio_max": 0.70,
+      "years_paid_target": 5,
+      "min_avg_daily_volume": 50000,
+      "stale_days": 400
+    }
   },
   "risk_limits": {
     "max_portfolio_var": 0.02,
@@ -161,5 +198,27 @@
     "file": "logs/trading_agent.log",
     "max_size_mb": 10,
     "backup_count": 5
+  },
+  "research_ingest": {
+    "enabled": true,
+    "upload_dir": "data/research_uploads",
+    "auto_follow_rules": {
+      "require_existing_symbol": true,
+      "allowed_recommendations": ["BUY", "HOLD", "ACCUMULATE"],
+      "min_upside_pct": 5.0
+    }
+  },
+  "self_assessment": {
+    "assessment_interval": 390
+  },
+  "swarm": {
+    "enabled": true,
+    "redis_enabled": true,
+    "agents": {
+      "pdf_extractor": "meta-llama/llama-3.3-70b-instruct:free",
+      "sector_specialist": "meta-llama/llama-3.3-70b-instruct:free",
+      "sentiment_analyst": "meta-llama/llama-3.3-70b-instruct:free",
+      "synthesizer": "meta-llama/llama-3.3-70b-instruct:free"
+    }
   }
 }

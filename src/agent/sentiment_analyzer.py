@@ -84,7 +84,7 @@ class FinancialSentimentAnalyzer:
         """
         try:
             # Initialize FinBERT for financial sentiment
-            if self.use_finbert:
+            if self.use_finbert and TRANSFORMERS_AVAILABLE:
                 try:
                     model_name = "ProsusAI/finbert"
                     self.finbert_tokenizer = AutoTokenizer.from_pretrained(model_name)

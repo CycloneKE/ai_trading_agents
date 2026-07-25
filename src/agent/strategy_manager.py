@@ -13,6 +13,8 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
+from src.utils.paths import DATA_DIR
+
 logger = logging.getLogger(__name__)
 
 # Fix relative imports
@@ -79,6 +81,7 @@ class StrategyManager:
         self.ensemble_method = config.get('ensemble_method', 'weighted_average')
         self.performance_window = config.get('performance_window', 30)  # Days
         self.rebalance_frequency = config.get('rebalance_frequency', 7)  # Days
+        self.min_trade_confidence = config.get('min_trade_confidence', 0.50)
         
         # Performance tracking
         self.strategy_performance = {}
@@ -104,7 +107,7 @@ class StrategyManager:
             # Overlay parameters promoted by the nightly practice session
             # (scripts/practice_session.py). Only values that beat current
             # parameters on BOTH train and test windows land in this file.
-            overlay_path = os.path.join('data', 'strategy_params.json')
+            overlay_path = str(DATA_DIR / 'strategy_params.json')
             overlay = {}
             try:
                 if os.path.exists(overlay_path):
@@ -502,17 +505,15 @@ class StrategyManager:
         total_confidence = 0.0
         total_position_size = 0.0
         
-        # Calculate volatility from market data if available
-        if data and 'data' in data and symbol in data['data']:
-            symbol_data = data['data'][symbol]
-            if isinstance(symbol_data, dict) and 'close' in symbol_data and 'open' in symbol_data:
-                # Basic intraday volatility proxy
-                market_volatility = abs((symbol_data['close'] - symbol_data['open']) / symbol_data['open'])
-            elif isinstance(symbol_data, pd.DataFrame) and 'close' in symbol_data.columns:
-                returns = symbol_data['close'].pct_change().dropna()
-                market_volatility = returns.std() * np.sqrt(252) if len(returns) > 5 else 0.02
-            else:
-                market_volatility = data.get('volatility', 0.02)
+        # Calculate volatility from market data if available. `data` here is
+        # already the per-symbol-extracted flat dict (close/open/... at the
+        # top level, not nested under a 'data'/symbol wrapper) — read it
+        # directly rather than expecting a nested structure that never matches.
+        if data and isinstance(data, dict) and 'close' in data and 'open' in data:
+            market_volatility = abs((data['close'] - data['open']) / data['open'])
+        elif data and isinstance(data, dict) and isinstance(data.get('close'), pd.Series):
+            returns = data['close'].pct_change().dropna()
+            market_volatility = returns.std() * np.sqrt(252) if len(returns) > 5 else 0.02
         else:
             market_volatility = data.get('volatility', 0.02) if data else 0.02
         
@@ -528,7 +529,7 @@ class StrategyManager:
                 if name == 'mean_reversion' or signals.get('action') == 'hold':
                     base_weight *= 1.5 # Boost conservative strategies
                 elif name == 'momentum':
-                    base_weight *= 0.8 # Penalty for aggressive strategies in chop
+                    base_weight *= 0.9 # Mild penalty for aggressive strategies in chop
             else: # Clear trend / Low volatility
                 if name == 'momentum':
                     base_weight *= 1.2
@@ -552,9 +553,9 @@ class StrategyManager:
         final_confidence = action_scores[final_action]
         
         # Require a minimum adaptive confidence to actually enter a trade
-        if final_action != 'hold' and final_confidence < 0.60:
+        if final_action != 'hold' and final_confidence < self.min_trade_confidence:
             final_action = 'hold'
-            final_position_size = 0.0
+            total_position_size = 0.0
             
         return {
             'symbol': symbol,
