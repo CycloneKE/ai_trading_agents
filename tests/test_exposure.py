@@ -386,3 +386,93 @@ def test_nan_net_notional_still_allows_the_close_of_a_crossing_order(guard):
                                    net_notional=float('nan'))
     assert got == pytest.approx(2_000.0)
     assert not math.isnan(got)
+
+
+# ------------------------------------------------- non-finite core inputs
+#
+# Every comparison against NaN is False in Python, so `not target_value or
+# target_value <= 0` and `headroom < self.min_notional` silently pass a NaN
+# straight through every guard. Reviewer-confirmed: a position already
+# exactly at the 5% per-symbol cap, with price=NaN on the add, returned the
+# full requested amount -- reopening the exact pyramiding bug this module
+# exists to prevent. These lock down that the fix is done once at the
+# function boundary for existing_qty, price and target_value, on both ADDs
+# and REDUCEs, since non-finite arithmetic inputs have no safe answer
+# either way.
+
+@pytest.mark.parametrize('target_value', [float('nan'), float('inf'), float('-inf')])
+def test_non_finite_target_value_refuses_on_an_add(guard, target_value):
+    got = guard.permitted_notional('TSLA', 'buy', 0.0, PRICE, EQUITY, target_value)
+    assert got == 0.0
+    assert math.isnan(got) is False
+
+
+def test_non_finite_target_value_refuses_on_a_reduce(guard):
+    held_qty = 10_000.0 / PRICE
+    got = guard.permitted_notional('TSLA', 'sell', held_qty, PRICE, EQUITY, float('nan'))
+    assert got == 0.0
+    assert math.isnan(got) is False
+
+
+@pytest.mark.parametrize('price', [float('nan'), float('inf'), float('-inf')])
+def test_non_finite_price_refuses_on_an_add(guard, price):
+    got = guard.permitted_notional('TSLA', 'buy', 0.0, price, EQUITY, 2_000.0)
+    assert got == 0.0
+    assert math.isnan(got) is False
+
+
+def test_non_finite_price_refuses_on_a_reduce(guard):
+    held_qty = 10_000.0 / PRICE
+    got = guard.permitted_notional('TSLA', 'sell', held_qty, float('nan'), EQUITY, 10_000.0)
+    assert got == 0.0
+    assert math.isnan(got) is False
+
+
+def test_nan_price_does_not_reopen_pyramiding_at_the_cap(guard):
+    """The exact reported regression: a position already at the per-symbol
+    cap must not bypass the guard just because price arrives as NaN."""
+    at_cap_qty = 5_000.0 / PRICE
+    got = guard.permitted_notional('TSLA', 'buy', at_cap_qty, float('nan'), EQUITY, 2_000.0)
+    assert got == 0.0
+    assert math.isnan(got) is False
+
+
+@pytest.mark.parametrize('existing_qty', [float('nan'), float('inf'), float('-inf')])
+def test_non_finite_existing_qty_refuses_on_an_add(guard, existing_qty):
+    got = guard.permitted_notional('TSLA', 'buy', existing_qty, PRICE, EQUITY, 2_000.0)
+    assert got == 0.0
+    assert math.isnan(got) is False
+
+
+def test_non_finite_existing_qty_refuses_on_a_reduce(guard):
+    got = guard.permitted_notional('TSLA', 'sell', float('nan'), PRICE, EQUITY, 10_000.0)
+    assert got == 0.0
+    assert math.isnan(got) is False
+
+
+def test_nan_existing_qty_does_not_bypass_the_cap(guard):
+    got = guard.permitted_notional('TSLA', 'buy', float('nan'), PRICE, EQUITY, 2_000.0)
+    assert got == 0.0
+    assert math.isnan(got) is False
+
+
+# --------------------------------- exits must survive unusable equity too
+
+@pytest.mark.parametrize('equity', [float('nan'), None])
+def test_reduce_is_still_allowed_when_equity_is_unusable(guard, equity):
+    """A broker glitch returning no/garbage equity must never trap the agent
+    in a position it is trying to close -- only ADDs require usable equity."""
+    held_qty = 10_000.0 / PRICE
+    got = guard.permitted_notional('TSLA', 'sell', held_qty, PRICE, equity, 10_000.0)
+    assert got == pytest.approx(10_000.0)
+    assert math.isnan(got) is False
+
+
+@pytest.mark.parametrize('equity', [float('nan'), None])
+def test_crossing_reduce_close_portion_still_allowed_when_equity_is_unusable(guard, equity):
+    """The closing portion of a crossing order is an absolute invariant even
+    when equity can't be used to size the new-side excess."""
+    held_qty = 2_000.0 / PRICE
+    got = guard.permitted_notional('TSLA', 'sell', held_qty, PRICE, equity, 9_000.0)
+    assert got == pytest.approx(2_000.0)
+    assert math.isnan(got) is False

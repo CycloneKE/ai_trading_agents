@@ -54,6 +54,23 @@ CREATE TABLE IF NOT EXISTS forced_exits (
 """
 
 
+def _finite(value: Any, default: Optional[float] = None) -> Optional[float]:
+    """Coerce to a finite float, or None if that is impossible.
+
+    Returns `default` for None/empty input so callers can distinguish "not
+    supplied" (fine, use a default) from "supplied but garbage" (refuse).
+    NaN and +/-Infinity are garbage: they silently pass every subsequent
+    comparison rather than failing loudly.
+    """
+    if value is None or value == '':
+        return default
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
+
+
 def _is_reduce(side: str, existing_qty: float) -> bool:
     """True when the order shrinks the absolute size of the open position."""
     if not existing_qty:
@@ -102,11 +119,33 @@ class ExposureGuard:
         `existing_qty` is signed: positive long, negative short.
         """
         side = (side or '').lower()
-        existing_qty = float(existing_qty or 0.0)
 
-        if not target_value or target_value <= 0:
+        # Reject non-finite inputs at the boundary, once, before any branch
+        # can use them. Every comparison against NaN is False, so a NaN that
+        # gets past here silently defeats EVERY guard below: `nan <= 0` is
+        # False so a NaN target passes the sanity check, and `headroom < min`
+        # is False so the at-the-cap refusal never fires — reopening the
+        # exact pyramiding bug this module exists to prevent, via nothing
+        # worse than one bad vendor tick.
+        #
+        # price/existing_qty/target_value are refused unconditionally: they
+        # make the arithmetic itself meaningless, so there is no safe answer
+        # for an add OR an exit. `equity` is deliberately NOT checked here —
+        # it is only needed to size an add, and blocking an exit because the
+        # broker returned a bad equity would trap the agent in a position it
+        # is trying to close. `_cap` handles that case.
+        existing_qty = _finite(existing_qty, default=0.0)
+        price = _finite(price)
+        target_value = _finite(target_value)
+        if existing_qty is None or price is None or target_value is None:
+            logger.warning(
+                f"Exposure gate: refusing {side} {symbol} — non-finite input "
+                f"(qty={existing_qty!r} price={price!r} target={target_value!r})")
             return 0.0
-        if not price or price <= 0:
+
+        if target_value <= 0:
+            return 0.0
+        if price <= 0:
             return 0.0
 
         held_notional = abs(existing_qty) * price
