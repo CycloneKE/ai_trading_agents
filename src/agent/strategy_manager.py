@@ -15,6 +15,7 @@ import threading
 
 from src.utils.paths import DATA_DIR
 from src.utils.timeutil import utc_now
+from src.agent.regime import RANGING, TRENDING, UNDEFINED, classify, conviction
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,12 @@ class StrategyManager:
         self.config = config
         self.strategies = {}
         self.strategy_weights = {}
+        # Price buffer for regime classification. Kept here rather than read
+        # out of a strategy's internals so the manager does not depend on any
+        # particular strategy's private state.
+        self._regime_history: Dict[str, List[float]] = {}
+        self._regime_state: Dict[str, str] = {}
+        self._regime_history_max = 500
         self.ensemble_method = config.get('ensemble_method', 'weighted_average')
         self.performance_window = config.get('performance_window', 30)  # Days
         self.rebalance_frequency = config.get('rebalance_frequency', 7)  # Days
@@ -184,7 +191,18 @@ class StrategyManager:
                     'position_size': 0.0,
                     'timestamp': utc_now().isoformat()
                 }
-            
+
+            try:
+                symbol_key = data.get('symbol', 'UNKNOWN')
+                price = data.get('price') or data.get('close')
+                if price:
+                    buf = self._regime_history.setdefault(symbol_key, [])
+                    buf.append(float(price))
+                    if len(buf) > self._regime_history_max:
+                        del buf[:-self._regime_history_max]
+            except Exception as e:
+                logger.warning(f"Could not update regime price history: {e}")
+
             strategy_signals = self.collect_strategy_signals(data)
 
             # Combine signals using ensemble method
@@ -223,6 +241,14 @@ class StrategyManager:
                     logger.warning(f"Warm-start failed for {name}/{symbol}: {e}")
         if seeded:
             logger.info(f"Warm-started {seeded} strategy/symbol history buffers")
+
+        # Seed the regime buffer too, or the router reports 'undefined' for
+        # `window` live cycles after every restart.
+        for sym, bars in (bars_by_symbol or {}).items():
+            closes = [float(b) for b in bars if b]
+            if closes:
+                self._regime_history[sym] = closes[-self._regime_history_max:]
+
         return seeded
 
     def update_performance_from_attribution(self, attribution: Dict[str, Dict[str, Any]]):
@@ -315,6 +341,8 @@ class StrategyManager:
                 return self._performance_weighted_ensemble(strategy_signals, symbol)
             elif self.ensemble_method == 'adaptive_confidence':
                 return self._adaptive_confidence_ensemble(strategy_signals, symbol, data)
+            elif self.ensemble_method == 'regime_routed':
+                return self._regime_routed_ensemble(strategy_signals, symbol, data)
             else:
                 logger.warning(f"Unknown ensemble method: {self.ensemble_method}")
                 return self._weighted_average_ensemble(strategy_signals, symbol)
@@ -569,6 +597,66 @@ class StrategyManager:
             'timestamp': utc_now().isoformat()
         }
     
+    def _regime_routed_ensemble(self, strategy_signals: Dict[str, Dict[str, Any]],
+                                symbol: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Route to exactly ONE strategy based on the current regime.
+
+        Nothing is averaged, so nothing cancels. Momentum and mean-reversion
+        measure the same thing with opposite sign — blending them produced a
+        hold on 62.7% of bars and pinned confidence at ~0.5, which capped
+        every position at ~2.6% no matter how strong the signal.
+        """
+        closes = self._regime_history.get(symbol, [])
+        previous = self._regime_state.get(symbol)
+        regime = classify(closes, previous, self.config)
+        self._regime_state[symbol] = regime
+
+        def held(reason: str) -> Dict[str, Any]:
+            return {
+                'symbol': symbol, 'action': 'hold', 'confidence': 0.0,
+                'position_size': 0.0, 'regime': regime, 'routed_strategy': None,
+                'skip_reason': reason, 'ensemble_method': 'regime_routed',
+                'timestamp': utc_now().isoformat(),
+            }
+
+        if regime == UNDEFINED:
+            return held('regime_undefined')
+
+        routed_name = 'momentum' if regime == TRENDING else 'mean_reversion'
+        routed = strategy_signals.get(routed_name)
+        if not routed:
+            logger.warning(f"regime_routed: no '{routed_name}' strategy for {symbol}")
+            return held('routed_strategy_missing')
+
+        action = str(routed.get('action', 'hold')).lower()
+        if action not in ('buy', 'sell'):
+            return held('routed_strategy_held')
+
+        # RSI confirms mean-reversion entries only. It holds 88.8% of bars, so
+        # as a voter it is inert; as a gate in the regime where it is
+        # meaningful it filters rather than dilutes.
+        if regime == RANGING:
+            rsi = strategy_signals.get('rsi_strategy') or {}
+            if str(rsi.get('action', 'hold')).lower() != action:
+                return held('rsi_disagreed')
+
+        factor = conviction(closes, regime, self.config)
+        confidence = max(0.0, min(1.0, float(routed.get('confidence', 0.0)) * factor))
+        position_size = max(0.0, min(1.0, float(routed.get('position_size', 0.0)) * factor))
+
+        return {
+            'symbol': symbol,
+            'action': action,
+            'confidence': confidence,
+            'position_size': position_size,
+            'regime': regime,
+            'routed_strategy': routed_name,
+            'regime_conviction': factor,
+            'strategy_signals': strategy_signals,
+            'ensemble_method': 'regime_routed',
+            'timestamp': utc_now().isoformat(),
+        }
+
     def update_strategies(self, data: Dict[str, Any], feedback: Optional[Dict[str, Any]] = None):
         """
         Update all strategies with new data and feedback.
