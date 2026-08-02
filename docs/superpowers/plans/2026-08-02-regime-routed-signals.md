@@ -20,6 +20,10 @@
 - Universe additions and removals **always** produce an operator escalation. Nothing auto-applies.
 - Acceptance gate (Task 6) — out-of-sample must show Sharpe > 0.5, |SPY correlation| < 0.3, max drawdown < 15%, > 100 trades, and better Sharpe than the current ensemble. If it misses, **stop and report**; do not proceed to live config changes.
 - Commit after every task.
+- `data/` is gitignored (`.gitignore:40`). Result artifacts that are
+  evidence (`data/regime_calibration.json`,
+  `data/strategy_backtest_results.json`) must be added with `git add -f`.
+  Do not un-ignore `data/` — it holds databases and logs.
 
 ## File Structure
 
@@ -997,7 +1001,10 @@ Expected: `ok`
 - [ ] **Step 5: Commit**
 
 ```bash
-git add scripts/calibrate_regime.py config/config.json data/regime_calibration.json
+# data/ is gitignored (.gitignore:40) so the results file needs -f.
+# These two JSONs are evidence, not scratch — they must be versioned.
+git add scripts/calibrate_regime.py config/config.json
+git add -f data/regime_calibration.json
 git commit -m "feat(regime): calibrate thresholds on the in-sample half"
 ```
 
@@ -1121,7 +1128,9 @@ Expected: the gate block, then `VERDICT: PASS` or `VERDICT: FAIL`.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add scripts/run_strategy_backtest.py config/config.json data/strategy_backtest_results.json
+# data/ is gitignored (.gitignore:40); -f is deliberate for the results file.
+git add scripts/run_strategy_backtest.py config/config.json
+git add -f data/strategy_backtest_results.json
 git commit -m "test(regime): out-of-sample A/B against the acceptance gate"
 ```
 
