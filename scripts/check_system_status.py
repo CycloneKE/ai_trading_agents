@@ -85,7 +85,7 @@ def main():
     
     if resources.get('critical', False):
         print("[CRITICAL] System resources critically high!")
-        print("[TIP] Run: python emergency_fix.py")
+        print("[TIP] Check logs/trading_agent.log and config/config.json")
     
     # Overall status
     print()
@@ -93,7 +93,7 @@ def main():
         print("[OK] System is healthy and running")
     elif not api_ok:
         print("[FAIL] System not responding - check if it's running")
-        print("[TIP] Run: python quick_start_system.py")
+        print("[TIP] Run: python main.py --config config/config.json")
     else:
         print("[WARN] System has issues - run diagnostics")
         print("[TIP] Run: python enhanced_error_handler.py")

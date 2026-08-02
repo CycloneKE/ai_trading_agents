@@ -171,7 +171,7 @@ def main():
     print("-" * 30)
     
     if issues['config']:
-        print("1. Run: python quick_production_fixes.py")
+        print("1. Review the failures above and fix them at the source")
     
     if issues['environment']:
         print("2. Copy .env.template to .env and add API keys")
