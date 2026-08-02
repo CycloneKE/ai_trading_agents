@@ -95,3 +95,28 @@ def test_conviction_stays_within_bounds():
 
 def test_defaults_apply_when_config_omits_the_regime_section():
     assert classify(STRAIGHT_UP, None, {}) == TRENDING
+
+
+def test_efficiency_ratio_negative_window_returns_zero():
+    assert efficiency_ratio(STRAIGHT_UP, -5) == 0.0
+
+
+def test_efficiency_ratio_zero_window_returns_zero():
+    assert efficiency_ratio(STRAIGHT_UP, 0) == 0.0
+
+
+def test_classify_negative_window_is_undefined_not_misclassified():
+    """A misconfigured negative window must never silently misclassify.
+
+    Regression for the bug where `closes[-(window + 1):]` with a negative
+    window sliced from the wrong end and produced a bogus but plausible
+    'ranging' verdict instead of surfacing the bad config as UNDEFINED.
+    """
+    cfg = {'regime': {'window': -5, 'trend_threshold': 0.35, 'range_threshold': 0.20}}
+    assert classify(STRAIGHT_UP, None, cfg) == UNDEFINED
+    assert classify(ZIGZAG, None, cfg) == UNDEFINED
+
+
+def test_classify_zero_window_is_undefined():
+    cfg = {'regime': {'window': 0, 'trend_threshold': 0.35, 'range_threshold': 0.20}}
+    assert classify(STRAIGHT_UP, None, cfg) == UNDEFINED

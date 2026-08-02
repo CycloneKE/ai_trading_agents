@@ -14,7 +14,7 @@ Chosen over ADX or the Hurst exponent because it needs no library, has one
 parameter, and measures the routing criterion directly rather than by proxy.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 TRENDING = 'trending'
 RANGING = 'ranging'
@@ -36,19 +36,31 @@ def _cfg(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _segment_and_path(closes: Optional[List[float]], window: int) -> Tuple[List[float], float]:
+    """The trailing `window`-bar segment and the total distance walked in it.
+
+    Single source of truth for "what counts as a usable window" (non-empty
+    history, positive window, enough bars) and "what counts as flat" (zero
+    path). Returns `([], 0.0)` whenever the window can't be evaluated —
+    never raises, because this runs inside the per-bar signal path.
+    """
+    if not closes or window < 1 or len(closes) < window + 1:
+        return [], 0.0
+    segment = closes[-(window + 1):]
+    path = sum(abs(segment[i] - segment[i - 1]) for i in range(1, len(segment)))
+    return segment, path
+
+
 def efficiency_ratio(closes: List[float], window: int) -> float:
     """Net move over `window` bars divided by the total path walked.
 
     Returns 0.0 for insufficient history or a flat series — never raises,
     because this runs inside the per-bar signal path.
     """
-    if not closes or window < 1 or len(closes) < window + 1:
+    segment, path = _segment_and_path(closes, window)
+    if not segment or path <= 0:
         return 0.0
-    segment = closes[-(window + 1):]
     net = abs(segment[-1] - segment[0])
-    path = sum(abs(segment[i] - segment[i - 1]) for i in range(1, len(segment)))
-    if path <= 0:
-        return 0.0
     return min(1.0, net / path)
 
 
@@ -62,12 +74,9 @@ def classify(closes: List[float], previous: Optional[str],
     """
     c = _cfg(cfg)
     window = c['window']
-    if len(closes or []) < window + 1:
-        return UNDEFINED
-    segment = closes[-(window + 1):]
-    path = sum(abs(segment[i] - segment[i - 1]) for i in range(1, len(segment)))
-    if path <= 0:
-        return UNDEFINED          # flat series has no character to trade
+    segment, path = _segment_and_path(closes, window)
+    if not segment or path <= 0:
+        return UNDEFINED          # bad window, insufficient history, or flat series
     er = efficiency_ratio(closes, window)
     if er >= c['trend']:
         return TRENDING
