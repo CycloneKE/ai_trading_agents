@@ -1392,27 +1392,37 @@ class TradingAgent:
                         # order to the headroom left on the position actually
                         # held, and refuses entries in a symbol the risk layer
                         # just force-closed. Exits are never blocked.
-                        existing_qty = 0.0
+                        # ONE position lookup feeds both caps. If it fails we
+                        # skip the symbol rather than defaulting to flat: both
+                        # caps size off what we already hold, so pretending we
+                        # hold nothing during a broker outage re-opens the very
+                        # pyramiding this gate exists to stop. Same precedent as
+                        # the no_account_info skip above — never size off a
+                        # default. A partial sum is refused for the same reason:
+                        # it is a number that looks authoritative and isn't.
                         try:
+                            positions = list(broker.get_positions() or [])
                             existing_qty = next(
-                                (p.quantity for p in (broker.get_positions() or [])
+                                (float(p.quantity) for p in positions
                                  if p.symbol == symbol), 0.0)
+                            # Signed net across the whole book, so the gate can
+                            # bound the directional bet, not just per-symbol size.
+                            net_notional = 0.0
+                            for p in positions:
+                                px = getattr(p, 'current_price', None)
+                                # `or price` would treat a genuine 0.0 as missing.
+                                px = price if px is None else float(px)
+                                net_notional += float(p.quantity) * px
                         except Exception as e:
-                            logger.debug(f"Position lookup failed for {symbol}: {e}")
+                            logger.warning(
+                                f"Position lookup failed for {symbol}; skipping "
+                                f"rather than sizing off an assumed-flat book: {e}")
+                            _note(symbol, 'no_positions')
+                            continue
 
                         if not getattr(self, 'exposure_guard', None):
                             from src.agent.exposure import ExposureGuard
                             self.exposure_guard = ExposureGuard(self.config)
-
-                        # Signed net across the whole book, so the gate can
-                        # bound the directional bet, not just per-symbol size.
-                        net_notional = 0.0
-                        try:
-                            for p in (broker.get_positions() or []):
-                                px = getattr(p, 'current_price', None) or price
-                                net_notional += float(p.quantity) * float(px)
-                        except Exception as e:
-                            logger.debug(f"Net exposure lookup failed: {e}")
 
                         permitted = self.exposure_guard.permitted_notional(
                             symbol, action, existing_qty, price,

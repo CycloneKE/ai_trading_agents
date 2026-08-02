@@ -232,3 +232,111 @@ def test_net_exposure_reflects_existing_positions(rig):
     agent.exposure_guard.permitted_notional = spy
     run_cycles(agent, buy_signal(), 1)
     assert seen['net'] == pytest.approx(31_000.0)
+
+
+# ---------------------------------------------------------------------------
+# Broker-failure and mixed-book behaviour
+#
+# Both caps size off what we already hold. Defaulting to "flat" when the
+# position lookup fails re-opens the pyramiding this gate exists to stop —
+# precisely when broker state is least trustworthy.
+# ---------------------------------------------------------------------------
+
+class MixedBookBroker(FakeBroker):
+    """A book with a long and a short, so the signed sum can be checked."""
+
+    def get_positions(self):
+        return [
+            Position(symbol='TSLA', quantity=100.0, avg_entry_price=PRICE,
+                     current_price=PRICE, market_value=100.0 * PRICE,
+                     unrealized_pl=0.0, unrealized_pl_percent=0.0,
+                     cost_basis=100.0 * PRICE, broker_name='fake'),
+            Position(symbol='XLF', quantity=-50.0, avg_entry_price=200.0,
+                     current_price=200.0, market_value=-50.0 * 200.0,
+                     unrealized_pl=0.0, unrealized_pl_percent=0.0,
+                     cost_basis=50.0 * 200.0, broker_name='fake'),
+        ]
+
+
+def test_net_exposure_is_signed_and_summed_across_the_whole_book():
+    """Long 100 TSLA @310 = +31,000; short 50 XLF @200 = -10,000; net 21,000.
+    A sign error here makes the cap fire backwards — blocking exactly the
+    trades that reduce directional risk."""
+    broker = MixedBookBroker()
+    agent, jpath, epath = make_agent(broker)
+    try:
+        seen = {}
+        real = agent.exposure_guard.permitted_notional
+        agent.exposure_guard.permitted_notional = (
+            lambda *a, **k: seen.update(net=k.get('net_notional')) or real(*a, **k))
+        run_cycles(agent, buy_signal(), 1)
+        assert seen['net'] == pytest.approx(21_000.0)
+    finally:
+        agent.order_journal.close()
+        agent.exposure_guard.close()
+        os.unlink(jpath)
+        os.unlink(epath)
+
+
+def test_a_failed_position_lookup_skips_rather_than_assuming_flat(rig):
+    """Defaulting to flat would let a full 5% add through while we are blind
+    to a position that may already be at the cap."""
+    agent, broker = rig
+
+    def boom():
+        raise RuntimeError('broker down')
+
+    broker.get_positions = boom
+    run_cycles(agent, buy_signal(), 3)
+    assert broker.placed == []
+    assert agent._cycle_decisions['TSLA']['skip_reason'] == 'no_positions'
+
+
+def test_one_symbols_lookup_failure_does_not_abort_the_whole_cycle(rig):
+    """_execute_trades wraps its body in a broad try/except, so an uncaught
+    exception here would silently drop every other symbol too."""
+    agent, broker = rig
+    calls = {'n': 0}
+
+    def flaky():
+        calls['n'] += 1
+        if calls['n'] == 1:
+            raise RuntimeError('transient')
+        return []
+
+    broker.get_positions = flaky
+    signals = {
+        'TSLA': {'action': 'buy', 'confidence': 0.8, 'position_size': 0.02,
+                 'price': PRICE, 'strategy': 'ensemble'},
+        'MSFT': {'action': 'buy', 'confidence': 0.8, 'position_size': 0.02,
+                 'price': PRICE, 'strategy': 'ensemble'},
+    }
+    run_cycles(agent, signals, 1)
+    # TSLA's lookup blew up; MSFT must still have traded.
+    assert [o.symbol for o in broker.placed] == ['MSFT']
+
+
+def test_a_zero_current_price_is_not_treated_as_missing():
+    """`getattr(p, 'current_price', None) or price` silently substitutes the
+    wrong symbol's price for a genuine 0.0."""
+    class ZeroPriceBroker(FakeBroker):
+        def get_positions(self):
+            return [Position(symbol='XLF', quantity=10.0, avg_entry_price=1.0,
+                             current_price=0.0, market_value=0.0,
+                             unrealized_pl=0.0, unrealized_pl_percent=0.0,
+                             cost_basis=10.0, broker_name='fake')]
+
+    broker = ZeroPriceBroker()
+    agent, jpath, epath = make_agent(broker)
+    try:
+        seen = {}
+        real = agent.exposure_guard.permitted_notional
+        agent.exposure_guard.permitted_notional = (
+            lambda *a, **k: seen.update(net=k.get('net_notional')) or real(*a, **k))
+        run_cycles(agent, buy_signal(), 1)
+        assert seen['net'] == pytest.approx(0.0)
+    finally:
+        agent.order_journal.close()
+        agent.exposure_guard.close()
+        os.unlink(jpath)
+        os.unlink(epath)
