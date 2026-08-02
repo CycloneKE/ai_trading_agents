@@ -17,6 +17,7 @@ The gate must never block a REDUCING order: being unable to exit is worse
 than any concentration.
 """
 
+import math
 import os
 import tempfile
 
@@ -315,3 +316,73 @@ def test_net_cap_is_configurable():
 
 def test_net_cap_default_is_thirty_percent(guard):
     assert guard.max_net_exposure == pytest.approx(0.30)
+
+
+# ------------------------------------------------ crossing orders + net cap
+#
+# A reviewer found that permitted_notional's reduce branch returns before
+# _apply_net_cap is ever reached, so an order that crosses through flat can
+# blow the net-exposure cap wide open: book net -28,000 (cap 30,000), TSLA
+# long $2,000, sell $9,000 -> old code allowed 7,000 and left the book at
+# -35,000. The close must always pass in full; only the excess that opens a
+# new position on the other side is subject to the net cap.
+
+def test_crossing_order_is_trimmed_by_the_net_cap(guard):
+    """Book net -28,000 against a 30,000 cap leaves only 2,000 of net
+    headroom -- exactly the closing amount, so the new short is fully
+    blocked but the close still goes through."""
+    held_qty = 2_000.0 / PRICE
+    got = guard.permitted_notional('TSLA', 'sell', held_qty, PRICE, EQUITY, 9_000.0,
+                                   net_notional=-28_000.0)
+    assert got == pytest.approx(2_000.0)
+
+
+def test_crossing_order_always_closes_in_full_even_when_book_is_far_over_cap(guard):
+    """Book already net -100,000 against a 30,000 cap. The close must still
+    go through in full -- exits are an absolute invariant -- even though the
+    net cap forbids opening any new short at all."""
+    held_qty = 2_000.0 / PRICE
+    got = guard.permitted_notional('TSLA', 'sell', held_qty, PRICE, EQUITY, 9_000.0,
+                                   net_notional=-100_000.0)
+    assert got == pytest.approx(2_000.0)
+
+
+def test_crossing_order_excess_is_trimmed_to_available_net_headroom(guard):
+    """Book net -26,000 against a 30,000 cap leaves 4,000 of total net
+    headroom: the 2,000 close plus only 2,000 of the 5,000 per-symbol-capped
+    short, not the full excess."""
+    held_qty = 2_000.0 / PRICE
+    got = guard.permitted_notional('TSLA', 'sell', held_qty, PRICE, EQUITY, 9_000.0,
+                                   net_notional=-26_000.0)
+    assert got == pytest.approx(4_000.0)
+
+
+def test_crossing_order_with_ample_net_headroom_is_unaffected(guard):
+    held_qty = 2_000.0 / PRICE
+    got = guard.permitted_notional('TSLA', 'sell', held_qty, PRICE, EQUITY, 9_000.0,
+                                   net_notional=0.0)
+    assert got == pytest.approx(7_000.0)
+
+
+# --------------------------------------------------------------- NaN inputs
+
+def test_nan_equity_refuses_rather_than_returning_nan(guard):
+    got = guard.permitted_notional('TSLA', 'buy', 0.0, PRICE, float('nan'), 2_000.0)
+    assert got == 0.0
+
+
+def test_nan_net_notional_refuses_rather_than_returning_nan(guard):
+    got = guard.permitted_notional('TSLA', 'buy', 0.0, PRICE, EQUITY, 2_000.0,
+                                   net_notional=float('nan'))
+    assert got == 0.0
+    assert not math.isnan(got)
+
+
+def test_nan_net_notional_still_allows_the_close_of_a_crossing_order(guard):
+    """A garbage net_notional must never block an exit -- only the add-side
+    excess is at risk."""
+    held_qty = 2_000.0 / PRICE
+    got = guard.permitted_notional('TSLA', 'sell', held_qty, PRICE, EQUITY, 9_000.0,
+                                   net_notional=float('nan'))
+    assert got == pytest.approx(2_000.0)
+    assert not math.isnan(got)

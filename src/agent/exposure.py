@@ -26,6 +26,7 @@ agent restarts often enough that in-memory state would not survive.
 """
 
 import logging
+import math
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -116,12 +117,20 @@ class ExposureGuard:
         if _is_reduce(side, existing_qty):
             if target_value <= held_notional:
                 return float(target_value)
-            # Crosses through flat: close the existing side in full, then
-            # treat the remainder as a fresh position on the opposite side.
+            # Crosses through flat: the held_notional portion closes the
+            # existing side and always passes -- that is an absolute
+            # invariant. The remainder opens a fresh position on the
+            # opposite side, which is an ADD and so is subject to both the
+            # per-symbol cap and the net-exposure cap, but is never trimmed
+            # back below held_notional.
             cap = self._cap(equity)
             if cap is None:
-                return float(held_notional)
-            return float(held_notional + min(target_value - held_notional, cap))
+                allowed = float(held_notional)
+            else:
+                allowed = held_notional + min(target_value - held_notional, cap)
+            allowed = self._apply_net_cap(symbol, side, allowed, equity,
+                                          net_notional, floor=held_notional)
+            return float(allowed)
 
         # From here on the order ADDS exposure.
         cap = self._cap(equity)
@@ -154,22 +163,36 @@ class ExposureGuard:
 
     def _cap(self, equity: Optional[float]) -> Optional[float]:
         """Per-symbol notional ceiling, or None when equity is unusable."""
-        if not equity or equity <= 0:
+        if equity is None:
             return None
-        return float(equity) * self.max_position_pct
+        equity = float(equity)
+        if not math.isfinite(equity) or equity <= 0:
+            return None
+        return equity * self.max_position_pct
 
     def _apply_net_cap(self, symbol: str, side: str, allowed: float,
                        equity: Optional[float],
-                       net_notional: Optional[float]) -> float:
+                       net_notional: Optional[float],
+                       floor: float = 0.0) -> float:
         """Trim an ADD so the book's net directional exposure stays bounded.
 
         `net_notional` is signed: long positive, short negative. Passing None
         skips the check entirely, so existing six-argument callers are
         unaffected. An order that moves the book toward neutral always
         passes — capping a de-risking trade would be perverse.
+
+        `floor` is the portion of `allowed` that closes an existing position
+        (0.0 for a pure add, `held_notional` for an order that crosses
+        through flat). That portion is never trimmed away — exits are an
+        absolute invariant regardless of net exposure or garbage inputs.
         """
-        if net_notional is None or allowed <= 0:
+        if net_notional is None or allowed <= floor:
             return allowed
+        if not math.isfinite(net_notional):
+            logger.warning(
+                f"Exposure gate: refusing {side} {symbol} add — "
+                f"non-finite net_notional {net_notional!r}")
+            return floor
         cap = self._cap_net(equity)
         if cap is None:
             return allowed
@@ -179,22 +202,28 @@ class ExposureGuard:
         if abs(prospective) <= abs(net_notional) or abs(prospective) <= cap:
             return allowed
 
-        # Trim to whatever keeps |net| exactly at the cap.
+        # Trim to whatever keeps |net| exactly at the cap, but never below
+        # the closing portion of a crossing order.
         headroom = cap - abs(net_notional)
-        if headroom < self.min_notional:
+        trimmed = max(headroom, floor)
+        if floor <= 0.0 and trimmed < self.min_notional:
             logger.warning(
                 f"Exposure gate: refusing {side} {symbol} — net exposure "
                 f"${abs(net_notional):,.0f} against a ${cap:,.0f} cap")
             return 0.0
-        logger.info(
-            f"Exposure gate: trimming {side} {symbol} to ${headroom:,.0f} "
-            f"on net-exposure cap")
-        return headroom
+        if trimmed != allowed:
+            logger.info(
+                f"Exposure gate: trimming {side} {symbol} to ${trimmed:,.0f} "
+                f"on net-exposure cap")
+        return trimmed
 
     def _cap_net(self, equity: Optional[float]) -> Optional[float]:
-        if not equity or equity <= 0:
+        if equity is None:
             return None
-        return float(equity) * self.max_net_exposure
+        equity = float(equity)
+        if not math.isfinite(equity) or equity <= 0:
+            return None
+        return equity * self.max_net_exposure
 
     # ------------------------------------------------------------------
     # Post-exit cooldown
