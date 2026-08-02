@@ -29,6 +29,7 @@ const AgentFocus = ({ onDrill }) => {
   }, []);
 
   if (!focus) return null;
+  const cooldowns = focus.cooldowns?.active ?? [];
   const row = { display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: `1px solid ${theme.colors.border}`, fontSize: '13px', cursor: 'pointer' };
   const empty = (msg) => <div style={{ color: theme.colors.textMuted, fontSize: '12px' }}>{msg}</div>;
 
@@ -68,6 +69,20 @@ const AgentFocus = ({ onDrill }) => {
             <div key={`${t.symbol}-${t.ts}`} style={row} onClick={() => onDrill(t.symbol)}>
               <span style={{ fontWeight: 700 }}>{t.symbol}</span>
               <span style={{ fontSize: '11px' }}>{t.action} @ {t.price}</span>
+            </div>
+          ))}
+        </Lane>
+        {/* A cooled-down symbol places no orders, so without its own lane it
+            looks identical to one with no signal. Show the block explicitly. */}
+        <Lane title={`COOLING DOWN (${cooldowns.length})`} color={theme.colors.danger}>
+          {cooldowns.length === 0 && empty('No symbols blocked')}
+          {cooldowns.slice(0, 8).map(c => (
+            <div key={c.symbol} style={row} onClick={() => onDrill(c.symbol)}>
+              <span style={{ fontWeight: 700 }}>{c.symbol}</span>
+              <span style={{ color: theme.colors.danger, fontSize: '11px' }}
+                    title={`Blocked from re-entry after ${c.reason}`}>
+                {c.reason?.replace(/_/g, ' ')} · {c.remaining_label}
+              </span>
             </div>
           ))}
         </Lane>

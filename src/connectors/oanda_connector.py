@@ -6,6 +6,7 @@ import time
 from typing import Dict, Any, List
 from datetime import datetime
 from base_connector import BaseConnector
+from src.utils.timeutil import utc_now
 
 class OandaConnector(BaseConnector):
     # Circuit breaker state
@@ -62,7 +63,7 @@ class OandaConnector(BaseConnector):
     def get_real_time_data(self, symbols: List[str]) -> Dict[str, Any]:
         if self._check_circuit_breaker():
             # Fallback: return mock data
-            return {symbol: {'bid': 0, 'ask': 0, 'timestamp': datetime.utcnow().isoformat(), 'source': 'mock'} for symbol in symbols}
+            return {symbol: {'bid': 0, 'ask': 0, 'timestamp': utc_now().isoformat(), 'source': 'mock'} for symbol in symbols}
         headers = {"Authorization": f"Bearer {self.api_key}"}
         data = {}
         for symbol in symbols:
@@ -84,7 +85,7 @@ class OandaConnector(BaseConnector):
                 self._failure_count = 0
                 data[symbol] = result
             else:
-                data[symbol] = {'bid': 0, 'ask': 0, 'timestamp': datetime.utcnow().isoformat(), 'source': 'mock'}
+                data[symbol] = {'bid': 0, 'ask': 0, 'timestamp': utc_now().isoformat(), 'source': 'mock'}
         return data
 
     def get_historical_data(self, symbol: str, start_date: str, end_date: str, interval: str = '1d') -> Dict[str, Any]:

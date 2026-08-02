@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.utils.paths import DATA_DIR
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ class NseOrderQueue:
                 "INSERT INTO nse_order_tickets (created_at, symbol, side, quantity,"
                 " suggested_limit_price, rationale, ensemble_confidence, llm_reasoning,"
                 " status, book) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
-                (datetime.utcnow().isoformat(), symbol, side, int(quantity),
+                (utc_now().isoformat(), symbol, side, int(quantity),
                  suggested_limit_price, rationale, ensemble_confidence, llm_reasoning, book))
             self._conn.commit()
             return cur.lastrowid
@@ -147,7 +148,7 @@ class NseOrderQueue:
                 "UPDATE nse_order_tickets SET status = 'filled', fill_price = ?,"
                 " fill_quantity = ?, fill_at = ?, resolved_by = ?, operator_notes = ?"
                 " WHERE id = ?",
-                (float(fill_price), int(fill_quantity), datetime.utcnow().isoformat(),
+                (float(fill_price), int(fill_quantity), utc_now().isoformat(),
                  resolved_by, notes, ticket_id))
             self._conn.commit()
             filled = self._get(ticket_id)
@@ -192,7 +193,7 @@ class NseOrderQueue:
         deduped by the sleeve manager itself (create_ticket dedupes on
         symbol+side+book) and the operator can always cancel one manually if
         it's genuinely gone stale, so excluding them here is safe."""
-        cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat()
+        cutoff = (utc_now() - timedelta(hours=max_age_hours)).isoformat()
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE nse_order_tickets SET status = 'expired'"

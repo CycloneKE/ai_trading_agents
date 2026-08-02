@@ -114,7 +114,10 @@
     "max_position_size": 0.05,
     "max_drawdown": 0.10,
     "stop_loss_pct": 0.05,
-    "trailing_stop_pct": 0.03
+    "trailing_stop_pct": 0.03,
+    "_comment_max_position_size": "Enforced against the AGGREGATE position, not per order. Repeated signals on one symbol now stop at this cap instead of pyramiding.",
+    "_comment_reentry_cooldown_seconds": "After a stop-loss/trailing-stop/kill-switch close, entries in that symbol are refused for this long. Exits are never blocked. 0 disables.",
+    "reentry_cooldown_seconds": 900
   },
   "brokers": {
     "paper_broker": {

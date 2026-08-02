@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 
 from src.utils.paths import DATA_DIR
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,7 @@ class AuditJournal:
         Returns:
             Row ID of the written audit record
         """
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = utc_now().isoformat()
         payload_str = json.dumps(payload, sort_keys=True)
         result_str = json.dumps(result or {}, sort_keys=True)
         

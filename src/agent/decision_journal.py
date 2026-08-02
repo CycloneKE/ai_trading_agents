@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from src.utils.paths import DATA_DIR
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +104,7 @@ class DecisionJournal:
                 " llm_verdict_json, price, target_value, client_order_id)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    datetime.utcnow().isoformat(), cycle, symbol,
+                    utc_now().isoformat(), cycle, symbol,
                     decision.get('action'),
                     1 if decision.get('executed') else 0,
                     decision.get('skip_reason'),

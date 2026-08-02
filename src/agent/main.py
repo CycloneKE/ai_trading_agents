@@ -59,6 +59,7 @@ except ImportError as e:
     logger.warning(f"Portfolio optimization modules disabled due to import error: {e}")
     PortfolioOptimizer = None
 from src.agent.event_risk_manager import EventRiskManager
+from src.utils.timeutil import utc_now
 try:
     from src.agent.nlp_manager import NLPManager
 except ImportError as e:
@@ -97,6 +98,15 @@ class TradingAgent:
     def __init__(self, config_path: str):
         self.config_path = config_path
         self.config = load_config(self.config_path)
+        # Replay parameter changes the self-assessment loop auto-applied on a
+        # previous run. Applied before validation so a persisted value still
+        # has to satisfy every config rule; a missing or corrupt overlay is a
+        # no-op rather than a startup failure.
+        try:
+            from src.agent.self_assessment import apply_overlay
+            apply_overlay(self.config)
+        except Exception as e:
+            logger.error(f"Could not replay config overlay: {e}")
         # Validate configuration before proceeding
         config_errors = validate_config(self.config)
         if config_errors:
@@ -253,10 +263,14 @@ class TradingAgent:
                 self.components['dividend_ledger'],
                 self.components['llm_orchestrator'],
             )
+            # strategy_manager is passed so auto-applied weight changes reach
+            # the live component, not just the config dict — without it the
+            # daily self-improvement cycle has no effect on trading.
             self.components['self_assessment'] = SelfAssessmentEngine(
                 self.components['llm_orchestrator'],
                 em,
-                self.config
+                self.config,
+                strategy_manager=self.components.get('strategy_manager'),
             )
             
             # Swarm Infrastructure & Specialist Components
@@ -1370,6 +1384,34 @@ class TradingAgent:
                             _note(symbol, 'no_price')
                             continue
 
+                        # Aggregate exposure gate. max_position_size used to be
+                        # applied to each ORDER in isolation, which is a
+                        # per-ticket limit, not a position limit: the same
+                        # repeating signal pyramided TSLA to ~29% of equity
+                        # against a 5% cap on 2026-07-24. The gate clamps the
+                        # order to the headroom left on the position actually
+                        # held, and refuses entries in a symbol the risk layer
+                        # just force-closed. Exits are never blocked.
+                        existing_qty = 0.0
+                        try:
+                            existing_qty = next(
+                                (p.quantity for p in (broker.get_positions() or [])
+                                 if p.symbol == symbol), 0.0)
+                        except Exception as e:
+                            logger.debug(f"Position lookup failed for {symbol}: {e}")
+
+                        if not getattr(self, 'exposure_guard', None):
+                            from src.agent.exposure import ExposureGuard
+                            self.exposure_guard = ExposureGuard(self.config)
+
+                        permitted = self.exposure_guard.permitted_notional(
+                            symbol, action, existing_qty, price,
+                            portfolio_value, target_pos_value)
+                        if permitted <= 0:
+                            _note(symbol, 'exposure_cap')
+                            continue
+                        target_pos_value = permitted
+
                         _note(symbol, target=target_pos_value)
 
                         if self.trading_halted:
@@ -1416,14 +1458,9 @@ class TradingAgent:
                         # going long or closing an existing long). A sell with
                         # no existing long to close is a short — force whole
                         # shares for it regardless of the fractional config.
-                        existing_qty = 0.0
-                        if action == 'sell':
-                            try:
-                                existing_qty = next(
-                                    (p.quantity for p in (broker.get_positions() or [])
-                                     if p.symbol == symbol), 0.0)
-                            except Exception as e:
-                                logger.debug(f"Position lookup failed for {symbol}: {e}")
+                        # existing_qty was already resolved by the exposure gate
+                        # above — re-fetching it here would double the broker
+                        # round-trips and could read a different position.
                         is_short = action == 'sell' and existing_qty <= 0
                         allow_fractional = sizing_cfg.get('allow_fractional', True) and not is_short
 
@@ -1565,20 +1602,14 @@ class TradingAgent:
                     price = p.current_price
                 if price:
                     limit = round(price * (0.995 if side == 'sell' else 1.005), 2)
-                    order = OrderRequest(symbol=p.symbol, quantity=abs(p.quantity),
-                                         side=side, order_type='limit',
-                                         time_in_force='day', limit_price=limit,
-                                         extended_hours=True, client_order_id=coid)
+                    resp = self._place_exit_order(
+                        broker, p.symbol, side, abs(p.quantity), coid, 'kill_switch',
+                        price=price, preferred_tif='day', order_type='limit',
+                        limit_price=limit, extended_hours=True)
                 else:
-                    order = OrderRequest(symbol=p.symbol, quantity=abs(p.quantity),
-                                         side=side, order_type='market',
-                                         time_in_force='gtc', client_order_id=coid)
-                resp = broker.place_order(order)
-                if self.order_journal:
-                    if resp:
-                        self.order_journal.mark_submitted(coid, resp.order_id, resp.status)
-                    else:
-                        self.order_journal.mark_failed(coid, 'flatten order got no response')
+                    resp = self._place_exit_order(
+                        broker, p.symbol, side, abs(p.quantity), coid, 'kill_switch',
+                        price=0.0, preferred_tif='gtc', order_type='market')
                 if resp:
                     result['close_orders'] += 1
                     logger.warning(f"Kill switch: closing {p.quantity} {p.symbol} ({coid})")
@@ -1615,7 +1646,7 @@ class TradingAgent:
                 return False
             if acct.day_trade_count < self.PDT_MAX_DAY_TRADES:
                 return False
-            today = datetime.utcnow().date().isoformat()
+            today = utc_now().date().isoformat()
             bought_today = any(
                 r['symbol'] == symbol and r['side'] == 'buy'
                 and r['status'] in ('submitted', 'filled')
@@ -1643,6 +1674,72 @@ class TradingAgent:
         except Exception as e:
             logger.warning(f"Open-order check failed for {symbol}: {e}")
         return False
+
+    def _place_exit_order(self, broker, symbol: str, side: str, quantity: float,
+                          coid: str, strategy: str, price: float = 0.0,
+                          preferred_tif: str = 'gtc',
+                          order_type: str = 'market',
+                          limit_price: Optional[float] = None,
+                          extended_hours: bool = False):
+        """Single exit path for stop-loss, trailing stop and kill switch.
+
+        Every risk-driven close goes through here so the broker's constraints
+        are applied in one place rather than re-derived per call site. On
+        2026-07-24 the stop-loss path hardcoded time_in_force='gtc' on a
+        fractional quantity and Alpaca rejected it seventeen times over 91
+        minutes while the position was 21% underwater; the entry path had
+        been doing it correctly the whole time.
+
+        On a successful submission the symbol enters the re-entry cooldown,
+        so the entry signal — which is still firing, that is why the position
+        existed — cannot immediately rebuy what was just liquidated.
+
+        Returns the broker's OrderResponse, or None if it never landed.
+        """
+        from src.connectors.base_broker import OrderRequest
+        from src.agent.position_sizing import time_in_force_for
+
+        quantity = abs(float(quantity))
+        order = OrderRequest(
+            symbol=symbol,
+            quantity=quantity,
+            side=side,
+            order_type=order_type,
+            time_in_force=time_in_force_for(quantity, preferred_tif),
+            limit_price=limit_price,
+            extended_hours=extended_hours,
+            client_order_id=coid,
+        )
+        result = broker.place_order(order)
+
+        if self.order_journal:
+            if result:
+                self.order_journal.mark_submitted(coid, result.order_id, result.status)
+            else:
+                self.order_journal.mark_failed(
+                    coid, 'place_order returned no response')
+
+        if not result:
+            logger.error(f"{strategy}: exit order for {symbol} did not reach the broker")
+            return None
+
+        logger.info(f"{strategy}: exit order placed for {symbol}: {result.order_id}")
+
+        # Only a close that actually landed starts the cooldown. Blocking
+        # re-entry after a *failed* exit would just mask an open loser.
+        try:
+            if not getattr(self, 'exposure_guard', None):
+                from src.agent.exposure import ExposureGuard
+                self.exposure_guard = ExposureGuard(self.config)
+            self.exposure_guard.record_forced_exit(symbol, strategy)
+        except Exception as e:
+            logger.error(f"Failed to record forced exit for {symbol}: {e}")
+
+        if self.monitoring_service:
+            self.monitoring_service.record_trade(
+                action=f'{strategy}_{side}', symbol=symbol,
+                strategy=strategy, quantity=quantity, price=price or 0)
+        return result
 
     def _enforce_stop_losses(self, stop_loss_pct: float, trailing_stop_pct: float):
         """
@@ -1698,73 +1795,38 @@ class TradingAgent:
                                 abs(position.quantity), 'market', strategy='stop_loss'):
                             logger.info(f"Stop-loss close already journaled ({coid}); skipping")
                             continue
-                        close_order = OrderRequest(
-                            symbol=position.symbol,
-                            quantity=abs(position.quantity),
-                            side=close_side,
-                            order_type='market',
-                            time_in_force='gtc',
-                            client_order_id=coid
-                        )
-                        result = primary_broker.place_order(close_order)
-                        if self.order_journal:
-                            if result:
-                                self.order_journal.mark_submitted(coid, result.order_id, result.status)
-                            else:
-                                self.order_journal.mark_failed(coid, 'place_order returned no response')
-                        if result:
-                            logger.info(f"Stop-loss order placed for {position.symbol}: {result.order_id}")
-                            if self.monitoring_service:
-                                self.monitoring_service.record_trade(
-                                    action='stop_loss_sell',
-                                    symbol=position.symbol,
-                                    strategy='stop_loss',
-                                    quantity=abs(position.quantity),
-                                    price=position.current_price or 0
-                                )
-                                
+                        self._place_exit_order(
+                            primary_broker, position.symbol, close_side,
+                            abs(position.quantity), coid, 'stop_loss',
+                            price=position.current_price or 0)
+
+
                     # Trailing Stop Loss using Risk Manager
                     if hasattr(self, 'risk_manager') and self.risk_manager:
                         trailing_stops = self.risk_manager.check_trailing_stops(trailing_stop_pct)
                         for ts in trailing_stops:
                             if ts['symbol'] == position.symbol:
-                                from src.connectors.base_broker import OrderRequest
                                 from src.agent.order_journal import make_client_order_id
-                                if self._has_open_close_order(primary_broker, position.symbol, 'sell'):
+                                # Closing a SHORT takes a buy. This used to be
+                                # hardcoded to 'sell', which would have doubled
+                                # a short instead of closing it.
+                                ts_side = 'sell' if position.quantity > 0 else 'buy'
+                                if self._has_open_close_order(primary_broker, position.symbol, ts_side):
                                     logger.info(f"Trailing-stop close already pending for {position.symbol}; skipping")
                                     continue
                                 coid = make_client_order_id('trailstop', position.symbol,
-                                                            'sell', int(time.time() // 300))
+                                                            ts_side, int(time.time() // 300))
                                 if self.order_journal and not self.order_journal.record_intent(
-                                        coid, position.symbol, 'sell',
+                                        coid, position.symbol, ts_side,
                                         abs(position.quantity), 'market', strategy='trailing_stop'):
                                     logger.info(f"Trailing-stop close already journaled ({coid}); skipping")
                                     continue
-                                close_order = OrderRequest(
-                                    symbol=position.symbol,
-                                    quantity=abs(position.quantity),
-                                    side='sell',
-                                    order_type='market',
-                                    time_in_force='gtc',
-                                    client_order_id=coid
-                                )
-                                result = primary_broker.place_order(close_order)
-                                if self.order_journal:
-                                    if result:
-                                        self.order_journal.mark_submitted(coid, result.order_id, result.status)
-                                    else:
-                                        self.order_journal.mark_failed(coid, 'place_order returned no response')
-                                if result:
-                                    logger.info(f"Trailing stop-loss order placed for {position.symbol}: {result.order_id}")
-                                    if self.monitoring_service:
-                                        self.monitoring_service.record_trade(
-                                            action='trailing_stop_sell',
-                                            symbol=position.symbol,
-                                            strategy='trailing_stop',
-                                            quantity=abs(position.quantity),
-                                            price=position.current_price or 0
-                                        )
-                            
+                                self._place_exit_order(
+                                    primary_broker, position.symbol, ts_side,
+                                    abs(position.quantity), coid, 'trailing_stop',
+                                    price=position.current_price or 0)
+
+
                 except Exception as e:
                     logger.error(f"Error enforcing stop-loss for {position.symbol}: {e}")
                     

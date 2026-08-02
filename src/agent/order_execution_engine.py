@@ -11,6 +11,7 @@ import asyncio
 import uuid
 from dataclasses import dataclass
 import numpy as np
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +181,7 @@ class OrderExecutionEngine:
                 self.pending_orders[response.order_id] = {
                     'order': order,
                     'response': response,
-                    'timestamp': datetime.utcnow(),
+                    'timestamp': utc_now(),
                     'strategy': 'immediate'
                 }
                 return response.order_id
@@ -197,7 +198,7 @@ class OrderExecutionEngine:
             slice_quantity = order.quantity / slices
             interval = duration / slices
             
-            parent_order_id = f"twap_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+            parent_order_id = f"twap_{utc_now().strftime('%Y%m%d_%H%M%S')}"
             
             # Schedule slice executions
             for i in range(slices):
@@ -213,7 +214,7 @@ class OrderExecutionEngine:
                 )
                 
                 # Schedule execution
-                execution_time = datetime.utcnow() + timedelta(seconds=i * interval)
+                execution_time = utc_now() + timedelta(seconds=i * interval)
                 self._schedule_order(slice_order, execution_time)
             
             return parent_order_id
@@ -244,7 +245,7 @@ class OrderExecutionEngine:
                 self.pending_orders[response.order_id] = {
                     'order': order,
                     'response': response,
-                    'timestamp': datetime.utcnow(),
+                    'timestamp': utc_now(),
                     'strategy': 'iceberg',
                     'remaining_quantity': order.quantity - visible_quantity
                 }
@@ -273,7 +274,7 @@ class OrderExecutionEngine:
     def update_orders(self):
         """Update order status and handle fills"""
         try:
-            current_time = datetime.utcnow()
+            current_time = utc_now()
             completed_orders = []
 
             # Snapshot: _continue_iceberg adds new keys to pending_orders mid-loop,
@@ -362,7 +363,7 @@ class OrderExecutionEngine:
                 self.pending_orders[response.order_id] = {
                     'order': original_order,
                     'response': response,
-                    'timestamp': datetime.utcnow(),
+                    'timestamp': utc_now(),
                     'strategy': 'iceberg',
                     'remaining_quantity': remaining - slice_quantity
                 }

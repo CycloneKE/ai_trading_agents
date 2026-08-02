@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 from src.utils.paths import DATA_DIR
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +182,7 @@ class StrategyManager:
                     'action': 'hold',
                     'confidence': 0.0,
                     'position_size': 0.0,
-                    'timestamp': datetime.utcnow().isoformat()
+                    'timestamp': utc_now().isoformat()
                 }
             
             strategy_signals = self.collect_strategy_signals(data)
@@ -203,7 +204,7 @@ class StrategyManager:
                 'action': 'hold',
                 'confidence': 0.0,
                 'position_size': 0.0,
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': utc_now().isoformat()
             }
     
     def warm_start(self, bars_by_symbol: Dict[str, list]) -> int:
@@ -252,7 +253,7 @@ class StrategyManager:
                     'sharpe_ratio': round(sharpe, 4),
                     'max_drawdown': round(max_dd, 4),
                     'closed_trades': stats.get('closed_trades', 0),
-                    'last_update': datetime.utcnow().isoformat(),
+                    'last_update': utc_now().isoformat(),
                     'source': 'order_journal',
                 })
 
@@ -299,7 +300,7 @@ class StrategyManager:
                     'action': 'hold',
                     'confidence': 0.0,
                     'position_size': 0.0,
-                    'timestamp': datetime.utcnow().isoformat()
+                    'timestamp': utc_now().isoformat()
                 }
             
             symbol = data.get('symbol', 'UNKNOWN')
@@ -325,7 +326,7 @@ class StrategyManager:
                 'action': 'hold',
                 'confidence': 0.0,
                 'position_size': 0.0,
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': utc_now().isoformat()
             }
     
     def _weighted_average_ensemble(self, strategy_signals: Dict[str, Dict[str, Any]], 
@@ -368,7 +369,7 @@ class StrategyManager:
             'action_scores': action_scores,
             'strategy_signals': strategy_signals,
             'ensemble_method': self.ensemble_method,
-            'timestamp': datetime.utcnow().isoformat()
+            'timestamp': utc_now().isoformat()
         }
     
     def _majority_vote_ensemble(self, strategy_signals: Dict[str, Dict[str, Any]], 
@@ -402,7 +403,7 @@ class StrategyManager:
             'action_votes': action_votes,
             'strategy_signals': strategy_signals,
             'ensemble_method': self.ensemble_method,
-            'timestamp': datetime.utcnow().isoformat()
+            'timestamp': utc_now().isoformat()
         }
     
     def _confidence_weighted_ensemble(self, strategy_signals: Dict[str, Dict[str, Any]], 
@@ -441,7 +442,7 @@ class StrategyManager:
             'action_scores': action_scores,
             'strategy_signals': strategy_signals,
             'ensemble_method': self.ensemble_method,
-            'timestamp': datetime.utcnow().isoformat()
+            'timestamp': utc_now().isoformat()
         }
     
     def _performance_weighted_ensemble(self, strategy_signals: Dict[str, Dict[str, Any]], 
@@ -491,7 +492,7 @@ class StrategyManager:
             'action_scores': action_scores,
             'strategy_signals': strategy_signals,
             'ensemble_method': self.ensemble_method,
-            'timestamp': datetime.utcnow().isoformat()
+            'timestamp': utc_now().isoformat()
         }
     
     def _adaptive_confidence_ensemble(self, strategy_signals: Dict[str, Dict[str, Any]], 
@@ -565,7 +566,7 @@ class StrategyManager:
             'action_scores': action_scores,
             'strategy_signals': strategy_signals,
             'ensemble_method': self.ensemble_method,
-            'timestamp': datetime.utcnow().isoformat()
+            'timestamp': utc_now().isoformat()
         }
     
     def update_strategies(self, data: Dict[str, Any], feedback: Optional[Dict[str, Any]] = None):
@@ -615,7 +616,7 @@ class StrategyManager:
                         'win_rate': metrics.get('win_rate', 0.0),
                         'max_drawdown': metrics.get('max_drawdown', 0.0),
                         'total_return': metrics.get('total_return', 0.0),
-                        'last_update': datetime.utcnow().isoformat()
+                        'last_update': utc_now().isoformat()
                     })
         
         except Exception as e:

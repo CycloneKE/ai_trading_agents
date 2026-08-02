@@ -53,7 +53,10 @@ def test_fallback_verdict_is_not_cached(monkeypatch):
     r2 = orch.validate_trade('SCOM', sig, {'close': 34.1})
 
     assert calls['n'] == 2  # NOT served from cache on the second call
-    assert r1 is sig and r2 is sig
-    conf_bucket = round(sig['confidence'] * 10)
-    cache_key = f"SCOM:{sig['action']}:{conf_bucket}"
-    assert cache_key not in orch._verdict_cache
+    # Values are the base signal's, unchanged. A *copy* rather than the same
+    # object: main.py does `validated_signal['confidence'] *= 0.5` on the
+    # result, which with shared identity would mutate the caller's own signal
+    # dict mid-cycle.
+    assert r1 == sig and r2 == sig
+    assert r1 is not sig and r2 is not sig
+    assert not [k for k in orch._verdict_cache if k.startswith('SCOM:')]

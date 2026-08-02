@@ -12,6 +12,9 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 from src.agent.escalation_manager import EscalationManager
 from src.utils.paths import DATA_DIR
+from src.utils.sqlite_util import connect as _connect
+from src.utils.timeutil import utc_now_iso
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -86,19 +89,87 @@ Ensure the output is strictly valid raw JSON. Do not wrap in markdown blocks, do
 """
 
 
+# ---------------------------------------------------------------------------
+# Auto-appliable parameters
+#
+# `target` is the dotted key the LLM proposes. `path` is where the value has
+# to land for the running system to actually observe it, and (lo, hi) bounds
+# every proposal — the LLM's output is untrusted free-form JSON, so a value
+# outside these bounds is clamped, and a non-numeric one is rejected outright.
+#
+# strategy_weights.* previously wrote to config['strategy_weights'], a key no
+# component reads; the canonical location is config['strategies'][n]['weight'].
+# execution.* had no bounds at all, so `min_order_size: 100000` would have
+# auto-applied and halted trading.
+# ---------------------------------------------------------------------------
+
+_STRATEGY_WEIGHT_PREFIX = 'strategy_weights.'
+
+_SAFE_PARAMETERS = {
+    'execution.min_order_size': {'path': ('execution', 'min_order_size'),
+                                 'lo': 1.0, 'hi': 1_000.0},
+    'execution.max_order_size': {'path': ('execution', 'max_order_size'),
+                                 'lo': 100.0, 'hi': 1_000_000.0},
+}
+
+WEIGHT_LO, WEIGHT_HI = 0.0, 2.0
+
+# Overlay of auto-applied changes, replayed over config at startup so a
+# learned adjustment is not silently reverted by the next restart.
+DEFAULT_OVERLAY_PATH = str(DATA_DIR / 'config_overlay.json')
+
+
+def apply_overlay(config: Dict[str, Any], path: str = DEFAULT_OVERLAY_PATH) -> int:
+    """Replay persisted auto-applied changes onto a freshly loaded config.
+
+    Returns the number of keys applied. A missing or corrupt overlay is a
+    no-op: a bad file must never stop the agent from starting.
+    """
+    try:
+        with open(path, 'r', encoding='utf-8') as fh:
+            saved = json.load(fh)
+        if not isinstance(saved, dict):
+            return 0
+    except FileNotFoundError:
+        return 0
+    except (OSError, ValueError) as e:
+        logger.error(f"Ignoring unreadable config overlay {path}: {e}")
+        return 0
+
+    applied = 0
+    for dotted, value in saved.items():
+        parts = dotted.split('.')
+        node = config
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+            if not isinstance(node, dict):
+                break
+        else:
+            node[parts[-1]] = value
+            applied += 1
+    if applied:
+        logger.warning(f"Replayed {applied} auto-applied config change(s) from {path}")
+    return applied
+
+
 class SelfAssessmentEngine:
     def __init__(self, llm_orchestrator, escalation_manager: EscalationManager, config: Dict[str, Any],
-                 db_path: str = str(DATA_DIR / 'improvements.db')):
+                 db_path: str = str(DATA_DIR / 'improvements.db'),
+                 strategy_manager=None,
+                 overlay_path: str = DEFAULT_OVERLAY_PATH):
         self.llm = llm_orchestrator
         self.escalation_manager = escalation_manager
         self.config = config
         self.db_path = db_path
+        # Live component whose in-memory weights must be updated alongside the
+        # config; without it the loop only ever edits a dict nobody reads.
+        self.strategy_manager = strategy_manager
+        self.overlay_path = overlay_path
         self._lock = threading.Lock()
-        
+
         # Initialize SQLite DB
         os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
-        self._conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
-        self._conn.execute('PRAGMA journal_mode=WAL')
+        self._conn = _connect(db_path)
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
         
@@ -173,15 +244,6 @@ class SelfAssessmentEngine:
         auto_applied = []
         escalated = []
         
-        # Guardrails for automatic changes
-        safe_parameter_keys = {
-            "strategy_weights.momentum",
-            "strategy_weights.mean_reversion",
-            "strategy_weights.rsi_strategy",
-            "execution.min_order_size",
-            "execution.max_order_size"
-        }
-        
         # Process parameter adjustments
         adjustments = plan.get("parameter_adjustments", [])
         for adj in adjustments:
@@ -189,27 +251,32 @@ class SelfAssessmentEngine:
             current = adj.get("current")
             proposed = adj.get("proposed")
             reasoning = adj.get("reasoning", "")
-            
+
             if not target:
                 continue
-                
-            is_safe = target in safe_parameter_keys
-            
+
+            is_safe = self._is_safe_target(target)
+
             if is_safe and not require_approval:
-                # Apply change directly to config
-                self._apply_config_change(target, proposed)
-                
-                # Record in DB
+                # Returns the clamped value actually written, or None when the
+                # proposal was unusable (non-numeric, unknown strategy). A
+                # rejected proposal must not be logged as applied.
+                applied_value = self._apply_config_change(target, proposed)
+                if applied_value is None:
+                    logger.warning(
+                        f"Rejected unusable proposal {target} -> {proposed!r}")
+                    continue
+
                 self._record_improvement(
                     assessment_id=assessment_id,
                     target=target,
                     prev_value=str(current),
-                    new_value=str(proposed),
+                    new_value=str(applied_value),
                     reasoning=reasoning,
                     auto_applied=True
                 )
                 auto_applied.append(adj)
-                logger.info(f"Auto-applied parameter shift: {target} -> {proposed}")
+                logger.info(f"Auto-applied parameter shift: {target} -> {applied_value}")
             else:
                 # Escalate to operator approval
                 escalation_reason = f"Proposed adjustment: {target} to {proposed} (Current: {current}). Rationale: {reasoning}"
@@ -246,33 +313,133 @@ class SelfAssessmentEngine:
             
         return auto_applied, escalated
 
-    def _apply_config_change(self, target: str, value: Any) -> None:
-        """Applies a dotted key change directly to the active config."""
-        parts = target.split(".")
-        config = self.config
-        
-        # Traverse down to nested dict level
-        for part in parts[:-1]:
-            if part not in config:
-                config[part] = {}
-            config = config[part]
-            
-        # Parse value if string representation of float/int
-        parsed_value = value
+    # ------------------------------------------------------------------
+    # Applying a change so the running system actually observes it
+    # ------------------------------------------------------------------
+
+    def _is_safe_target(self, target: str) -> bool:
+        if target in _SAFE_PARAMETERS:
+            return True
+        if not target.startswith(_STRATEGY_WEIGHT_PREFIX):
+            return False
+        # Only strategies that actually exist. An LLM inventing a strategy
+        # name must not conjure a config entry for it.
+        name = target[len(_STRATEGY_WEIGHT_PREFIX):]
+        return name in (self.config.get('strategies') or {})
+
+    @staticmethod
+    def _as_number(value: Any) -> Optional[float]:
+        """Coerce an LLM-supplied value to a float, or None if it isn't one.
+
+        `bool` is excluded deliberately: `True` is numerically 1.0 in Python
+        and would silently become a weight.
+        """
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
         if isinstance(value, str):
             try:
-                if "." in value:
-                    parsed_value = float(value)
-                else:
-                    parsed_value = int(value)
+                return float(value.strip())
             except ValueError:
-                pass
-                
-        # Guardrail bounds clamping
-        if parts[0] == "strategy_weights":
-            parsed_value = max(0.0, min(2.0, float(parsed_value)))
-            
-        config[parts[-1]] = parsed_value
+                return None
+        return None
+
+    def _apply_config_change(self, target: str, value: Any) -> Optional[float]:
+        """Write a proposed change everywhere it needs to be seen.
+
+        Returns the clamped value actually written, or None if the proposal
+        was rejected. Three destinations, all required:
+
+        1. `self.config` at the key the component actually reads,
+        2. the live component instance (StrategyManager caches its weights),
+        3. the on-disk overlay, so a restart does not revert the change.
+        """
+        number = self._as_number(value)
+        if number is None:
+            return None
+
+        if target.startswith(_STRATEGY_WEIGHT_PREFIX):
+            name = target[len(_STRATEGY_WEIGHT_PREFIX):]
+            strategies = self.config.get('strategies') or {}
+            if name not in strategies:
+                return None
+            clamped = max(WEIGHT_LO, min(WEIGHT_HI, number))
+            strategies[name]['weight'] = clamped
+            self._sync_strategy_manager_weights()
+            self._persist_overlay(f'strategies.{name}.weight', clamped)
+            return clamped
+
+        spec = _SAFE_PARAMETERS.get(target)
+        if not spec:
+            return None
+        clamped = max(spec['lo'], min(spec['hi'], number))
+
+        section, key = spec['path']
+        node = self.config.setdefault(section, {})
+        node[key] = clamped
+
+        # Cross-field invariant: a minimum above the maximum blocks every order.
+        if section == 'execution':
+            lo = node.get('min_order_size')
+            hi = node.get('max_order_size')
+            if lo is not None and hi is not None and lo > hi:
+                if key == 'min_order_size':
+                    clamped = float(hi)
+                    node['min_order_size'] = clamped
+                else:
+                    node['max_order_size'] = float(lo)
+                    clamped = float(lo)
+                logger.warning(
+                    f"Clamped {target} to preserve min_order_size <= max_order_size")
+
+        self._persist_overlay(f'{section}.{key}', clamped)
+        return clamped
+
+    def _sync_strategy_manager_weights(self) -> None:
+        """Push config weights into the live StrategyManager, preserving the
+        normalisation it applies at init (weights sum to 1.0). Without this
+        the change sits in a dict the signal path never re-reads."""
+        mgr = self.strategy_manager
+        if not mgr or not hasattr(mgr, 'strategy_weights'):
+            return
+        try:
+            raw = {name: float((cfg or {}).get('weight', 1.0))
+                   for name, cfg in (self.config.get('strategies') or {}).items()
+                   if name in mgr.strategy_weights}
+            total = sum(raw.values())
+            if total <= 0:
+                logger.error("Refusing to apply strategy weights summing to zero")
+                return
+            for name, w in raw.items():
+                mgr.strategy_weights[name] = w / total
+            logger.info(f"Live strategy weights updated: {mgr.strategy_weights}")
+        except Exception as e:
+            logger.error(f"Failed to sync live strategy weights: {e}")
+
+    def _persist_overlay(self, dotted_key: str, value: Any) -> None:
+        """Record the change so `apply_overlay` can replay it after a restart."""
+        if not self.overlay_path:
+            return
+        try:
+            saved = {}
+            if os.path.exists(self.overlay_path):
+                try:
+                    with open(self.overlay_path, 'r', encoding='utf-8') as fh:
+                        loaded = json.load(fh)
+                    if isinstance(loaded, dict):
+                        saved = loaded
+                except (OSError, ValueError):
+                    logger.warning("Overwriting unreadable config overlay")
+            saved[dotted_key] = value
+            saved['_updated_at'] = utc_now_iso()
+            os.makedirs(os.path.dirname(self.overlay_path) or '.', exist_ok=True)
+            tmp = f'{self.overlay_path}.tmp'
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                json.dump(saved, fh, indent=2)
+            os.replace(tmp, self.overlay_path)      # atomic
+        except Exception as e:
+            logger.error(f"Failed to persist config overlay: {e}")
 
     def _analyze_prediction_accuracy(self, decisions: List[Dict[str, Any]], fills: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -418,7 +585,7 @@ class SelfAssessmentEngine:
                 "adaptation_effectiveness_json, bias_trends_json, improvement_plan_json) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (
-                    datetime.utcnow().isoformat(),
+                    utc_now().isoformat(),
                     cycles_reviewed,
                     json.dumps(accuracy),
                     json.dumps(adaptations),
@@ -442,7 +609,7 @@ class SelfAssessmentEngine:
                     prev_value,
                     new_value,
                     reasoning,
-                    datetime.utcnow().isoformat(),
+                    utc_now().isoformat(),
                     1 if auto_applied else 0
                 )
             )

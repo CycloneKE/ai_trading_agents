@@ -14,6 +14,7 @@ import threading
 
 from .sentiment_analyzer import FinancialSentimentAnalyzer
 from .text_processor import FinancialTextProcessor
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,7 @@ class NLPManager:
             return {
                 'processed_articles': processed_articles,
                 'aggregated_insights': aggregated_insights,
-                'processing_timestamp': datetime.utcnow().isoformat(),
+                'processing_timestamp': utc_now().isoformat(),
                 'total_articles': len(processed_articles)
             }
             
@@ -139,7 +140,7 @@ class NLPManager:
                 'metadata': metadata,
                 'text_analysis': text_analysis,
                 'sentiment_analysis': sentiment_analysis,
-                'processing_timestamp': datetime.utcnow().isoformat()
+                'processing_timestamp': utc_now().isoformat()
             }
             
             return result
@@ -244,7 +245,7 @@ class NLPManager:
                     'sentiment_summary': {},
                     'post_sentiments': [],
                     'trending_topics': {},
-                    'processing_timestamp': datetime.utcnow().isoformat()
+                    'processing_timestamp': utc_now().isoformat()
                 }
             
             # Extract text from posts
@@ -303,7 +304,7 @@ class NLPManager:
             # Store sentiment history
             with self.lock:
                 self.sentiment_history.append({
-                    'timestamp': datetime.utcnow().isoformat(),
+                    'timestamp': utc_now().isoformat(),
                     'sentiment_summary': sentiment_summary,
                     'post_count': len(post_sentiments)
                 })
@@ -315,7 +316,7 @@ class NLPManager:
                 'sentiment_summary': sentiment_summary,
                 'post_sentiments': post_sentiments,
                 'trending_topics': trending_topics,
-                'processing_timestamp': datetime.utcnow().isoformat()
+                'processing_timestamp': utc_now().isoformat()
             }
             
         except Exception as e:
@@ -324,7 +325,7 @@ class NLPManager:
                 'sentiment_summary': {},
                 'post_sentiments': [],
                 'trending_topics': {},
-                'processing_timestamp': datetime.utcnow().isoformat()
+                'processing_timestamp': utc_now().isoformat()
             }
     
     def _extract_trending_topics(self, texts: List[str]) -> Dict[str, int]:
@@ -382,7 +383,7 @@ class NLPManager:
             Entity sentiment tracking results
         """
         try:
-            cutoff_time = datetime.utcnow() - timedelta(hours=time_window_hours)
+            cutoff_time = utc_now() - timedelta(hours=time_window_hours)
             
             # Find relevant articles and posts
             relevant_items = []
@@ -447,7 +448,7 @@ class NLPManager:
             # Update entity tracking
             with self.lock:
                 self.entity_tracking[entity] = {
-                    'last_update': datetime.utcnow().isoformat(),
+                    'last_update': utc_now().isoformat(),
                     'total_mentions': len(relevant_items),
                     'average_sentiment': average_sentiment,
                     'sentiment_distribution': sentiment_distribution
@@ -519,7 +520,7 @@ class NLPManager:
             
             return {
                 'signals': signals,
-                'generation_timestamp': datetime.utcnow().isoformat(),
+                'generation_timestamp': utc_now().isoformat(),
                 'time_window_hours': 24
             }
             
@@ -534,7 +535,7 @@ class NLPManager:
                     'sentiment_distribution': {'positive': 0, 'negative': 0, 'neutral': 0},
                     'confidence': 0.0
                 } for symbol in symbols},
-                'generation_timestamp': datetime.utcnow().isoformat(),
+                'generation_timestamp': utc_now().isoformat(),
                 'time_window_hours': 24
             }
     
@@ -548,7 +549,7 @@ class NLPManager:
         return {
             'processed_articles': [],
             'aggregated_insights': {},
-            'processing_timestamp': datetime.utcnow().isoformat(),
+            'processing_timestamp': utc_now().isoformat(),
             'total_articles': 0
         }
     

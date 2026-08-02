@@ -12,6 +12,7 @@ import uuid
 from typing import Dict, Any, Callable, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ class AsyncTask:
     args: tuple = field(default_factory=tuple)
     kwargs: dict = field(default_factory=dict)
     status: str = "queued"  # 'queued' | 'running' | 'completed' | 'failed'
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=utc_now)
     completed_at: Optional[datetime] = None
     result: Any = None
     error: Optional[str] = None
@@ -126,5 +127,5 @@ class TaskQueueEngine:
                 task.status = "failed"
                 logger.error(f"Worker failed task [{task.name}] ({task.task_id}): {e}")
             finally:
-                task.completed_at = datetime.utcnow()
+                task.completed_at = utc_now()
                 self.task_queue.task_done()

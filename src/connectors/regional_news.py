@@ -15,6 +15,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List
 
 import requests
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +54,9 @@ def get_east_africa_news(query: str = DEFAULT_QUERY, limit: int = 10,
             source = source_el.text if source_el is not None else 'Google News'
 
             try:
-                published = parsedate_to_datetime(pub_date) if pub_date else datetime.utcnow()
+                published = parsedate_to_datetime(pub_date) if pub_date else utc_now()
             except (TypeError, ValueError):
-                published = datetime.utcnow()
+                published = utc_now()
 
             items.append({
                 'title': title,

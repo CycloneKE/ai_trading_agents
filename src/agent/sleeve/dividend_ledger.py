@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from src.utils.paths import DATA_DIR
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ class DividendLedger:
             cur = self._conn.execute(
                 "INSERT INTO sleeve_dividends (recorded_at, symbol, declared_date,"
                 " amount_kes, status, notes) VALUES (?, ?, ?, ?, ?, ?)",
-                (datetime.utcnow().isoformat(), symbol.upper(), declared_date,
+                (utc_now().isoformat(), symbol.upper(), declared_date,
                  float(amount_kes), status, notes))
             self._conn.commit()
             return cur.lastrowid

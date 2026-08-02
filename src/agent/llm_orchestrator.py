@@ -2,6 +2,7 @@
 LLM Orchestrator Layer
 Handles the reasoning layer for trading decisions.
 """
+import math
 import os
 import json
 import logging
@@ -10,6 +11,70 @@ import requests
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
+
+VALID_ACTIONS = ('buy', 'sell', 'hold')
+
+
+def _as_unit_float(value: Any, default: float) -> float:
+    """Coerce an LLM-supplied number into [0.0, 1.0].
+
+    Anything unusable (missing, non-numeric, NaN, inf) falls back to the
+    base signal's own value rather than propagating into sizing arithmetic.
+    """
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(num) or math.isinf(num):
+        return 0.0 if math.isnan(num) else max(0.0, min(1.0, num))
+    return max(0.0, min(1.0, num))
+
+
+def validate_verdict(verdict: Any, base_signal: Dict[str, Any]) -> Dict[str, Any]:
+    """Constrain an LLM verdict to what a *reviewer* is allowed to decide.
+
+    The reviewer's remit is to approve, resize, or reject a signal the
+    ensemble already produced — never to originate a trade in the opposite
+    direction. `validate_trade` used to return the model's parsed JSON
+    verbatim and main.py executed it, so a model answering 'sell' to a
+    proposed 'buy' would have opened a short nothing in the system proposed.
+
+    Guarantees for callers:
+      * 'action' is one of buy/sell/hold, and is either the base signal's
+        direction or 'hold'.
+      * 'confidence' and 'position_size' are always present floats in [0, 1].
+    """
+    base_action = str(base_signal.get('action', 'hold')).strip().lower()
+    base_conf = _as_unit_float(base_signal.get('confidence'), 0.0)
+    base_size = _as_unit_float(base_signal.get('position_size'), 0.0)
+
+    if not isinstance(verdict, dict):
+        logger.warning(f"LLM returned {type(verdict).__name__}, not an object; "
+                       f"using the base signal")
+        return dict(base_signal)
+
+    out = dict(verdict)
+    action = str(out.get('action', '')).strip().lower()
+
+    if action not in VALID_ACTIONS:
+        logger.warning(f"LLM returned unrecognised action {out.get('action')!r}; holding")
+        action = 'hold'
+    elif action != base_action and action != 'hold':
+        # A direction flip is out of scope for a reviewer. Treat it as a
+        # rejection of the proposed trade, which is the conservative reading.
+        logger.warning(
+            f"LLM tried to flip {base_action} -> {action}; downgrading to hold "
+            f"(a reviewer may reject a signal, not reverse it)")
+        action = 'hold'
+
+    out['action'] = action
+    out['confidence'] = _as_unit_float(out.get('confidence'), base_conf)
+    out['position_size'] = _as_unit_float(out.get('position_size'), base_size)
+    if 'symbol' not in out and base_signal.get('symbol'):
+        out['symbol'] = base_signal['symbol']
+    return out
 
 class LLMOrchestrator:
     def __init__(self, config: Dict[str, Any]):
@@ -88,7 +153,11 @@ class LLMOrchestrator:
             return strategy_signal  # Don't ask LLM about weak holds to save costs
 
         conf_bucket = round(strategy_signal.get('confidence', 0) * 10)  # 0.71/0.73 share a verdict
-        cache_key = f"{symbol}:{action}:{conf_bucket}"
+        # Price belongs in the key: with a 900s TTL and no price component a
+        # verdict formed at one price was reapplied for fifteen minutes at a
+        # materially different one. Buckets are log-scaled so the band is a
+        # constant *percentage* move regardless of the symbol's price level.
+        cache_key = f"{symbol}:{action}:{conf_bucket}:{self._price_bucket(market_data)}"
         cached = self._verdict_cache.get(cache_key)
         if cached and cached[0] > time.time():
             return dict(cached[1])
@@ -153,20 +222,50 @@ class LLMOrchestrator:
         # Resolve dynamic model config
         model = self.config.get("swarm", {}).get("agents", {}).get("synthesizer", "meta-llama/llama-3.1-8b-instruct")
         
-        def _remember(verdict):
+        def _remember(verdict, _outage_sentinel=strategy_signal):
             # Only cache genuine LLM verdicts. _complete returns the base
             # strategy_signal object unchanged on an all-providers-down outage
             # (or a JSON-decode failure); caching that would suppress real LLM
             # validation for this (symbol, action, confidence) bucket for the
             # full TTL even after the provider recovers from a brief 429.
-            if isinstance(verdict, dict) and verdict is not strategy_signal:
-                self._verdict_cache[cache_key] = (time.time() + self.cache_ttl, dict(verdict))
-            return verdict
+            if not isinstance(verdict, dict) or verdict is _outage_sentinel:
+                # An outage returns the base signal object itself; caching it
+                # would suppress real validation for the whole TTL.
+                return dict(strategy_signal)
+
+            validated = validate_verdict(verdict, strategy_signal)
+            # A rejected direction-flip is our decision, not the model's —
+            # caching it would keep vetoing the symbol for the full TTL on the
+            # strength of one bad response.
+            flipped = str(verdict.get('action', '')).strip().lower() not in (
+                validated['action'], '')
+            if not flipped:
+                self._verdict_cache[cache_key] = (time.time() + self.cache_ttl,
+                                                  dict(validated))
+            return validated
 
         # All-providers-down returns the base signal: a trade is never
         # force-held by an LLM outage.
         return _remember(self._complete(system_prompt, user_prompt,
                                         strategy_signal, model_override=model))
+
+    # Each bucket spans this fractional price move; a verdict is reused only
+    # while the price stays inside the band it was formed in.
+    PRICE_BUCKET_BAND = 0.005      # 0.5%
+
+    def _price_bucket(self, market_data: Any) -> int:
+        """Log-scaled price bucket, so the band is a constant percentage."""
+        try:
+            price = None
+            if isinstance(market_data, dict):
+                price = market_data.get('price') or market_data.get('close')
+            price = float(price)
+        except (TypeError, ValueError):
+            return 0
+        if price <= 0:
+            return 0
+        band = self.config.get('llm_cache_price_band', self.PRICE_BUCKET_BAND)
+        return int(math.log(price) / math.log(1.0 + band))
 
     def propose_json(self, system_prompt: str, user_prompt: str, model_override: Optional[str] = None):
         """Generic JSON completion (used by the weight allocator and sector specialists).

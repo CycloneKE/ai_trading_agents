@@ -16,6 +16,7 @@ from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 from src.utils.paths import DATA_DIR
+from src.utils.timeutil import utc_now
 
 try:
     import psutil
@@ -227,7 +228,7 @@ class MonitoringService:
                 self.health_cache = {
                     'checks': checks,
                     'ready': all_healthy,
-                    'updated': datetime.utcnow().isoformat(),
+                    'updated': utc_now().isoformat(),
                 }
                 self.health_cache_updated = time.time()
         except Exception as e:
@@ -265,7 +266,7 @@ class MonitoringService:
                 'quantity': quantity,
                 'price': price,
                 'value': quantity * price,
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': utc_now().isoformat()
             }
             
             self.metrics['trading']['orders'].append(trade)
@@ -288,7 +289,7 @@ class MonitoringService:
             positions: List of positions
         """
         try:
-            timestamp = datetime.utcnow().isoformat()
+            timestamp = utc_now().isoformat()
             
             self.metrics['trading']['portfolio_value'].append({
                 'value': portfolio_value,
@@ -323,7 +324,7 @@ class MonitoringService:
             risk_metrics: Dict of risk metrics
         """
         try:
-            timestamp = datetime.utcnow().isoformat()
+            timestamp = utc_now().isoformat()
             
             if 'portfolio_var' in risk_metrics:
                 self.metrics['risk']['portfolio_var'].append({
@@ -360,7 +361,7 @@ class MonitoringService:
             returns: Strategy returns
         """
         try:
-            timestamp = datetime.utcnow().isoformat()
+            timestamp = utc_now().isoformat()
             
             if strategy_name not in self.metrics['performance']['strategy_returns']:
                 self.metrics['performance']['strategy_returns'][strategy_name] = []
@@ -386,7 +387,7 @@ class MonitoringService:
             returns: Ensemble returns
         """
         try:
-            timestamp = datetime.utcnow().isoformat()
+            timestamp = utc_now().isoformat()
             
             self.metrics['performance']['ensemble_returns'].append({
                 'value': returns,
@@ -423,7 +424,7 @@ class MonitoringService:
     def _collect_system_metrics(self):
         """Collect system metrics."""
         try:
-            timestamp = datetime.utcnow().isoformat()
+            timestamp = utc_now().isoformat()
             
             # CPU usage
             cpu_percent = psutil.cpu_percent(interval=1)
@@ -549,7 +550,7 @@ class MonitoringService:
                 snapshot = monitoring_service.get_health_snapshot()
                 health_status = {
                     'status': 'ok',
-                    'timestamp': datetime.utcnow().isoformat(),
+                    'timestamp': utc_now().isoformat(),
                 }
 
                 if snapshot is None:
@@ -700,7 +701,7 @@ class MonitoringService:
                 """Handle status endpoint."""
                 status = {
                     'status': 'running' if monitoring_service.is_running else 'stopped',
-                    'timestamp': datetime.utcnow().isoformat(),
+                    'timestamp': utc_now().isoformat(),
                     'uptime': time.time() - psutil.boot_time(),
                     'process_uptime': time.time() - psutil.Process(os.getpid()).create_time(),
                     'system': monitoring_service.metrics['system']

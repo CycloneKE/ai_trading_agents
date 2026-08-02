@@ -19,6 +19,24 @@ DEFAULT_MIN_NOTIONAL = 5.0      # skip orders worth less than this
 FRACTIONAL_DECIMALS = 4          # Alpaca accepts up to 9; 4 is plenty
 
 
+def time_in_force_for(quantity, preferred_tif: str = 'day') -> str:
+    """The broker's fractional-order rule, in exactly one place.
+
+    Alpaca rejects any fractional order that is not DAY. Both the entry path
+    (via :func:`size_order`) and every exit path go through here, so the
+    constraint cannot be encoded correctly in one and forgotten in the other
+    — which is what cost seventeen consecutive stop-losses on 2026-07-24.
+
+    Unparseable quantities fall back to 'day': DAY is valid for whole and
+    fractional alike, so the safe default can never produce a rejection.
+    """
+    try:
+        qty = abs(float(quantity))
+    except (TypeError, ValueError):
+        return 'day'
+    return preferred_tif if qty == int(qty) else 'day'
+
+
 @dataclass
 class SizedOrder:
     quantity: float
@@ -59,7 +77,6 @@ def size_order(target_value: float, price: float,
     if quantity <= 0:
         return None
     is_fractional = quantity != int(quantity)
-    # Fractional orders must be DAY per Alpaca; whole-share keeps caller's TIF.
-    tif = 'day' if is_fractional else preferred_tif
+    tif = time_in_force_for(quantity, preferred_tif)
     return SizedOrder(quantity=quantity, time_in_force=tif,
                       is_fractional=is_fractional, notional=round(quantity * price, 2))

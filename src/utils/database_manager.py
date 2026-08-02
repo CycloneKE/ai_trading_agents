@@ -7,6 +7,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 import json
+from src.utils.timeutil import utc_now
 
 try:
     import psycopg2
@@ -217,7 +218,7 @@ class DatabaseManager:
         if self.supabase_client:
             payload = {
                 'symbol': symbol,
-                'timestamp': datetime.utcnow().isoformat(),
+                'timestamp': utc_now().isoformat(),
                 'open_price': data.get('open'),
                 'high_price': data.get('high'),
                 'low_price': data.get('low'),
@@ -243,7 +244,7 @@ class DatabaseManager:
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 symbol,
-                datetime.utcnow(),
+                utc_now(),
                 data.get('open'),
                 data.get('high'),
                 data.get('low'),
@@ -269,7 +270,7 @@ class DatabaseManager:
         if self.supabase_client:
             payload = {
                 'symbol': trade_data['symbol'],
-                'timestamp': datetime.utcnow().isoformat(),
+                'timestamp': utc_now().isoformat(),
                 'action': trade_data['action'],
                 'quantity': trade_data['quantity'],
                 'price': trade_data['price'],
@@ -295,7 +296,7 @@ class DatabaseManager:
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 trade_data['symbol'],
-                datetime.utcnow(),
+                utc_now(),
                 trade_data['action'],
                 trade_data['quantity'],
                 trade_data['price'],
@@ -357,7 +358,7 @@ class DatabaseManager:
             
         if self.supabase_client:
             payload = {
-                'timestamp': datetime.utcnow().isoformat(),
+                'timestamp': utc_now().isoformat(),
                 'total_return': metrics.get('total_return'),
                 'sharpe_ratio': metrics.get('sharpe_ratio'),
                 'max_drawdown': metrics.get('max_drawdown'),
@@ -381,7 +382,7 @@ class DatabaseManager:
                                                max_drawdown, win_rate, metrics)
                 VALUES (%s, %s, %s, %s, %s, %s)
             """, (
-                datetime.utcnow(),
+                utc_now(),
                 metrics.get('total_return'),
                 metrics.get('sharpe_ratio'),
                 metrics.get('max_drawdown'),

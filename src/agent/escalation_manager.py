@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 
 from src.utils.paths import DATA_DIR
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,7 @@ class EscalationManager:
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO research_uploads (filename, source, uploaded_at) VALUES (?, ?, ?)",
-                (filename, source, datetime.utcnow().isoformat())
+                (filename, source, utc_now().isoformat())
             )
             self._conn.commit()
             return cur.lastrowid
@@ -98,7 +99,7 @@ class EscalationManager:
         with self._lock:
             self._conn.execute(
                 "UPDATE research_uploads SET status = ?, signals_count = ?, processed_at = ? WHERE id = ?",
-                (status, signals_count, datetime.utcnow().isoformat(), upload_id)
+                (status, signals_count, utc_now().isoformat(), upload_id)
             )
             self._conn.commit()
 
@@ -121,7 +122,7 @@ class EscalationManager:
                     json.dumps(signal.get("risk_factors", [])),
                     signal.get("time_horizon", "medium_term"),
                     signal.get("confidence", 1.0),
-                    datetime.utcnow().isoformat()
+                    utc_now().isoformat()
                 )
             )
             self._conn.commit()
@@ -139,7 +140,7 @@ class EscalationManager:
                     action,
                     reason,
                     risk_level,
-                    datetime.utcnow().isoformat()
+                    utc_now().isoformat()
                 )
             )
             self._conn.commit()
@@ -195,7 +196,7 @@ class EscalationManager:
             self._conn.execute(
                 "UPDATE escalations SET status = ?, operator_notes = ?, resolved_at = ?, resolved_by = ? "
                 "WHERE id = ?",
-                (status, operator_notes, datetime.utcnow().isoformat(), resolved_by, escalation_id)
+                (status, operator_notes, utc_now().isoformat(), resolved_by, escalation_id)
             )
             self._conn.commit()
 
@@ -227,8 +228,8 @@ class EscalationManager:
                     target_price,
                     rationale,
                     symbol.upper(),
-                    datetime.utcnow().isoformat(),
-                    datetime.utcnow().isoformat()
+                    utc_now().isoformat(),
+                    utc_now().isoformat()
                 )
             )
             self._conn.commit()
@@ -239,7 +240,7 @@ class EscalationManager:
             cur = self._conn.execute(
                 "UPDATE position_watchlist SET status = 'paused', last_updated = ? "
                 "WHERE symbol = ? AND status = 'active'",
-                (datetime.utcnow().isoformat(), symbol.upper())
+                (utc_now().isoformat(), symbol.upper())
             )
             self._conn.commit()
             return cur.rowcount > 0
@@ -250,7 +251,7 @@ class EscalationManager:
             cur = self._conn.execute(
                 "UPDATE position_watchlist SET status = 'active', last_updated = ? "
                 "WHERE symbol = ? AND status = 'paused'",
-                (datetime.utcnow().isoformat(), symbol.upper())
+                (utc_now().isoformat(), symbol.upper())
             )
             self._conn.commit()
             return cur.rowcount > 0
@@ -261,7 +262,7 @@ class EscalationManager:
             cur = self._conn.execute(
                 "UPDATE position_watchlist SET status = 'removed', last_updated = ? "
                 "WHERE symbol = ?",
-                (datetime.utcnow().isoformat(), symbol.upper())
+                (utc_now().isoformat(), symbol.upper())
             )
             self._conn.commit()
             return cur.rowcount > 0

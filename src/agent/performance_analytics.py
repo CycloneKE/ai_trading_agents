@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from src.utils.paths import DATA_DIR
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +134,7 @@ class PerformanceAnalytics:
         """Record portfolio value for performance tracking"""
         try:
             if timestamp is None:
-                timestamp = datetime.utcnow()
+                timestamp = utc_now()
             
             self.portfolio_values.append({
                 'timestamp': timestamp,
@@ -179,7 +180,7 @@ class PerformanceAnalytics:
         """Record trade execution for performance analysis"""
         try:
             if timestamp is None:
-                timestamp = datetime.utcnow()
+                timestamp = utc_now()
             
             trade = {
                 'timestamp': timestamp,
@@ -381,7 +382,7 @@ class PerformanceAnalytics:
         """Generate comprehensive performance report"""
         try:
             # Calculate date range
-            end_date = datetime.utcnow()
+            end_date = utc_now()
             if period == '1D':
                 start_date = end_date - timedelta(days=1)
             elif period == '1W':
@@ -408,7 +409,7 @@ class PerformanceAnalytics:
                 'period': period,
                 'start_date': start_date.isoformat() if start_date else None,
                 'end_date': end_date.isoformat(),
-                'generated_at': datetime.utcnow().isoformat(),
+                'generated_at': utc_now().isoformat(),
                 'metrics': {
                     'total_return': metrics.total_return,
                     'annualized_return': metrics.annualized_return,

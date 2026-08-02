@@ -7,6 +7,7 @@ import pandas as pd
 from typing import Dict, List, Any, Optional, Tuple
 import logging
 from datetime import datetime, timedelta
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ class BiasDetector:
                 'action': action,
                 'sector': symbol_data.get('sector', 'unknown'),
                 'returns': symbol_data.get('returns', 0.0),
-                'timestamp': datetime.utcnow(),
+                'timestamp': utc_now(),
             })
             max_history = max(20, self.lookback_days)
             if len(self.decision_history) > max_history:

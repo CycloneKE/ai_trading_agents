@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 
 from src.utils.paths import DATA_DIR
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +171,7 @@ class SectorSpecialistManager:
                 if not cur.fetchone():
                     self._conn.execute(
                         "INSERT INTO sector_knowledge_profiles (sector, last_updated, knowledge_json) VALUES (?, ?, ?)",
-                        (sector, datetime.utcnow().isoformat(), json.dumps(profile))
+                        (sector, utc_now().isoformat(), json.dumps(profile))
                     )
             self._conn.commit()
 
@@ -208,7 +209,7 @@ class SectorSpecialistManager:
                 "VALUES (?, ?, ?)",
                 (
                     sector.lower(),
-                    datetime.utcnow().isoformat(),
+                    utc_now().isoformat(),
                     json.dumps(profile)
                 )
             )

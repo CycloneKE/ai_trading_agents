@@ -10,6 +10,7 @@ from datetime import datetime
 import alpaca_trade_api as tradeapi
 
 from .base_broker import BaseBroker, OrderRequest, OrderResponse, Position, AccountInfo
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ class AlpacaBroker(BaseBroker):
             # Test connection
             self.api.get_account()
             self.is_connected = True
-            self.last_connection_time = datetime.utcnow()
+            self.last_connection_time = utc_now()
             logger.info("Successfully connected to Alpaca")
             return True
         except Exception as e:
@@ -136,7 +137,7 @@ class AlpacaBroker(BaseBroker):
                 initial_margin=float(getattr(acc, 'initial_margin', 0) or 0),
                 maintenance_margin=float(getattr(acc, 'maintenance_margin', 0) or 0),
                 day_trade_count=int(getattr(acc, 'daytrade_count', 0) or getattr(acc, 'daytrading_count', 0) or 0),
-                last_updated=datetime.utcnow(),
+                last_updated=utc_now(),
                 broker_name=self.broker_name
             )
         except Exception as e:

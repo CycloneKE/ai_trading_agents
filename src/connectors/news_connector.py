@@ -7,6 +7,7 @@ import time
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 import requests
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,7 @@ class NewsAPIConnector(BaseNewsConnector):
                     if res_data.get('status') == 'ok':
                         data[symbol] = {
                             'articles': res_data.get('articles', []),
-                            'timestamp': datetime.utcnow().isoformat()
+                            'timestamp': utc_now().isoformat()
                         }
                     else:
                         logger.warning(f"NewsAPI returned error for {symbol}: {res_data.get('message')}")
@@ -218,7 +219,7 @@ class RedditConnector(BaseNewsConnector):
                             })
                     data[symbol] = {
                         'posts': posts,
-                        'timestamp': datetime.utcnow().isoformat()
+                        'timestamp': utc_now().isoformat()
                     }
                 except Exception as e:
                     logger.warning(f"Failed to fetch Reddit data for {symbol}: {str(e)}")
@@ -269,7 +270,7 @@ class FinnhubNewsConnector(BaseNewsConnector):
             self.last_request_time = time.time()
             
             results = {}
-            today = datetime.utcnow().date()
+            today = utc_now().date()
             week_ago = today - timedelta(days=7)
             for symbol in symbols:
                 url = f"{self.base_url}company-news?symbol={symbol}&from={week_ago}&to={today}&token={self.api_key}"

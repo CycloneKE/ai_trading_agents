@@ -12,6 +12,7 @@ from src.connectors.base_broker import BaseBroker, OrderRequest, OrderResponse, 
 
 from .paper_trading import PaperTradingBroker
 import logging
+from src.utils.timeutil import utc_now
 try:
     from src.connectors.alpaca_broker import AlpacaBroker
     ALPACA_AVAILABLE = True
@@ -444,7 +445,7 @@ class BrokerManager:
                     'broker_name': name,
                     'overall_health': False,
                     'error': str(e),
-                    'timestamp': datetime.utcnow().isoformat()
+                    'timestamp': utc_now().isoformat()
                 }
         
         return health_results
@@ -486,13 +487,13 @@ class BrokerManager:
                 'primary_broker': self.primary_broker,
                 'available_broker_types': list(self.broker_types.keys()),
                 'brokers': self.get_broker_list(),
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': utc_now().isoformat()
             }
             
         except Exception as e:
             logger.error(f"Error getting broker manager status: {str(e)}")
             return {
                 'error': str(e),
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': utc_now().isoformat()
             }
 

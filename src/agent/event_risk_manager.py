@@ -15,6 +15,7 @@ import queue
 import time
 
 from .risk_calculator import RiskCalculator
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +195,7 @@ class EventRiskManager:
                 self.risk_events.append(event)
                 
                 # Keep only recent events
-                cutoff_time = datetime.utcnow() - timedelta(hours=24)
+                cutoff_time = utc_now() - timedelta(hours=24)
                 self.risk_events = [
                     e for e in self.risk_events
                     if e.timestamp > cutoff_time
@@ -249,7 +250,7 @@ class EventRiskManager:
                             symbol=symbol,
                             message=f"Volatility spike detected for {symbol}: {current_volatility:.3f}",
                             data={'volatility': current_volatility, 'threshold': self.volatility_threshold},
-                            timestamp=datetime.utcnow(),
+                            timestamp=utc_now(),
                             event_id=f"vol_spike_{symbol}_{int(time.time())}"
                         )
                         self.add_event(volatility_event)
@@ -283,7 +284,7 @@ class EventRiskManager:
                     'reason': 'negative_news_sentiment',
                     'sentiment_score': overall_sentiment,
                     'confidence': confidence,
-                    'timestamp': datetime.utcnow().isoformat()
+                    'timestamp': utc_now().isoformat()
                 }
                 
                 with self.lock:
@@ -325,7 +326,7 @@ class EventRiskManager:
                         symbol=None,
                         message=f"Portfolio VaR breach: {abs(var_95):.3f} > {self.portfolio_var_threshold:.3f}",
                         data={'var_95': var_95, 'threshold': self.portfolio_var_threshold, 'portfolio_risk': portfolio_risk},
-                        timestamp=datetime.utcnow(),
+                        timestamp=utc_now(),
                         event_id=f"var_breach_{int(time.time())}"
                     )
                     self.add_event(risk_breach_event)
@@ -354,7 +355,7 @@ class EventRiskManager:
                     'scaling_factor': scaling_factor,
                     'reason': 'volatility_spike',
                     'volatility': volatility,
-                    'timestamp': datetime.utcnow().isoformat()
+                    'timestamp': utc_now().isoformat()
                 }
                 
                 with self.lock:
@@ -404,7 +405,7 @@ class EventRiskManager:
                         'reason': 'high_correlation',
                         'max_correlation': max_correlation,
                         'threshold': self.correlation_threshold,
-                        'timestamp': datetime.utcnow().isoformat()
+                        'timestamp': utc_now().isoformat()
                     }
                     
                     with self.lock:
@@ -430,7 +431,7 @@ class EventRiskManager:
                 symbol=symbol,
                 message=f"Market data update for {symbol}",
                 data={'price_data': price_data},
-                timestamp=datetime.utcnow(),
+                timestamp=utc_now(),
                 event_id=f"market_data_{symbol}_{int(time.time())}"
             )
             
@@ -463,7 +464,7 @@ class EventRiskManager:
                 symbol=symbol,
                 message=f"News sentiment update for {symbol}: {overall_sentiment:.3f}",
                 data={'sentiment': sentiment_data},
-                timestamp=datetime.utcnow(),
+                timestamp=utc_now(),
                 event_id=f"news_{symbol}_{int(time.time())}"
             )
             
@@ -487,7 +488,7 @@ class EventRiskManager:
                 symbol=None,
                 message="Portfolio update",
                 data={'portfolio': portfolio, 'price_data': price_data},
-                timestamp=datetime.utcnow(),
+                timestamp=utc_now(),
                 event_id=f"portfolio_update_{int(time.time())}"
             )
             
@@ -527,7 +528,7 @@ class EventRiskManager:
         Returns:
             List of filtered risk events
         """
-        cutoff_time = datetime.utcnow() - timedelta(hours=hours_back)
+        cutoff_time = utc_now() - timedelta(hours=hours_back)
         
         with self.lock:
             events = [e for e in self.risk_events if e.timestamp > cutoff_time]

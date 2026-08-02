@@ -11,6 +11,7 @@ from datetime import datetime
 import numpy as np
 from src.agent.adaptive_agent import SelfAdaptiveAgent, GoalType
 from src.agent.goal_manager import GoalManager
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ class AdaptiveStrategyIntegration:
         """Update adaptive agent with performance and market data"""
         # Update performance buffer
         self.performance_buffer.append({
-            'timestamp': datetime.utcnow(),
+            'timestamp': utc_now(),
             'performance': performance_data,
             'market': market_data
         })

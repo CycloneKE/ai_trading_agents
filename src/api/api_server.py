@@ -16,6 +16,7 @@ from functools import wraps
 from typing import Dict, Any, List
 from src.agent.sentiment_analyzer import FinancialSentimentAnalyzer
 from src.utils.paths import DATA_DIR
+from src.utils.timeutil import utc_now
 # NOTE: token_required is imported via the guarded try/except below, NOT here.
 # A top-level import defeats the fail-closed guard: auth.py raises RuntimeError
 # (not ImportError) when SECRET_KEY is unset, which would crash the whole agent
@@ -201,7 +202,7 @@ class TradingAPI:
             """Public health check (no sensitive data)."""
             return jsonify({
                 'status': 'ok',
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': utc_now().isoformat()
             })
 
         @self.app.route('/api/login', methods=['POST'])
@@ -835,13 +836,34 @@ class TradingAPI:
                 cp = self.trading_agent.config.get('cash_policy', {})
                 payload['cash']['target_deployment_pct'] = round(cp.get('target_deployment', 0.8) * 100, 1)
                 payload['cash']['policy_enabled'] = bool(cp.get('enabled'))
+                # Symbols the risk layer is refusing to re-enter. Without this
+                # a cooled-down symbol is indistinguishable from one with no
+                # signal — the board would silently omit why it isn't trading.
+                from src.api.cooldown_view import build_cooldown_view
+                payload['cooldowns'] = build_cooldown_view(
+                    getattr(self.trading_agent, 'exposure_guard', None))
                 return payload
             try:
                 return jsonify(self._cached('agent_focus', 15, produce))
             except Exception as e:
                 logger.error(f"Error building agent focus: {e}")
                 return jsonify({'holding': [], 'reviewing': [], 'traded': [],
-                                 'cash': {'cash': 0, 'equity': 0, 'deployed_pct': 0.0}})
+                                 'cash': {'cash': 0, 'equity': 0, 'deployed_pct': 0.0},
+                                 'cooldowns': {'active': [], 'count': 0,
+                                               'cooldown_seconds': 0}})
+
+        @self.app.route('/api/cooldowns', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_cooldowns():
+            """Symbols under a post-exit re-entry cooldown, and for how long."""
+            try:
+                from src.api.cooldown_view import build_cooldown_view
+                return jsonify(build_cooldown_view(
+                    getattr(self.trading_agent, 'exposure_guard', None)))
+            except Exception as e:
+                logger.error(f"Error building cooldown view: {e}")
+                return jsonify({'active': [], 'count': 0, 'cooldown_seconds': 0})
 
         @self.app.route('/api/sleeve', methods=['GET'])
         @require_rate_limit

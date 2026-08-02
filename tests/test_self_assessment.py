@@ -30,19 +30,28 @@ def mock_llm_orchestrator():
 
 
 @pytest.fixture
+def overlay_path(tmp_path):
+    """Keep auto-applied changes out of the real data/ overlay."""
+    return str(tmp_path / "config_overlay.json")
+
+
+@pytest.fixture
 def sample_config():
+    # `strategies` (not a top-level `strategy_weights` dict) is the canonical
+    # home for weights — it is what StrategyManager actually reads.
     return {
-        "strategy_weights": {
-            "momentum": 1.0,
-            "mean_reversion": 1.0,
-            "rsi_strategy": 0.8
+        "strategies": {
+            "momentum": {"type": "technical", "enabled": True, "weight": 1.0},
+            "mean_reversion": {"type": "technical", "enabled": True, "weight": 1.0},
+            "rsi_strategy": {"type": "technical", "enabled": True, "weight": 0.8},
         },
         "risk_limits": {
             "stop_loss_pct": 0.05,
             "trailing_stop_pct": 0.03
         },
         "execution": {
-            "min_order_size": 100
+            "min_order_size": 100,
+            "max_order_size": 10000
         }
     }
 
@@ -60,9 +69,16 @@ def test_self_assessment_init(mock_llm_orchestrator, mock_escalation_manager, sa
     engine.close()
 
 
-def test_apply_improvements_safe(mock_llm_orchestrator, mock_escalation_manager, sample_config, temp_db):
-    """Verify safe improvements (weights/min order size) are auto-applied."""
-    engine = SelfAssessmentEngine(mock_llm_orchestrator, mock_escalation_manager, sample_config, temp_db)
+def test_apply_improvements_safe(mock_llm_orchestrator, mock_escalation_manager, sample_config, temp_db, overlay_path):
+    """Verify safe improvements (weights/min order size) are auto-applied.
+
+    Asserts against config['strategies'][n]['weight'] rather than the old
+    config['strategy_weights'][n]: the latter was written by the engine but
+    read by nothing, so this test used to pass while the self-improvement
+    loop had no effect on trading behaviour.
+    """
+    engine = SelfAssessmentEngine(mock_llm_orchestrator, mock_escalation_manager, sample_config, temp_db,
+                                  overlay_path=overlay_path)
     
     plan = {
         "assessment_id": 1,
@@ -87,8 +103,8 @@ def test_apply_improvements_safe(mock_llm_orchestrator, mock_escalation_manager,
     assert len(auto_applied) == 2
     assert len(escalated) == 0
     
-    # Verify values actually modified in self.config
-    assert engine.config["strategy_weights"]["momentum"] == 1.3
+    # Verify values actually modified where the running system reads them
+    assert engine.config["strategies"]["momentum"]["weight"] == 1.3
     assert engine.config["execution"]["min_order_size"] == 120
     
     # Verify logged to improvements table

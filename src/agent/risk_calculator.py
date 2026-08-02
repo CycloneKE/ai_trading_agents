@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from scipy import stats
 from scipy.optimize import minimize
 import warnings
+from src.utils.timeutil import utc_now
 
 warnings.filterwarnings('ignore')
 logger = logging.getLogger(__name__)
@@ -453,7 +454,7 @@ class RiskCalculator:
                     'type': 'portfolio_var_breach',
                     'message': f"Portfolio VaR ({abs(var_95):.3f}) exceeds limit ({self.max_portfolio_risk:.3f})",
                     'severity': 'high',
-                    'timestamp': datetime.utcnow().isoformat()
+                    'timestamp': utc_now().isoformat()
                 })
             
             # Check position sizes
@@ -465,7 +466,7 @@ class RiskCalculator:
                         'type': 'position_size_breach',
                         'message': f"Position {symbol} ({weight:.3f}) exceeds size limit ({self.max_position_size:.3f})",
                         'severity': 'medium',
-                        'timestamp': datetime.utcnow().isoformat()
+                        'timestamp': utc_now().isoformat()
                     })
             
             # Check correlation exposure
@@ -475,14 +476,14 @@ class RiskCalculator:
                     'type': 'correlation_breach',
                     'message': f"Maximum correlation ({max_correlation:.3f}) exceeds limit ({self.max_correlation_exposure:.3f})",
                     'severity': 'medium',
-                    'timestamp': datetime.utcnow().isoformat()
+                    'timestamp': utc_now().isoformat()
                 })
             
             # Store alerts
             self.risk_alerts.extend(alerts)
             
             # Keep only recent alerts
-            cutoff_time = datetime.utcnow() - timedelta(hours=24)
+            cutoff_time = utc_now() - timedelta(hours=24)
             self.risk_alerts = [
                 alert for alert in self.risk_alerts
                 if datetime.fromisoformat(alert['timestamp']) > cutoff_time

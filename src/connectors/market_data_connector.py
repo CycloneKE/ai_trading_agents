@@ -8,6 +8,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 import pandas as pd
 import requests
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,7 @@ class YahooFinanceConnector(BaseConnector):
                         results[symbol] = {
                             'price': float(hist['Close'].iloc[-1]),
                             'volume': int(hist['Volume'].iloc[-1]),
-                            'timestamp': datetime.utcnow().isoformat()
+                            'timestamp': utc_now().isoformat()
                         }
                     else:
                         logger.warning(f"yfinance returned empty data for {symbol}")
@@ -192,7 +193,7 @@ class AlphaVantageConnector(BaseConnector):
                         results[symbol] = {
                             'price': float(quote.get('05. price', 0)),
                             'volume': int(quote.get('06. volume', 0)),
-                            'timestamp': datetime.utcnow().isoformat()
+                            'timestamp': utc_now().isoformat()
                         }
                     else:
                         logger.warning(f"AlphaVantage returned no quote for {symbol}")
@@ -282,7 +283,7 @@ class FinnhubConnector(BaseConnector):
                     'low': float(q.get('l', 0)),
                     'volume': 0,  # not provided by the quote endpoint
                     'change_percent': float(q.get('dp') or 0),
-                    'timestamp': datetime.utcnow().isoformat(),
+                    'timestamp': utc_now().isoformat(),
                     'source': 'finnhub',
                 }
 

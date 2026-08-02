@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 import numpy as np
 import json
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ class AdaptationAction:
     parameters: Dict[str, Any]
     expected_impact: float
     confidence: float
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=utc_now)
 
 class SelfAdaptiveAgent:
     """
@@ -72,7 +73,7 @@ class SelfAdaptiveAgent:
         self.market_regime: str = "normal"
         self.adaptation_threshold = config.get('adaptation_threshold', 0.1)
         self.learning_rate = config.get('learning_rate', 0.01)
-        self.last_adaptation = datetime.utcnow()
+        self.last_adaptation = utc_now()
         self.adaptation_cooldown = timedelta(hours=config.get('adaptation_cooldown_hours', 24))
         
         # Initialize default goals
@@ -111,7 +112,7 @@ class SelfAdaptiveAgent:
     def _should_adapt(self) -> bool:
         """Determine if agent should adapt based on current state"""
         # Cooldown check
-        if datetime.utcnow() - self.last_adaptation < self.adaptation_cooldown:
+        if utc_now() - self.last_adaptation < self.adaptation_cooldown:
             return False
         
         # Performance-based triggers
@@ -159,7 +160,7 @@ class SelfAdaptiveAgent:
             best_action = max(adaptation_actions, key=lambda x: x.expected_impact * x.confidence)
             self._execute_adaptation(best_action)
             self.adaptation_history.append(best_action)
-            self.last_adaptation = datetime.utcnow()
+            self.last_adaptation = utc_now()
     
     def _generate_adaptation_actions(self) -> List[AdaptationAction]:
         """Generate possible adaptation actions"""
