@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_POSITION_PCT = 0.05
 DEFAULT_COOLDOWN_SECONDS = 900          # 15 minutes; 0 disables
 DEFAULT_MIN_NOTIONAL = 5.0              # mirrors position_sizing
+DEFAULT_MAX_NET_EXPOSURE = 0.30         # |long - short| / equity
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS forced_exits (
@@ -67,6 +68,11 @@ class ExposureGuard:
             limits.get('max_position_size', DEFAULT_MAX_POSITION_PCT))
         self.cooldown_seconds = float(
             limits.get('reentry_cooldown_seconds', DEFAULT_COOLDOWN_SECONDS))
+        # Bounds the directional bet across the whole book. The per-symbol cap
+        # alone does not: eleven separate 5% longs is a 55% long book that
+        # simply tracks the index.
+        self.max_net_exposure = float(
+            limits.get('max_net_exposure', DEFAULT_MAX_NET_EXPOSURE))
         # Headroom smaller than this is not usable: the caller would journal
         # an intent (burning a client_order_id) only for size_order to reject
         # it. Kept in sync with position_sizing.DEFAULT_MIN_NOTIONAL.
@@ -88,7 +94,8 @@ class ExposureGuard:
                            existing_qty: Optional[float],
                            price: Optional[float],
                            equity: Optional[float],
-                           target_value: Optional[float]) -> float:
+                           target_value: Optional[float],
+                           net_notional: Optional[float] = None) -> float:
         """Dollar notional this order may actually use (0.0 = send nothing).
 
         `existing_qty` is signed: positive long, negative short.
@@ -141,6 +148,8 @@ class ExposureGuard:
             logger.info(
                 f"Exposure gate: trimming {side} {symbol} from ${target_value:,.0f} "
                 f"to ${allowed:,.0f} (holding ${held_notional:,.0f} of ${cap:,.0f})")
+
+        allowed = self._apply_net_cap(symbol, side, allowed, equity, net_notional)
         return allowed
 
     def _cap(self, equity: Optional[float]) -> Optional[float]:
@@ -148,6 +157,44 @@ class ExposureGuard:
         if not equity or equity <= 0:
             return None
         return float(equity) * self.max_position_pct
+
+    def _apply_net_cap(self, symbol: str, side: str, allowed: float,
+                       equity: Optional[float],
+                       net_notional: Optional[float]) -> float:
+        """Trim an ADD so the book's net directional exposure stays bounded.
+
+        `net_notional` is signed: long positive, short negative. Passing None
+        skips the check entirely, so existing six-argument callers are
+        unaffected. An order that moves the book toward neutral always
+        passes — capping a de-risking trade would be perverse.
+        """
+        if net_notional is None or allowed <= 0:
+            return allowed
+        cap = self._cap_net(equity)
+        if cap is None:
+            return allowed
+
+        signed = allowed if side == 'buy' else -allowed
+        prospective = net_notional + signed
+        if abs(prospective) <= abs(net_notional) or abs(prospective) <= cap:
+            return allowed
+
+        # Trim to whatever keeps |net| exactly at the cap.
+        headroom = cap - abs(net_notional)
+        if headroom < self.min_notional:
+            logger.warning(
+                f"Exposure gate: refusing {side} {symbol} — net exposure "
+                f"${abs(net_notional):,.0f} against a ${cap:,.0f} cap")
+            return 0.0
+        logger.info(
+            f"Exposure gate: trimming {side} {symbol} to ${headroom:,.0f} "
+            f"on net-exposure cap")
+        return headroom
+
+    def _cap_net(self, equity: Optional[float]) -> Optional[float]:
+        if not equity or equity <= 0:
+            return None
+        return float(equity) * self.max_net_exposure
 
     # ------------------------------------------------------------------
     # Post-exit cooldown

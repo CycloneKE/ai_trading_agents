@@ -234,3 +234,84 @@ def test_defaults_match_the_shipped_config_when_keys_are_absent():
         g.close()
     finally:
         os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Portfolio net exposure
+#
+# The objective is absolute return uncorrelated to the market. A per-symbol
+# cap does not deliver that: eleven separate 5% longs is a 55% long book that
+# tracks SPY. This bounds the directional bet across the whole portfolio.
+# ---------------------------------------------------------------------------
+
+def test_add_within_the_net_cap_is_allowed(guard):
+    got = guard.permitted_notional('TSLA', 'buy', 0.0, PRICE, EQUITY, 2_000.0,
+                                   net_notional=10_000.0)
+    assert got == 2_000.0
+
+
+def test_add_beyond_the_net_cap_is_trimmed(guard):
+    """Net long $29k of a $30k cap leaves $1k of headroom."""
+    got = guard.permitted_notional('TSLA', 'buy', 0.0, PRICE, EQUITY, 4_000.0,
+                                   net_notional=29_000.0)
+    assert got == pytest.approx(1_000.0)
+
+
+def test_add_at_the_net_cap_is_refused(guard):
+    got = guard.permitted_notional('TSLA', 'buy', 0.0, PRICE, EQUITY, 2_000.0,
+                                   net_notional=30_000.0)
+    assert got == 0.0
+
+
+def test_short_side_net_cap_is_symmetric(guard):
+    got = guard.permitted_notional('TSLA', 'sell', 0.0, PRICE, EQUITY, 2_000.0,
+                                   net_notional=-30_000.0)
+    assert got == 0.0
+
+
+def test_an_order_that_reduces_net_exposure_always_passes(guard):
+    """Net long $50k (over cap) and selling: this brings the book back toward
+    neutral and must never be blocked."""
+    got = guard.permitted_notional('TSLA', 'sell', 200.0, PRICE, EQUITY, 5_000.0,
+                                   net_notional=50_000.0)
+    assert got == 5_000.0
+
+
+def test_exits_are_never_blocked_by_the_net_cap(guard):
+    held = 40_000.0 / PRICE
+    got = guard.permitted_notional('TSLA', 'sell', held, PRICE, EQUITY, 40_000.0,
+                                   net_notional=60_000.0)
+    assert got == 40_000.0
+
+
+def test_omitting_net_notional_skips_the_check(guard):
+    """Back-compat: every existing caller passes six arguments."""
+    got = guard.permitted_notional('TSLA', 'buy', 0.0, PRICE, EQUITY, 2_000.0)
+    assert got == 2_000.0
+
+
+def test_the_tighter_of_the_two_caps_wins(guard):
+    """Per-symbol headroom is $5,000; net headroom is $500."""
+    got = guard.permitted_notional('TSLA', 'buy', 0.0, PRICE, EQUITY, 4_000.0,
+                                   net_notional=29_500.0)
+    assert got == pytest.approx(500.0)
+
+
+def test_net_dust_headroom_is_refused(guard):
+    got = guard.permitted_notional('TSLA', 'buy', 0.0, PRICE, EQUITY, 2_000.0,
+                                   net_notional=29_999.0)
+    assert got == 0.0
+
+
+def test_net_cap_is_configurable():
+    g, path = make_guard(risk_limits={'max_net_exposure': 0.10})
+    try:
+        assert g.permitted_notional('TSLA', 'buy', 0.0, PRICE, EQUITY, 2_000.0,
+                                    net_notional=10_000.0) == 0.0
+    finally:
+        g.close()
+        os.unlink(path)
+
+
+def test_net_cap_default_is_thirty_percent(guard):
+    assert guard.max_net_exposure == pytest.approx(0.30)
