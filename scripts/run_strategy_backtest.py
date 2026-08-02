@@ -26,7 +26,44 @@ CONFIG = 'config/config.json'
 CAPITAL = 100_000.0
 
 
-def summarise(name, res, benchmark):
+def correlation(a, b):
+    """Pearson correlation of two equal-length return series."""
+    n = min(len(a), len(b))
+    if n < 3:
+        return 0.0
+    a, b = a[:n], b[:n]
+    ma, mb = sum(a) / n, sum(b) / n
+    cov = sum((a[i] - ma) * (b[i] - mb) for i in range(n))
+    va = sum((x - ma) ** 2 for x in a) ** 0.5
+    vb = sum((x - mb) ** 2 for x in b) ** 0.5
+    return cov / (va * vb) if va and vb else 0.0
+
+
+def daily_returns(values):
+    return [(values[i] - values[i - 1]) / values[i - 1]
+            for i in range(1, len(values)) if values[i - 1]]
+
+
+ACCEPTANCE = {
+    'min_sharpe': 0.5, 'max_abs_correlation': 0.3,
+    'max_drawdown': 0.15, 'min_trades': 100,
+}
+
+
+def verdict(summary, baseline_sharpe):
+    """Every criterion from the spec, reported individually."""
+    checks = {
+        'sharpe > 0.5': summary['sharpe'] > ACCEPTANCE['min_sharpe'],
+        '|SPY correlation| < 0.3':
+            abs(summary['correlation_to_spy']) < ACCEPTANCE['max_abs_correlation'],
+        'max drawdown < 15%': summary['max_drawdown'] < ACCEPTANCE['max_drawdown'],
+        'trades > 100': summary['trades'] > ACCEPTANCE['min_trades'],
+        'beats baseline sharpe': summary['sharpe'] > baseline_sharpe,
+    }
+    return checks, all(checks.values())
+
+
+def summarise(name, res, benchmark, spy_returns):
     excess = res.total_return - benchmark
     return {
         'window': name,
@@ -48,6 +85,9 @@ def summarise(name, res, benchmark):
         'cooldown_blocks': res.cooldown_blocks,
         'stop_exits': sum(1 for t in res.trades if t.reason == 'stop_loss'),
         'trailing_exits': sum(1 for t in res.trades if t.reason == 'trailing_stop'),
+        'correlation_to_spy': round(
+            correlation(daily_returns([p['equity'] for p in res.equity_curve]),
+                        spy_returns), 3),
     }
 
 
@@ -89,7 +129,7 @@ def main():
 
     full = run_backtest(history, config, initial_capital=CAPITAL)
     results.append(summarise('full period (in-sample)', full,
-                             buy_and_hold_return(spy)))
+                             buy_and_hold_return(spy), daily_returns(spy)))
 
     # Walk-forward: the second half is data the parameters were never chosen
     # against. Nothing here is fitted, but the split still guards against a
@@ -100,14 +140,43 @@ def main():
                                                       slice(mid, n))):
         window = {s: c[sl] for s, c in history.items()}
         res = run_backtest(window, config, initial_capital=CAPITAL)
-        results.append(summarise(label, res, buy_and_hold_return(spy[sl])))
+        results.append(summarise(label, res, buy_and_hold_return(spy[sl]),
+                                 daily_returns(spy[sl])))
 
     for s in results:
         show(s)
 
-    json.dump({'results': results}, open(OUT, 'w'), indent=2)
+    # A/B on the out-of-sample half, with parameters frozen by Task 5.
+    n = min(len(c) for c in history.values())
+    oos = {s: c[n // 2:] for s, c in history.items()}
+    oos_spy = daily_returns(spy[n // 2:])
+
+    baseline_cfg = json.loads(json.dumps(config))
+    baseline_cfg['ensemble_method'] = 'adaptive_confidence'
+    baseline = summarise('OOS baseline (current ensemble)',
+                         run_backtest(oos, baseline_cfg, initial_capital=CAPITAL),
+                         buy_and_hold_return(spy[n // 2:]), oos_spy)
+
+    routed_cfg = json.loads(json.dumps(config))
+    routed_cfg['ensemble_method'] = 'regime_routed'
+    routed = summarise('OOS regime_routed',
+                       run_backtest(oos, routed_cfg, initial_capital=CAPITAL),
+                       buy_and_hold_return(spy[n // 2:]), oos_spy)
+
+    show(baseline)
+    show(routed)
+
+    checks, passed = verdict(routed, baseline['sharpe'])
+    print('\n--- ACCEPTANCE GATE (out-of-sample) ---')
+    for name, ok in checks.items():
+        print(f"  [{'PASS' if ok else 'FAIL'}] {name}")
+    print(f"\n  VERDICT: {'PASS — cleared for live config' if passed else 'FAIL — do not ship'}")
+
+    results.extend([baseline, routed])
+    json.dump({'results': results, 'acceptance': checks, 'passed': passed},
+              open(OUT, 'w'), indent=2)
     print(f"\nwrote {OUT}")
-    return 0
+    return 0 if passed else 1
 
 
 if __name__ == '__main__':
