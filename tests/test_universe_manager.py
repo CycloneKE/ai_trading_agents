@@ -188,3 +188,81 @@ def test_a_non_finite_price_or_volume_is_rejected():
         out = propose_additions({'AAPL'}, [candidate('X', **bad)],
                                 {'AAPL': UP, 'X': NOISE}, CFG)
         assert out == [], f'admitted a candidate with {bad}'
+
+
+# ---------------------------------------------------------------------------
+# Removals
+#
+# Nothing proposes removals today, so a dead or persistently losing symbol
+# stays in the universe forever, consuming API quota and LLM calls.
+# ---------------------------------------------------------------------------
+
+from src.agent.universe_manager import propose_removals
+
+RCFG = {'universe': {'min_avg_dollar_volume': 1_000_000,
+                     'max_consecutive_losses': 4, 'max_undefined_days': 30}}
+
+
+def stat(**over):
+    base = {'consecutive_losses': 0, 'undefined_regime_days': 0,
+            'avg_dollar_volume': 5_000_000, 'attribution': 100.0}
+    base.update(over)
+    return base
+
+
+def test_a_healthy_symbol_is_kept():
+    assert propose_removals({'AAPL'}, {'AAPL': stat()}, RCFG) == []
+
+
+def test_consecutive_losses_trigger_a_removal():
+    out = propose_removals({'TSLA'}, {'TSLA': stat(consecutive_losses=5)}, RCFG)
+    assert [r['symbol'] for r in out] == ['TSLA']
+    assert 'consecutive' in out[0]['reason'].lower()
+
+
+def test_a_symbol_stuck_in_undefined_regime_is_removed():
+    """The router can never trade it, so it is pure overhead."""
+    out = propose_removals({'XLE'}, {'XLE': stat(undefined_regime_days=45)}, RCFG)
+    assert [r['symbol'] for r in out] == ['XLE']
+    assert 'regime' in out[0]['reason'].lower()
+
+
+def test_a_symbol_gone_illiquid_is_removed():
+    out = propose_removals({'THIN'}, {'THIN': stat(avg_dollar_volume=5_000)}, RCFG)
+    assert [r['symbol'] for r in out] == ['THIN']
+
+
+def test_persistently_negative_attribution_triggers_a_removal():
+    out = propose_removals({'XLV'}, {'XLV': stat(attribution=-500.0)}, RCFG)
+    assert [r['symbol'] for r in out] == ['XLV']
+
+
+def test_a_symbol_at_the_threshold_is_kept():
+    """Boundary: 4 losses is the limit, not a breach."""
+    assert propose_removals({'TSLA'}, {'TSLA': stat(consecutive_losses=4)}, RCFG) == []
+
+
+def test_a_symbol_with_no_stats_is_kept():
+    """Absence of evidence is not evidence of failure."""
+    assert propose_removals({'NEW'}, {}, RCFG) == []
+
+
+def test_only_one_proposal_per_symbol():
+    out = propose_removals({'BAD'}, {'BAD': stat(consecutive_losses=9,
+                                                 attribution=-900.0,
+                                                 avg_dollar_volume=1.0)}, RCFG)
+    assert len(out) == 1
+
+
+def test_a_symbol_with_non_finite_stats_is_kept():
+    """A NaN/Infinity stat is unreadable, not evidence of failure — treat it
+    the same as a missing stat and keep the symbol rather than silently
+    misjudging it."""
+    out = propose_removals(
+        {'CORRUPT'},
+        {'CORRUPT': stat(consecutive_losses=float('nan'),
+                          undefined_regime_days=float('inf'),
+                          avg_dollar_volume=float('nan'),
+                          attribution=float('nan'))},
+        RCFG)
+    assert out == []

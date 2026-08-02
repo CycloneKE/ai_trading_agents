@@ -163,6 +163,61 @@ def _screen_one(cand: Any, tracked: Set[str], history: Dict[str, List[float]],
             'market': cand.get('market', 'us')}
 
 
+DEFAULT_MAX_CONSECUTIVE_LOSSES = 4
+DEFAULT_MAX_UNDEFINED_DAYS = 30
+
+
+def propose_removals(tracked: Set[str], stats: Dict[str, Dict[str, Any]],
+                     cfg: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
+    """Symbols that have earned their way out of the universe.
+
+    One proposal per symbol, first matching reason wins — an operator does
+    not need four escalations telling them the same name is bad.
+
+    A symbol with no stats entry is KEPT. Absence of evidence is not
+    evidence of failure, and silently dropping unmeasured names would
+    shrink the universe by accident.
+
+    Each stat is coerced with `_finite_number` before being judged. A NaN
+    or Infinity in `consecutive_losses`, `undefined_regime_days`,
+    `avg_dollar_volume` or `attribution` is unreadable, not evidence of
+    failure — comparisons against NaN are always False, so trusting the raw
+    value would silently and permanently mask a real breach. An unreadable
+    stat is treated the same as a missing one: no evidence, so KEEP.
+    """
+    section = (cfg or {}).get('universe') or {}
+    min_volume = float(section.get('min_avg_dollar_volume', DEFAULT_MIN_DOLLAR_VOLUME))
+    max_losses = int(section.get('max_consecutive_losses', DEFAULT_MAX_CONSECUTIVE_LOSSES))
+    max_undefined = int(section.get('max_undefined_days', DEFAULT_MAX_UNDEFINED_DAYS))
+
+    out = []
+    for symbol in sorted(tracked or set()):
+        s = stats.get(symbol)
+        if not s:
+            continue
+
+        losses = _finite_number(s.get('consecutive_losses'))
+        undefined_days = _finite_number(s.get('undefined_regime_days'))
+        volume = _finite_number(s.get('avg_dollar_volume'))
+        attribution = _finite_number(s.get('attribution'))
+
+        if losses is not None and losses > max_losses:
+            reason = f'{losses:g} consecutive losing round trips (limit {max_losses})'
+        elif undefined_days is not None and undefined_days > max_undefined:
+            reason = (f'regime undefined for {undefined_days:g} days — '
+                      f'the router can never trade it')
+        elif volume is not None and volume < min_volume:
+            reason = f'average dollar volume ${volume:,.0f} below ${min_volume:,.0f}'
+        elif attribution is not None and attribution < 0:
+            reason = f'negative attribution ${attribution:,.0f} over the review window'
+        else:
+            continue
+
+        logger.info(f"Universe: proposing removal of {symbol} — {reason}")
+        out.append({'symbol': symbol, 'reason': reason})
+    return out
+
+
 def _finite_number(value: Any) -> Optional[float]:
     """Coerce to a finite float, or None. NaN and Infinity are None: they
     pass every `<` comparison silently instead of failing loudly."""
