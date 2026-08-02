@@ -101,3 +101,90 @@ def test_correlation_of_a_flat_series_is_zero_not_nan():
 
 def test_correlation_of_short_series_is_zero():
     assert correlation([1.0, 2.0], [1.0, 2.0]) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Unscreenable input must REJECT, not admit
+#
+# Sixth occurrence of the NaN-defeats-comparison class in this codebase. Here
+# the direction matters: a NaN correlation compares False against the
+# threshold, so a maximally-correlated candidate is silently APPROVED. And
+# returning 0.0 ("uncorrelated") is not a safe fallback either — 0.0 also
+# admits. Unscreenable data must be refused, exactly as insufficient history
+# already is.
+# ---------------------------------------------------------------------------
+
+import math
+
+NAN = float('nan')
+INF = float('inf')
+
+
+def test_correlation_never_returns_nan_for_contaminated_input():
+    """The contract is "never NaN", not "returns zero". Non-finite bars are
+    dropped and the remaining clean bars are correlated normally — a NaN
+    result is what would be dangerous, because it compares False against
+    every threshold and waves the candidate through."""
+    dirty = [NAN] + [100.0 + i for i in range(59)]
+    got = correlation(UP, dirty)
+    assert not math.isnan(got), 'NaN compares False against every threshold'
+    assert -1.0 <= got <= 1.0
+
+
+def test_correlation_never_returns_nan_for_infinite_input():
+    dirty = [INF] + [100.0 + i for i in range(59)]
+    got = correlation(UP, dirty)
+    assert not math.isnan(got)
+    assert -1.0 <= got <= 1.0
+
+
+def test_a_zero_price_does_not_raise():
+    """A zero close would divide by zero in the returns calculation."""
+    got = correlation(UP, [0.0] + [100.0 + i for i in range(59)])
+    assert not math.isnan(got)
+
+
+def test_a_candidate_with_contaminated_history_is_rejected():
+    """THE bug: a NaN in QQQ's series made the correlation NaN, so
+    `abs(nan) > 0.9` was False and a duplicate of SPY was approved."""
+    dirty = [NAN] + [100.0 + i for i in range(59)]
+    out = propose_additions({'SPY'}, [candidate('QQQ')], {'SPY': UP, 'QQQ': dirty}, CFG)
+    assert out == []
+
+
+def test_a_tracked_symbol_with_contaminated_history_does_not_admit_a_duplicate():
+    """The contamination can be on the HELD side too — same outcome required."""
+    dirty = [NAN] + [100.0 + i for i in range(59)]
+    out = propose_additions({'SPY'}, [candidate('QQQ')], {'SPY': dirty, 'QQQ': ALSO_UP}, CFG)
+    assert out == []
+
+
+# --------------------------------------------------- malformed input
+
+def test_one_malformed_candidate_does_not_poison_the_batch():
+    """universe_scout feeds this directly; one bad row must not block
+    screening of every other candidate in the same call."""
+    good = candidate('NFLX')
+    bad = candidate('BAD', avg_dollar_volume='not-a-number')
+    out = propose_additions({'AAPL'}, [bad, good],
+                            {'AAPL': UP, 'NFLX': NOISE, 'BAD': NOISE}, CFG)
+    assert [c['symbol'] for c in out] == ['NFLX']
+
+
+def test_a_none_candidate_entry_is_skipped():
+    out = propose_additions({'AAPL'}, [None, candidate('NFLX')],
+                            {'AAPL': UP, 'NFLX': NOISE}, CFG)
+    assert [c['symbol'] for c in out] == ['NFLX']
+
+
+def test_a_candidate_missing_its_numeric_fields_is_rejected():
+    out = propose_additions({'AAPL'}, [{'symbol': 'X', 'reason': 'r'}],
+                            {'AAPL': UP, 'X': NOISE}, CFG)
+    assert out == []
+
+
+def test_a_non_finite_price_or_volume_is_rejected():
+    for bad in ({'price': NAN}, {'avg_dollar_volume': NAN}, {'price': INF}):
+        out = propose_additions({'AAPL'}, [candidate('X', **bad)],
+                                {'AAPL': UP, 'X': NOISE}, CFG)
+        assert out == [], f'admitted a candidate with {bad}'
