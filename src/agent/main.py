@@ -1404,9 +1404,20 @@ class TradingAgent:
                             from src.agent.exposure import ExposureGuard
                             self.exposure_guard = ExposureGuard(self.config)
 
+                        # Signed net across the whole book, so the gate can
+                        # bound the directional bet, not just per-symbol size.
+                        net_notional = 0.0
+                        try:
+                            for p in (broker.get_positions() or []):
+                                px = getattr(p, 'current_price', None) or price
+                                net_notional += float(p.quantity) * float(px)
+                        except Exception as e:
+                            logger.debug(f"Net exposure lookup failed: {e}")
+
                         permitted = self.exposure_guard.permitted_notional(
                             symbol, action, existing_qty, price,
-                            portfolio_value, target_pos_value)
+                            portfolio_value, target_pos_value,
+                            net_notional=net_notional)
                         if permitted <= 0:
                             _note(symbol, 'exposure_cap')
                             continue

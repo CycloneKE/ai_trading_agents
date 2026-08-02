@@ -201,3 +201,34 @@ def test_trading_resumes_once_the_cooldown_expires(rig):
     agent.exposure_guard.record_forced_exit('TSLA', 'stop_loss')
     run_cycles(agent, buy_signal(), 1)
     assert len(broker.placed) == 1
+
+
+def test_net_exposure_is_passed_to_the_gate(rig):
+    """The cap is worthless if the loop never tells the gate what the book
+    currently looks like."""
+    agent, broker = rig
+    seen = {}
+    real = agent.exposure_guard.permitted_notional
+
+    def spy(*args, **kwargs):
+        seen['net'] = kwargs.get('net_notional')
+        return real(*args, **kwargs)
+
+    agent.exposure_guard.permitted_notional = spy
+    run_cycles(agent, buy_signal(), 1)
+    assert seen.get('net') is not None
+
+
+def test_net_exposure_reflects_existing_positions(rig):
+    agent, broker = rig
+    broker.qty = 100.0                      # 100 sh * $310 = $31,000 long
+    seen = {}
+    real = agent.exposure_guard.permitted_notional
+
+    def spy(*args, **kwargs):
+        seen['net'] = kwargs.get('net_notional')
+        return real(*args, **kwargs)
+
+    agent.exposure_guard.permitted_notional = spy
+    run_cycles(agent, buy_signal(), 1)
+    assert seen['net'] == pytest.approx(31_000.0)
