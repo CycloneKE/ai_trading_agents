@@ -6,6 +6,8 @@ strategy per regime replaces that averaging, so this classifier decides
 which strategy runs.
 """
 
+import math
+
 import pytest
 
 from src.agent.regime import (
@@ -120,3 +122,58 @@ def test_classify_negative_window_is_undefined_not_misclassified():
 def test_classify_zero_window_is_undefined():
     cfg = {'regime': {'window': 0, 'trend_threshold': 0.35, 'range_threshold': 0.20}}
     assert classify(STRAIGHT_UP, None, cfg) == UNDEFINED
+
+
+# --- Corrupt data (NaN / Infinity) must never produce a confident verdict ---
+#
+# A NaN in the window makes every comparison against it False, so a naive
+# `path <= 0` flat-guard misses it, `net / path` becomes NaN, and
+# `min(1.0, nan)` returns 1.0 in CPython -- the single most confident
+# possible TRENDING signal from the single least trustworthy input.
+
+
+def test_efficiency_ratio_nan_in_window_returns_zero():
+    closes = [100.0] * 10 + [float('nan')]
+    assert efficiency_ratio(closes, 10) == 0.0
+
+
+def test_efficiency_ratio_positive_infinity_in_window_returns_zero():
+    closes = [100.0] * 10 + [float('inf')]
+    assert efficiency_ratio(closes, 10) == 0.0
+
+
+def test_efficiency_ratio_negative_infinity_in_window_returns_zero():
+    closes = [100.0] * 10 + [float('-inf')]
+    assert efficiency_ratio(closes, 10) == 0.0
+
+
+def test_efficiency_ratio_nan_earlier_in_window_returns_zero():
+    closes = [100.0, float('nan')] + [100.0 + i for i in range(9)]
+    assert efficiency_ratio(closes, 10) == 0.0
+
+
+def test_classify_nan_in_window_is_undefined_not_trending():
+    closes = [100.0] * 10 + [float('nan')]
+    assert classify(closes, None, CFG) == UNDEFINED
+
+
+def test_classify_positive_infinity_in_window_is_undefined():
+    closes = [100.0] * 10 + [float('inf')]
+    assert classify(closes, None, CFG) == UNDEFINED
+
+
+def test_classify_negative_infinity_in_window_is_undefined():
+    closes = [100.0] * 10 + [float('-inf')]
+    assert classify(closes, None, CFG) == UNDEFINED
+
+
+def test_classify_nan_does_not_hold_previous_trending_regime():
+    """Corrupt data must not even fall back to hysteresis -- it must be
+    UNDEFINED regardless of what regime preceded it."""
+    closes = [100.0] * 10 + [float('nan')]
+    assert classify(closes, TRENDING, CFG) == UNDEFINED
+
+
+def test_conviction_nan_in_window_is_floored_not_maximal():
+    closes = [100.0] * 10 + [float('nan')]
+    assert conviction(closes, TRENDING, CFG) == pytest.approx(0.7)

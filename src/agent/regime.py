@@ -14,6 +14,7 @@ Chosen over ADX or the Hurst exponent because it needs no library, has one
 parameter, and measures the routing criterion directly rather than by proxy.
 """
 
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 TRENDING = 'trending'
@@ -40,13 +41,22 @@ def _segment_and_path(closes: Optional[List[float]], window: int) -> Tuple[List[
     """The trailing `window`-bar segment and the total distance walked in it.
 
     Single source of truth for "what counts as a usable window" (non-empty
-    history, positive window, enough bars) and "what counts as flat" (zero
-    path). Returns `([], 0.0)` whenever the window can't be evaluated —
-    never raises, because this runs inside the per-bar signal path.
+    history, positive window, enough bars, all-finite prices) and "what
+    counts as flat" (zero path). Returns `([], 0.0)` whenever the window
+    can't be evaluated — never raises, because this runs inside the
+    per-bar signal path.
+
+    A NaN or Infinity anywhere in the segment makes every comparison
+    against it False, so a plain `path <= 0` check would miss it and let
+    a contaminated `net / path` (NaN) slip through `min(1.0, ...)`, which
+    returns 1.0 in CPython -- the most confident possible verdict from
+    the least trustworthy input. Reject it here, once, for every caller.
     """
     if not closes or window < 1 or len(closes) < window + 1:
         return [], 0.0
     segment = closes[-(window + 1):]
+    if not all(math.isfinite(price) for price in segment):
+        return [], 0.0
     path = sum(abs(segment[i] - segment[i - 1]) for i in range(1, len(segment)))
     return segment, path
 
