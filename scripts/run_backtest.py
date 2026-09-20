@@ -215,15 +215,33 @@ def buy_and_hold(data, symbols, initial_capital):
 # -------------------------------------------------------------------- strategy
 
 def build_strategy_fn(cfg, manager, engine, stop_loss_pct, trailing_pct,
-                      max_position_pct, min_confidence):
+                      max_position_pct, min_confidence, vol=None, data=None):
     """Bar-by-bar signal -> order translation, mirroring the live loop's rules."""
+    from src.agent.position_sizing import volatility_scaled_value
+    from src.agent.volatility import stop_distances
     peak_price = {}
-    stats = {'signals': 0, 'stops': 0, 'blocked_cash': 0}
+    stats = {'signals': 0, 'stops': 0, 'blocked_cash': 0, 'atr_sized': 0}
+    limits = cfg.get('risk_limits', {})
+    risk_per_trade = cfg.get('trading', {}).get('risk_per_trade', 0.005)
+    stop_mult = limits.get('stop_loss_atr_mult', 2.5)
 
     def strategy(timestamp, prices, portfolio):
         orders = []
         pv = portfolio.get('portfolio_value', 0.0) or 0.0
         held = portfolio.get('positions', {})
+
+        # Feed this bar to the volatility tracker before it is consulted, so
+        # stops and sizing reflect current conditions rather than last bar's.
+        if vol is not None and data:
+            for sym, price in prices.items():
+                bar = data.get(sym)
+                if bar is None or timestamp not in bar.index:
+                    vol.update(sym, price)
+                    continue
+                row = bar.loc[timestamp]
+                vol.update(sym, price,
+                           row.get('high') if hasattr(row, 'get') else None,
+                           row.get('low') if hasattr(row, 'get') else None)
 
         # 1. Stop-loss and trailing-stop enforcement, before any new entry.
         for sym, pos in list(held.items()):
@@ -233,8 +251,9 @@ def build_strategy_fn(cfg, manager, engine, stop_loss_pct, trailing_pct,
             engine_pos = engine.positions.get(sym)
             entry = float(getattr(engine_pos, 'avg_price', 0.0) or 0.0)
             peak_price[sym] = max(peak_price.get(sym, price), price)
-            hit_stop = entry > 0 and price <= entry * (1 - stop_loss_pct)
-            hit_trail = price <= peak_price[sym] * (1 - trailing_pct)
+            d = stop_distances(cfg, vol.atr_pct(sym) if vol else None)
+            hit_stop = entry > 0 and price <= entry * (1 - d['stop_loss_pct'])
+            hit_trail = price <= peak_price[sym] * (1 - d['trailing_stop_pct'])
             if hit_stop or hit_trail:
                 orders.append(Order(symbol=sym, side=OrderSide.SELL,
                                     order_type=OrderType.MARKET,
@@ -263,7 +282,14 @@ def build_strategy_fn(cfg, manager, engine, stop_loss_pct, trailing_pct,
             if action == 'buy':
                 if qty_held > 0:
                     continue  # already long; this book does not pyramid
-                target_value = pv * max_position_pct * min(max(conf, 0.0), 1.0)
+                atr_pct = vol.atr_pct(sym) if vol else None
+                if atr_pct:
+                    stats['atr_sized'] += 1
+                target_value = volatility_scaled_value(
+                    pv, atr_pct, confidence=conf,
+                    risk_per_trade=risk_per_trade,
+                    stop_atr_mult=stop_mult,
+                    max_position_pct=max_position_pct)
                 qty = math.floor(target_value / price) if price > 0 else 0
                 if qty <= 0:
                     continue
@@ -390,6 +416,8 @@ def write_report(path, meta, strat, bench, strategy_stats, warnings_list):
         f"- Average holding period: {strat['avg_hold_days']:.1f} days",
         f"- Signals acted on: {strategy_stats['signals']}",
         f"- Stop-loss / trailing exits: {strategy_stats['stops']}",
+        f"- Entries sized from ATR (rest fell back to the flat cap): "
+        f"{strategy_stats.get('atr_sized', 0)}",
         f"- Total commission paid: {meta['total_commission']:,.2f}",
         f"- Interest earned on idle cash: {meta['interest_earned']:,.2f}",
         f"- Total slippage paid: {meta['total_slippage']:,.2f}",
@@ -497,12 +525,17 @@ def main():
             f"result would be a flat line, not a backtest. Install the strategy "
             f"dependencies and retry.")
 
+    # Feed a volatility tracker from the same bars, so stops and sizing use
+    # each symbol's own ATR rather than one flat percentage for all of them.
+    from src.agent.volatility import VolatilityTracker
+    vol = VolatilityTracker(length=limits.get('atr_length', 14))
+
     strat_fn = build_strategy_fn(
         cfg, manager, engine,
         stop_loss_pct=limits.get('stop_loss_pct', 0.05),
         trailing_pct=limits.get('trailing_stop_pct', 0.03),
         max_position_pct=limits.get('max_position_size', 0.05),
-        min_confidence=args.min_confidence)
+        min_confidence=args.min_confidence, vol=vol, data=data)
 
     print(f"Running {', '.join(syms)} over "
           f"{min(data[s].index.min() for s in syms).date()} -> "
