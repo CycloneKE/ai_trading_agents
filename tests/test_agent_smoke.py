@@ -36,7 +36,12 @@ def wait_for_health(url, timeout=20, password=None):
 
 def test_agent_smoke_start_and_health_check():
     # Create a temporary config enabling monitoring on a fixed port
+    # run_config.json is an operator-local file matched by .gitignore's *.json
+    # rule, so it is absent on a fresh clone and in CI. Fall back to the
+    # committed config.json, which the smoke run overrides below anyway.
     base_config_path = os.path.join('config', 'run_config.json')
+    if not os.path.exists(base_config_path):
+        base_config_path = os.path.join('config', 'config.json')
     with open(base_config_path, 'r') as f:
         base = json.load(f)
 
