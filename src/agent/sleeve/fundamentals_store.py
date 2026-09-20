@@ -33,6 +33,10 @@ class Fundamentals:
     eps_trend: str  # 'positive' | 'flat' | 'negative'
     avg_daily_volume: int
     last_updated: str  # ISO date/datetime string
+    # Optional: the next ex-dividend date, ISO format. The sleeve tilts away
+    # from buying in the days before one, since the price falls by roughly
+    # the dividend on that date.
+    ex_dividend_date: Optional[str] = None
 
     def is_stale(self, stale_days: int) -> bool:
         try:

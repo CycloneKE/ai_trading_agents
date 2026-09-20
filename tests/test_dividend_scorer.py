@@ -24,11 +24,63 @@ def test_zero_yield_excluded():
 
 
 def test_yield_above_cap_is_capped_not_boosted():
-    cfg = ScoringConfig(yield_cap_pct=12.0)
+    # Unit test of the yield-score maths alone. The sustainability gate is
+    # disabled here because a 30% yield on 1.04x cover is exactly the trap
+    # that gate now rejects outright (see the test below); leaving it on
+    # would make this a test of the gate rather than of the capping.
+    cfg = ScoringConfig(yield_cap_pct=12.0, require_sustainable=False)
     normal = score_symbol(make_fundamentals(yield_ttm_pct=10.0), cfg)
     trap = score_symbol(make_fundamentals(yield_ttm_pct=30.0), cfg)
     assert trap.yield_score == 1.0  # capped at 12%, same as any yield >= cap
     assert normal.yield_score < trap.yield_score
+
+
+def test_yield_trap_is_gated_out_entirely():
+    """A 30% yield on 1.04x cover is a cut being priced in. Scoring it highly
+    and ranking it first is how an income sleeve buys the cut."""
+    cfg = ScoringConfig(yield_cap_pct=12.0)
+    assert score_symbol(make_fundamentals(yield_ttm_pct=30.0), cfg) is None
+
+
+def test_a_high_yield_with_real_cover_is_still_admissible():
+    cfg = ScoringConfig(yield_cap_pct=12.0)
+    safe = score_symbol(make_fundamentals(yield_ttm_pct=13.0, eps_kes=8.0,
+                                          dividend_per_share_kes=2.3), cfg)
+    assert safe is not None and safe.dividend_cover > 1.5
+
+
+def test_payout_exceeding_earnings_is_gated_out():
+    cfg = ScoringConfig()
+    assert score_symbol(make_fundamentals(eps_kes=1.0,
+                                          dividend_per_share_kes=2.3), cfg) is None
+
+
+def test_ex_date_timing_tilts_between_equal_candidates():
+    """Buying just before an ex-date pays for a dividend the price then sheds."""
+    from datetime import date
+    cfg = ScoringConfig()
+    today = date(2026, 6, 15)
+    before = score_symbol(make_fundamentals(ex_dividend_date='2026-06-20'), cfg, today)
+    after = score_symbol(make_fundamentals(ex_dividend_date='2026-06-10'), cfg, today)
+    neutral = score_symbol(make_fundamentals(ex_dividend_date=None), cfg, today)
+    assert after.combined_score > neutral.combined_score > before.combined_score
+
+
+def test_sector_cap_reorders_the_selection():
+    cfg = ScoringConfig()
+    banks = {'KCB': 'banking', 'EQTY': 'banking', 'COOP': 'banking',
+             'SCOM': 'telecom'}
+    fundamentals = [
+        make_fundamentals(symbol='KCB', yield_ttm_pct=9.0),
+        make_fundamentals(symbol='EQTY', yield_ttm_pct=8.5),
+        make_fundamentals(symbol='COOP', yield_ttm_pct=8.0),
+        make_fundamentals(symbol='SCOM', yield_ttm_pct=5.0),
+    ]
+    uncapped = rank_candidates(fundamentals, ScoringConfig(max_per_sector=0), 3)
+    assert [c.symbol for c in uncapped] == ['KCB', 'EQTY', 'COOP']
+
+    capped = rank_candidates(fundamentals, cfg, 3, sector_lookup=banks)
+    assert [c.symbol for c in capped] == ['KCB', 'EQTY', 'SCOM']
 
 
 def test_payout_ratio_outside_band_lowers_quality_score():
