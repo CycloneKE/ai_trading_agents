@@ -225,7 +225,17 @@ jobs:
       env:
         SECRET_KEY: ci-secret-key-for-tests-only-not-a-real-key
       run: |
-        pytest -m integration -q --maxfail=1
+        # No test carries the `integration` marker yet. pytest exits 5 on an
+        # empty collection, which would fail this job on every manual run for
+        # no reason; treat "nothing collected" as a pass and let any real
+        # failure through.
+        rc=0
+        pytest -m integration -q --maxfail=1 || rc=$?
+        if [ "$rc" -eq 5 ]; then
+          echo "No tests are marked 'integration'; nothing to run."
+          exit 0
+        fi
+        exit "$rc"
 
     - name: Deploy to Cloud Run (requires GCP + DockerHub secrets)
       id: deploy
