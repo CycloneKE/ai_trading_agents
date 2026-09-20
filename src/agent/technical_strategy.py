@@ -1,6 +1,9 @@
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
+try:
+    import pandas_ta as ta
+except ImportError:  # pandas_ta's remaining PyPI releases need Python >= 3.12
+    from . import indicators as ta
 import logging
 from typing import Dict, Any, List, Optional
 from .base_strategy import BaseStrategy

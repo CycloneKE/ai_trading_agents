@@ -50,3 +50,11 @@ bcrypt==5.0.0
 # PDF Ingest
 pdfplumber>=0.11.0
 
+# Technical indicators (optional). The only pandas_ta releases still on PyPI
+# require Python >= 3.12, so it is version-gated here. src/agent/indicators.py
+# provides a Wilder-equivalent RSI fallback when it is absent — without one,
+# technical_strategy fails to import and the agent silently holds forever.
+pandas_ta==0.4.71b0; python_version >= "3.12"
+
+# Price feed used by src/utils/real_price_feed.py (was imported but undeclared)
+yfinance>=0.2.60

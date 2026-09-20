@@ -17,16 +17,33 @@ from src.utils.paths import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
-# Fix relative imports
+# Each strategy family is imported independently. Sharing one try block made
+# a single missing optional dependency (torch, pulled in by the RL strategy)
+# disable EVERY strategy, including the pure-pandas technical ones that had no
+# such dependency. StrategyManager then substituted MockStrategy, which always
+# returns 'hold' — an agent that starts cleanly, reports healthy, and never
+# trades. Degrade per-family instead.
+BaseStrategy = None
+
 try:
     from .reinforcement_learning import DQNStrategy
+except ImportError as e:
+    logger.warning(f"DQN (reinforcement learning) strategy unavailable: {e}")
+    DQNStrategy = None
+
+try:
     from .supervised_learning import SupervisedLearningStrategy
+except ImportError as e:
+    logger.warning(f"Supervised learning strategy unavailable: {e}")
+    SupervisedLearningStrategy = None
+
+try:
     from .technical_strategy import TechnicalStrategy
 except ImportError as e:
-    logger.warning(f"Strategy import error: {e}")
-    BaseStrategy = None
-    DQNStrategy = None
-    SupervisedLearningStrategy = None
+    # The technical strategies are the agent's only dependency-light signal
+    # source; losing them means it cannot trade at all.
+    logger.error(f"Technical strategies unavailable - agent cannot generate "
+                 f"signals and will hold indefinitely: {e}")
     TechnicalStrategy = None
 
 class MockStrategy:
