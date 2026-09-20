@@ -48,3 +48,48 @@ def rsi(close: pd.Series, length: int = 14) -> pd.Series:
 
     res = pd.Series(out, name=f"RSI_{length}")
     return res
+
+
+def atr(high, low, close, length: int = 14) -> pd.Series:
+    """Wilder's Average True Range.
+
+    True range is the greatest of the current bar's range, the gap up from
+    the previous close, and the gap down from it. Smoothed the same way as
+    `rsi` above: a simple mean seed over the first `length` values, then
+    Wilder recursive smoothing.
+
+    Returned in price units. Divide by price for a percentage.
+    """
+    high = pd.Series(high, dtype='float64').reset_index(drop=True)
+    low = pd.Series(low, dtype='float64').reset_index(drop=True)
+    close = pd.Series(close, dtype='float64').reset_index(drop=True)
+    n = close.size
+    if length <= 0 or n <= length or high.size != n or low.size != n:
+        return pd.Series([float('nan')] * n)
+
+    prev_close = close.shift(1)
+    tr = pd.concat([high - low,
+                    (high - prev_close).abs(),
+                    (low - prev_close).abs()], axis=1).max(axis=1).to_numpy()
+
+    out = [float('nan')] * n
+    # tr[0] has no previous close; seed from indices 1..length.
+    avg = float(pd.Series(tr[1:length + 1]).mean())
+    out[length] = avg
+    for i in range(length + 1, n):
+        avg = (avg * (length - 1) + tr[i]) / length
+        out[i] = avg
+    return pd.Series(out, name=f"ATR_{length}")
+
+
+def atr_from_closes(close, length: int = 14) -> pd.Series:
+    """ATR when only closes are available.
+
+    The live loop often holds a close-only price buffer, so true range
+    degrades to |close - prev_close|. This understates the real range,
+    typically by a third or so for daily equity bars, which makes stops
+    derived from it tighter rather than looser. Prefer `atr` whenever
+    high/low are on hand.
+    """
+    close = pd.Series(close, dtype='float64').reset_index(drop=True)
+    return atr(close, close, close, length)

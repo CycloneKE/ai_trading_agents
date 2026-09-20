@@ -5,17 +5,45 @@
   "sector_analysis_interval": 390,
   "data_manager": {
     "symbols": [
-      "AAPL", "GOOGL", "MSFT", "TSLA", "NVDA",
-      "SPY", "QQQ", "XLF", "XLV", "XLE", "DIA",
-      "BTC-USD", "ETH-USD", "SOL-USD"
+      "AAPL",
+      "GOOGL",
+      "MSFT",
+      "TSLA",
+      "NVDA",
+      "SPY",
+      "QQQ",
+      "XLF",
+      "XLV",
+      "XLE",
+      "DIA",
+      "BTC-USD",
+      "ETH-USD",
+      "SOL-USD"
     ],
     "crypto_symbols": [
-      "BTC-USD", "ETH-USD", "SOL-USD"
+      "BTC-USD",
+      "ETH-USD",
+      "SOL-USD"
     ],
     "nse_symbols": [
-      "SCOM", "EQTY", "KCB", "COOP", "SCBK", "SBIC", "ABSA",
-      "BAT", "EABL", "KEGN", "KNRE", "BAMB",
-      "TOTL", "CTUM", "NMG", "NCBA", "BRIT", "CIC"
+      "SCOM",
+      "EQTY",
+      "KCB",
+      "COOP",
+      "SCBK",
+      "SBIC",
+      "ABSA",
+      "BAT",
+      "EABL",
+      "KEGN",
+      "KNRE",
+      "BAMB",
+      "TOTL",
+      "CTUM",
+      "NMG",
+      "NCBA",
+      "BRIT",
+      "CIC"
     ],
     "update_interval": 60,
     "max_retries": 3,
@@ -80,13 +108,13 @@
     "var_confidence": 0.95,
     "max_position_size": 0.05,
     "max_portfolio_var": 0.02,
-    "max_drawdown": 0.10,
+    "max_drawdown": 0.1,
     "max_daily_loss": 0.03
   },
   "cash_policy": {
     "enabled": true,
-    "target_deployment": 0.80,
-    "min_cash_buffer": 0.10,
+    "target_deployment": 0.8,
+    "min_cash_buffer": 0.1,
     "base_risk_per_trade": 0.02,
     "max_risk_per_trade": 0.05,
     "min_confidence_to_boost": 0.55
@@ -97,13 +125,23 @@
     "capital_split_pct": 0.5,
     "top_n": 5,
     "weighting_mode": "equal",
-    "universe": ["SCOM", "EQTY", "KCB", "COOP", "SCBK", "ABSA", "BAT", "EABL", "NCBA"],
+    "universe": [
+      "SCOM",
+      "EQTY",
+      "KCB",
+      "COOP",
+      "SCBK",
+      "ABSA",
+      "BAT",
+      "EABL",
+      "NCBA"
+    ],
     "scoring": {
       "yield_cap_pct": 12.0,
       "yield_weight": 0.5,
       "quality_weight": 0.5,
-      "payout_ratio_min": 0.30,
-      "payout_ratio_max": 0.70,
+      "payout_ratio_min": 0.3,
+      "payout_ratio_max": 0.7,
       "years_paid_target": 5,
       "min_avg_daily_volume": 50000,
       "stale_days": 400
@@ -112,9 +150,14 @@
   "risk_limits": {
     "max_portfolio_var": 0.02,
     "max_position_size": 0.05,
-    "max_drawdown": 0.10,
+    "max_drawdown": 0.1,
     "stop_loss_pct": 0.05,
-    "trailing_stop_pct": 0.03
+    "trailing_stop_pct": 0.03,
+    "stop_loss_atr_mult": 2.5,
+    "trailing_stop_atr_mult": 3.0,
+    "min_stop_pct": 0.02,
+    "max_stop_pct": 0.25,
+    "atr_length": 14
   },
   "brokers": {
     "paper_broker": {
@@ -204,7 +247,11 @@
     "upload_dir": "data/research_uploads",
     "auto_follow_rules": {
       "require_existing_symbol": true,
-      "allowed_recommendations": ["BUY", "HOLD", "ACCUMULATE"],
+      "allowed_recommendations": [
+        "BUY",
+        "HOLD",
+        "ACCUMULATE"
+      ],
       "min_upside_pct": 5.0
     }
   },
@@ -219,6 +266,30 @@
       "sector_specialist": "meta-llama/llama-3.3-70b-instruct:free",
       "sentiment_analyst": "meta-llama/llama-3.3-70b-instruct:free",
       "synthesizer": "meta-llama/llama-3.3-70b-instruct:free"
+    }
+  },
+  "costs": {
+    "_comment": "Per-side transaction costs by market. A single global rate cannot describe this portfolio: Alpaca is commission-free on US equities while an NSE round trip runs several percent. Set verified=true once you have confirmed a schedule with your broker.",
+    "us_equity": {
+      "commission_pct": 0.0,
+      "min_commission": 0.0,
+      "slippage_pct": 0.0005,
+      "verified": true,
+      "note": "Alpaca charges no commission on US equities."
+    },
+    "nse": {
+      "commission_pct": 0.017,
+      "min_commission": 0.0,
+      "slippage_pct": 0.003,
+      "verified": false,
+      "note": "PLACEHOLDER \u2014 CONFIRM WITH AIB-AXYS. Brokerage plus CMA levy, NSE levy and CDSC fees. At 1.7% a side the round trip is 3.4%, which decides whether any NSE strategy is viable. Set verified=true after checking."
+    },
+    "crypto": {
+      "commission_pct": 0.006,
+      "min_commission": 0.0,
+      "slippage_pct": 0.001,
+      "verified": false,
+      "note": "PLACEHOLDER \u2014 Coinbase taker fees vary by 30-day volume tier."
     }
   }
 }

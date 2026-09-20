@@ -81,6 +81,15 @@ class BacktestEngine:
         self.slippage_rate = config.get('slippage_rate', 0.0005)  # 0.05%
         self.market_impact_model = config.get('market_impact_model', 'sqrt')
         self.market_impact_rate = config.get('market_impact_rate', 0.0001)
+
+        # Idle cash earns the risk-free rate. Without this a strategy that
+        # sits in cash is scored as returning nothing, while in reality it
+        # would be earning the Treasury bill rate — which makes any
+        # comparison against that rate as a hurdle wrong in the strategy's
+        # disfavour. Zero preserves the previous behaviour.
+        self.cash_yield = float(config.get('cash_yield', 0.0))
+        self.periods_per_year = int(config.get('periods_per_year', 252))
+        self.interest_earned = 0.0
         
         # Portfolio state
         self.cash = self.initial_capital
@@ -135,6 +144,27 @@ class BacktestEngine:
         except Exception as e:
             logger.error(f"Error adding market data: {str(e)}")
     
+    def _rates_for(self, symbol: Optional[str]) -> Tuple[float, float, float]:
+        """(commission_pct, slippage_pct, min_commission) for one symbol.
+
+        With a `cost_config` in the engine config, costs are resolved per
+        market: an NSE round trip is several percent while Alpaca charges
+        nothing on US equities, and one flat rate cannot represent both.
+        Without it, the flat configured rates apply to everything, which is
+        the original behaviour.
+        """
+        cost_config = self.config.get('cost_config')
+        if cost_config and symbol:
+            try:
+                from src.agent.cost_model import costs_for
+                c = costs_for(symbol, cost_config)
+                return (float(c.get('commission_pct', self.commission_rate)),
+                        float(c.get('slippage_pct', self.slippage_rate)),
+                        float(c.get('min_commission', self.min_commission)))
+            except Exception as e:
+                logger.debug(f"Per-market cost lookup failed for {symbol}: {e}")
+        return self.commission_rate, self.slippage_rate, self.min_commission
+
     def calculate_slippage(self, symbol: str, side: OrderSide, quantity: float, 
                           price: float) -> float:
         """
@@ -150,14 +180,16 @@ class BacktestEngine:
             Slippage amount
         """
         try:
+            _, slippage_rate, _ = self._rates_for(symbol)
+
             if self.slippage_model == 'linear':
                 # Linear slippage model
-                slippage = price * self.slippage_rate
-                
+                slippage = price * slippage_rate
+
             elif self.slippage_model == 'sqrt':
                 # Square root model (more realistic for large orders)
                 volume_factor = np.sqrt(quantity / 1000)  # Normalize by 1000 shares
-                slippage = price * self.slippage_rate * volume_factor
+                slippage = price * slippage_rate * volume_factor
                 
             elif self.slippage_model == 'market_impact':
                 # Market impact model
@@ -167,10 +199,10 @@ class BacktestEngine:
                     volume_ratio = quantity / avg_volume if avg_volume > 0 else 0.01
                     slippage = price * self.market_impact_rate * np.sqrt(volume_ratio)
                 else:
-                    slippage = price * self.slippage_rate
-                    
+                    slippage = price * slippage_rate
+
             else:
-                slippage = price * self.slippage_rate
+                slippage = price * slippage_rate
             
             # Apply direction (buy orders pay slippage, sell orders receive negative slippage)
             if side == OrderSide.BUY:
@@ -182,22 +214,27 @@ class BacktestEngine:
             logger.error(f"Error calculating slippage: {str(e)}")
             return 0.0
     
-    def calculate_commission(self, quantity: float, price: float) -> float:
+    def calculate_commission(self, quantity: float, price: float,
+                             symbol: Optional[str] = None) -> float:
         """
         Calculate commission for a trade.
-        
+
         Args:
             quantity: Trade quantity
             price: Trade price
-            
+            symbol: Trading symbol, used to price the correct market when a
+                `cost_config` is supplied. Optional so existing callers that
+                pass only quantity and price keep working.
+
         Returns:
             Commission amount
         """
         try:
+            commission_rate, _, min_commission = self._rates_for(symbol)
             trade_value = quantity * price
-            commission = max(trade_value * self.commission_rate, self.min_commission)
+            commission = max(trade_value * commission_rate, min_commission)
             return commission
-            
+
         except Exception as e:
             logger.error(f"Error calculating commission: {str(e)}")
             return self.min_commission
@@ -243,7 +280,8 @@ class BacktestEngine:
             
             # Calculate slippage and commission
             slippage = self.calculate_slippage(order.symbol, order.side, order.quantity, execution_price)
-            commission = self.calculate_commission(order.quantity, execution_price)
+            commission = self.calculate_commission(order.quantity, execution_price,
+                                                   order.symbol)
             
             # Adjust execution price for slippage
             final_price = execution_price + slippage
@@ -438,9 +476,20 @@ class BacktestEngine:
             self.portfolio_history = []
             self.returns_history = []
             
+            self.interest_earned = 0.0
+            period_rate = (self.cash_yield / self.periods_per_year
+                           if self.periods_per_year > 0 else 0.0)
+
             # Run backtest
             for i, timestamp in enumerate(all_dates):
                 self.current_timestamp = timestamp
+
+                # Accrue on idle cash before marking the portfolio, so the
+                # equity curve reflects interest from the first full period.
+                if i > 0 and period_rate and self.cash > 0:
+                    interest = self.cash * period_rate
+                    self.cash += interest
+                    self.interest_earned += interest
                 
                 # Update current prices
                 self.current_prices = {}
@@ -575,6 +624,7 @@ class BacktestEngine:
                     'win_rate': win_rate
                 },
                 'trade_metrics': {
+                    'interest_earned': self.interest_earned,
                     'total_trades': len(self.trades),
                     'trade_win_rate': trade_win_rate,
                     'total_commission': self.total_commission,

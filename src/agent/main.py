@@ -395,6 +395,12 @@ class TradingAgent:
         logger.info("Starting AI Trading Agent...")
         self.running = True
 
+        # Per-symbol ATR, used to scale stop distances to each instrument's
+        # own volatility instead of applying one flat percentage to all.
+        from src.agent.volatility import VolatilityTracker
+        self.volatility = VolatilityTracker(
+            length=self.config.get('risk_limits', {}).get('atr_length', 14))
+
         # Connect to all brokers and run health checks
         broker_manager = self.components['broker_manager']
         connection_results = broker_manager.connect_all()
@@ -458,6 +464,17 @@ class TradingAgent:
                         closes = [float(b.c) for b in bars]
                         if closes:
                             bars_by_symbol[sym] = closes
+                        # Seed the ATR tracker from the same bars, with
+                        # high/low where the vendor supplies them. Without
+                        # this every symbol starts on the fixed fallback stop
+                        # for its first `atr_length` cycles after a restart.
+                        try:
+                            highs = [float(getattr(b, 'h', b.c)) for b in bars]
+                            lows = [float(getattr(b, 'l', b.c)) for b in bars]
+                            if closes and getattr(self, 'volatility', None):
+                                self.volatility.warm_start(sym, closes, highs, lows)
+                        except Exception as e:
+                            logger.debug(f"ATR warm-start failed for {sym}: {e}")
                     except Exception as e:
                         logger.debug(f"No warm-start bars for {sym}: {e}")
                 if bars_by_symbol:
@@ -480,10 +497,24 @@ class TradingAgent:
                     continue
                 try:
                     with open(csv_path, 'r', newline='', encoding='utf-8') as f:
-                        closes = [float(r['close']) for r in _csv.DictReader(f)
-                                  if r.get('close') and float(r['close']) > 0]
+                        rows = [r for r in _csv.DictReader(f)
+                                if r.get('close') and float(r['close']) > 0]
+                    closes = [float(r['close']) for r in rows]
                     if closes:
                         nse_bars[sym] = closes[-60:]
+                        # Seed the ATR tracker too. The scraped CSVs may or may
+                        # not carry high/low; pass them only when every row has
+                        # both, since a partial series would be treated as
+                        # close-only anyway.
+                        highs = [float(r['high']) for r in rows] \
+                            if all(r.get('high') for r in rows) else None
+                        lows = [float(r['low']) for r in rows] \
+                            if all(r.get('low') for r in rows) else None
+                        if getattr(self, 'volatility', None):
+                            self.volatility.warm_start(
+                                sym, closes[-60:],
+                                highs[-60:] if highs else None,
+                                lows[-60:] if lows else None)
                 except Exception as e:
                     logger.debug(f"No NSE warm-start bars for {sym}: {e}")
             if nse_bars:
@@ -620,6 +651,9 @@ class TradingAgent:
         self._last_optimization_date = None  # Track daily optimization
         
         # Stop-loss configuration
+        # Stop distances are resolved per symbol from that symbol's ATR (see
+        # src/agent/volatility.py). These two remain only as the cold-start
+        # fallback for a symbol with too little history to have an ATR yet.
         stop_loss_pct = self.config.get('risk_limits', {}).get('stop_loss_pct', 0.05)
         trailing_stop_pct = self.config.get('risk_limits', {}).get('trailing_stop_pct', 0.03)
         
@@ -763,6 +797,17 @@ class TradingAgent:
                             symbol_data = self._extract_symbol_data(market_data, symbol)
 
                             price = (symbol_data or {}).get('price') or (symbol_data or {}).get('close')
+
+                            # Feed the volatility tracker before any decision,
+                            # so stop distances reflect the current bar. Uses
+                            # high/low when the feed carries them and degrades
+                            # to close-only otherwise.
+                            if price and getattr(self, 'volatility', None):
+                                self.volatility.update(
+                                    symbol, price,
+                                    (symbol_data or {}).get('high'),
+                                    (symbol_data or {}).get('low'))
+
                             self._cycle_decisions[symbol] = {
                                 'symbol': symbol, 'cycle': cycle, 'action': 'hold',
                                 'skip_reason': 'hold', 'price': price,
@@ -1644,6 +1689,27 @@ class TradingAgent:
             logger.warning(f"Open-order check failed for {symbol}: {e}")
         return False
 
+    def _stop_distances_for(self, symbol: str, fallback_stop: float,
+                            fallback_trail: float) -> dict:
+        """Stop distances for one symbol, scaled to its own volatility.
+
+        Returns the configured fixed percentages when no ATR is available
+        yet, so a cold start or a thin feed never leaves a position without
+        a stop.
+        """
+        tracker = getattr(self, 'volatility', None)
+        atr_pct = None
+        if tracker is not None:
+            try:
+                atr_pct = tracker.atr_pct(symbol)
+            except Exception as e:
+                logger.debug(f"ATR lookup failed for {symbol}: {e}")
+        if atr_pct is None:
+            return {'stop_loss_pct': fallback_stop,
+                    'trailing_stop_pct': fallback_trail, 'source': 'fixed'}
+        from src.agent.volatility import stop_distances
+        return stop_distances(self.config, atr_pct)
+
     def _enforce_stop_losses(self, stop_loss_pct: float, trailing_stop_pct: float):
         """
         Enforce stop-loss and trailing stop rules on all open positions.
@@ -1669,11 +1735,19 @@ class TradingAgent:
                 try:
                     if position.quantity == 0 or position.cost_basis <= 0:
                         continue
-                    
+
                     unrealized_pl_pct = position.unrealized_pl / position.cost_basis
-                    
+
+                    # Widen both stops to a multiple of this symbol's own ATR.
+                    # Falls back to the passed-in fixed percentages when the
+                    # symbol has too little history for an ATR reading.
+                    dist = self._stop_distances_for(
+                        position.symbol, stop_loss_pct, trailing_stop_pct)
+                    sym_stop_pct = dist['stop_loss_pct']
+                    sym_trail_pct = dist['trailing_stop_pct']
+
                     # Hard stop-loss
-                    if unrealized_pl_pct <= -stop_loss_pct:
+                    if unrealized_pl_pct <= -sym_stop_pct:
                         close_side = 'sell' if position.quantity > 0 else 'buy'
 
                         # A pending close order makes another one redundant —
@@ -1685,7 +1759,8 @@ class TradingAgent:
 
                         logger.warning(
                             f"STOP-LOSS triggered for {position.symbol}: "
-                            f"loss={unrealized_pl_pct:.2%} exceeds limit={-stop_loss_pct:.2%}"
+                            f"loss={unrealized_pl_pct:.2%} exceeds limit={-sym_stop_pct:.2%} "
+                            f"({dist['source']})"
                         )
                         from src.connectors.base_broker import OrderRequest
                         from src.agent.order_journal import make_client_order_id
@@ -1725,7 +1800,9 @@ class TradingAgent:
                                 
                     # Trailing Stop Loss using Risk Manager
                     if hasattr(self, 'risk_manager') and self.risk_manager:
-                        trailing_stops = self.risk_manager.check_trailing_stops(trailing_stop_pct)
+                        trailing_stops = self.risk_manager.check_trailing_stops(
+                            lambda sym: self._stop_distances_for(
+                                sym, stop_loss_pct, trailing_stop_pct)['trailing_stop_pct'])
                         for ts in trailing_stops:
                             if ts['symbol'] == position.symbol:
                                 from src.connectors.base_broker import OrderRequest
