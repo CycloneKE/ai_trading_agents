@@ -163,6 +163,11 @@ def analyse(equity_series, trades, initial_capital, periods_per_year=TRADING_DAY
     return {
         'periods': n,
         'years': round(years, 2),
+        'risk_free_rate': risk_free,
+        # The number that actually matters: a Kenyan T-bill is the no-effort
+        # alternative, so anything at or below it is worse than doing nothing.
+        'excess_cagr': cagr - risk_free,
+        'beats_risk_free': bool(cagr > risk_free),
         'initial_capital': initial_capital,
         'final_equity': float(eq.iloc[-1]),
         'total_return': total_return,
@@ -210,15 +215,33 @@ def buy_and_hold(data, symbols, initial_capital):
 # -------------------------------------------------------------------- strategy
 
 def build_strategy_fn(cfg, manager, engine, stop_loss_pct, trailing_pct,
-                      max_position_pct, min_confidence):
+                      max_position_pct, min_confidence, vol=None, data=None):
     """Bar-by-bar signal -> order translation, mirroring the live loop's rules."""
+    from src.agent.position_sizing import volatility_scaled_value
+    from src.agent.volatility import stop_distances
     peak_price = {}
-    stats = {'signals': 0, 'stops': 0, 'blocked_cash': 0}
+    stats = {'signals': 0, 'stops': 0, 'blocked_cash': 0, 'atr_sized': 0}
+    limits = cfg.get('risk_limits', {})
+    risk_per_trade = cfg.get('trading', {}).get('risk_per_trade', 0.005)
+    stop_mult = limits.get('stop_loss_atr_mult', 2.5)
 
     def strategy(timestamp, prices, portfolio):
         orders = []
         pv = portfolio.get('portfolio_value', 0.0) or 0.0
         held = portfolio.get('positions', {})
+
+        # Feed this bar to the volatility tracker before it is consulted, so
+        # stops and sizing reflect current conditions rather than last bar's.
+        if vol is not None and data:
+            for sym, price in prices.items():
+                bar = data.get(sym)
+                if bar is None or timestamp not in bar.index:
+                    vol.update(sym, price)
+                    continue
+                row = bar.loc[timestamp]
+                vol.update(sym, price,
+                           row.get('high') if hasattr(row, 'get') else None,
+                           row.get('low') if hasattr(row, 'get') else None)
 
         # 1. Stop-loss and trailing-stop enforcement, before any new entry.
         for sym, pos in list(held.items()):
@@ -228,8 +251,9 @@ def build_strategy_fn(cfg, manager, engine, stop_loss_pct, trailing_pct,
             engine_pos = engine.positions.get(sym)
             entry = float(getattr(engine_pos, 'avg_price', 0.0) or 0.0)
             peak_price[sym] = max(peak_price.get(sym, price), price)
-            hit_stop = entry > 0 and price <= entry * (1 - stop_loss_pct)
-            hit_trail = price <= peak_price[sym] * (1 - trailing_pct)
+            d = stop_distances(cfg, vol.atr_pct(sym) if vol else None)
+            hit_stop = entry > 0 and price <= entry * (1 - d['stop_loss_pct'])
+            hit_trail = price <= peak_price[sym] * (1 - d['trailing_stop_pct'])
             if hit_stop or hit_trail:
                 orders.append(Order(symbol=sym, side=OrderSide.SELL,
                                     order_type=OrderType.MARKET,
@@ -258,7 +282,14 @@ def build_strategy_fn(cfg, manager, engine, stop_loss_pct, trailing_pct,
             if action == 'buy':
                 if qty_held > 0:
                     continue  # already long; this book does not pyramid
-                target_value = pv * max_position_pct * min(max(conf, 0.0), 1.0)
+                atr_pct = vol.atr_pct(sym) if vol else None
+                if atr_pct:
+                    stats['atr_sized'] += 1
+                target_value = volatility_scaled_value(
+                    pv, atr_pct, confidence=conf,
+                    risk_per_trade=risk_per_trade,
+                    stop_atr_mult=stop_mult,
+                    max_position_pct=max_position_pct)
                 qty = math.floor(target_value / price) if price > 0 else 0
                 if qty <= 0:
                     continue
@@ -288,6 +319,48 @@ def pct(x):
     return f"{x * 100:.2f}%"
 
 
+def verdict_lines(meta, strat):
+    """Separate what the trading earned from what idle cash earned.
+
+    A mostly-uninvested strategy inherits the risk-free rate through its cash
+    balance and can clear the hurdle while its trades lose money. Reporting
+    only the headline would read as success. This states the split.
+    """
+    interest = float(meta.get('interest_earned', 0.0))
+    total_profit = strat['final_equity'] - meta['capital']
+    trading_pnl = total_profit - interest
+
+    lines = [
+        f"- Total profit: {total_profit:,.2f}",
+        f"- Of which interest on idle cash: {interest:,.2f}",
+        f"- **Of which trading: {trading_pnl:,.2f}**",
+        "",
+    ]
+    if trading_pnl <= 0:
+        lines.append(
+            f"**The trading lost money.** Every shilling of profit came from "
+            f"interest on cash the strategy never deployed. Holding Treasury "
+            f"bills and placing no trades at all would have returned more, "
+            f"without the {strat['round_trips']} round trips.")
+    elif interest > 0 and trading_pnl < 0.25 * abs(total_profit):
+        lines.append(
+            f"**Most of the return is interest, not skill.** Trading "
+            f"contributed {trading_pnl / total_profit:.0%} of the profit; "
+            f"the rest is the risk-free rate on undeployed cash.")
+    elif strat['beats_risk_free']:
+        lines.append(
+            f"The strategy returned {pct(strat['cagr'])} a year against a "
+            f"{pct(strat['risk_free_rate'])} hurdle, an excess of "
+            f"{pct(strat['excess_cagr'])}, with trading contributing "
+            f"{trading_pnl:,.2f}.")
+    else:
+        lines.append(
+            f"The strategy returned {pct(strat['cagr'])} a year against a "
+            f"{pct(strat['risk_free_rate'])} hurdle. **It does not clear it**, "
+            f"so the capital is better left in a Treasury bill.")
+    return lines
+
+
 def write_report(path, meta, strat, bench, strategy_stats, warnings_list):
     def row(label, a, b, fmt=pct):
         return f"| {label} | {fmt(a)} | {fmt(b)} |"
@@ -302,11 +375,21 @@ def write_report(path, meta, strat, bench, strategy_stats, warnings_list):
         f"- Symbols: {', '.join(meta['symbols'])}",
         f"- Period: {meta['start']} to {meta['end']} ({strat['periods']} bars, {strat['years']} years)",
         f"- Initial capital: {meta['capital']:,.2f}",
-        f"- Commission: {meta['commission']:.4%} per trade (min {meta['min_commission']})",
-        f"- Slippage: {meta['slippage']:.4%} ({meta['slippage_model']} model)",
+        f"- Risk-free hurdle: {pct(meta['risk_free_rate'])} a year",
+        "",
+        "Transaction costs applied, per side:",
+        "",
+        "| Market | Symbols | Commission | Slippage | Round trip | Verified |",
+        "|---|---|---|---|---|---|",
+    ] + meta['cost_rows'] + [
+        "",
         f"- Max position size: {pct(meta['max_position_pct'])} of portfolio",
         f"- Stop loss: {pct(meta['stop_loss_pct'])}; trailing stop: {pct(meta['trailing_pct'])}",
         f"- Minimum signal confidence to act: {meta['min_confidence']:.2f}",
+        "",
+        "## Verdict",
+        "",
+    ] + verdict_lines(meta, strat) + [
         "",
         "## Headline results",
         "",
@@ -314,6 +397,7 @@ def write_report(path, meta, strat, bench, strategy_stats, warnings_list):
         "|---|---|---|",
         row("Total return", strat['total_return'], bench['total_return']),
         row("CAGR", strat['cagr'], bench['cagr']),
+        row("Excess over risk-free", strat['excess_cagr'], bench['excess_cagr']),
         row("Annualised volatility", strat['annual_volatility'], bench['annual_volatility']),
         row("Max drawdown", strat['max_drawdown'], bench['max_drawdown']),
         f"| Sharpe ratio | {strat['sharpe_ratio']:.2f} | {bench['sharpe_ratio']:.2f} |",
@@ -332,7 +416,10 @@ def write_report(path, meta, strat, bench, strategy_stats, warnings_list):
         f"- Average holding period: {strat['avg_hold_days']:.1f} days",
         f"- Signals acted on: {strategy_stats['signals']}",
         f"- Stop-loss / trailing exits: {strategy_stats['stops']}",
+        f"- Entries sized from ATR (rest fell back to the flat cap): "
+        f"{strategy_stats.get('atr_sized', 0)}",
         f"- Total commission paid: {meta['total_commission']:,.2f}",
+        f"- Interest earned on idle cash: {meta['interest_earned']:,.2f}",
         f"- Total slippage paid: {meta['total_slippage']:,.2f}",
         "",
         "## Risk detail",
@@ -374,6 +461,11 @@ def main():
                     help='ignore signals weaker than this (live loop applies its own LLM gate instead)')
     ap.add_argument('--periods-per-year', type=int, default=TRADING_DAYS,
                     help='252 for daily bars, 52 weekly, 12 monthly')
+    ap.add_argument('--risk-free-rate', type=float, default=None,
+                    help='annual risk-free rate as a decimal, e.g. 0.10 for 10%%. '
+                         'Defaults to config analytics.risk_free_rate. For a Kenyan '
+                         'investor this is the 91-day T-bill: a strategy that cannot '
+                         'beat it after costs is not worth running.')
     ap.add_argument('--out', default='reports/backtest')
     args = ap.parse_args()
 
@@ -401,15 +493,26 @@ def main():
 
     trading = cfg.get('trading', {})
     limits = cfg.get('risk_limits', {})
+    risk_free = args.risk_free_rate if args.risk_free_rate is not None \
+        else cfg.get('analytics', {}).get('risk_free_rate', 0.0)
     capital = args.capital if args.capital is not None else trading.get('initial_capital', 100000)
 
     engine_cfg = {
         'initial_capital': capital,
+        # Flat fallbacks, used only for a symbol no market claims.
         'commission_rate': trading.get('commission', 0.001),
-        'min_commission': 1.0,
+        'min_commission': 0.0,
         'slippage_rate': trading.get('slippage', 0.0005),
         'slippage_model': 'linear',
         'market_impact_model': 'sqrt',
+        # Real costs are resolved per market from here. An NSE round trip is
+        # several percent against Alpaca's zero on US equities; pricing both
+        # at one rate is what made earlier NSE numbers meaningless.
+        'cost_config': cfg,
+        # Idle cash earns the hurdle rate, so a strategy that sits out of the
+        # market is compared fairly against simply holding Treasury bills.
+        'cash_yield': risk_free,
+        'periods_per_year': args.periods_per_year,
     }
     engine = BacktestEngine(engine_cfg)
     engine.add_market_data(data)
@@ -422,12 +525,17 @@ def main():
             f"result would be a flat line, not a backtest. Install the strategy "
             f"dependencies and retry.")
 
+    # Feed a volatility tracker from the same bars, so stops and sizing use
+    # each symbol's own ATR rather than one flat percentage for all of them.
+    from src.agent.volatility import VolatilityTracker
+    vol = VolatilityTracker(length=limits.get('atr_length', 14))
+
     strat_fn = build_strategy_fn(
         cfg, manager, engine,
         stop_loss_pct=limits.get('stop_loss_pct', 0.05),
         trailing_pct=limits.get('trailing_stop_pct', 0.03),
         max_position_pct=limits.get('max_position_size', 0.05),
-        min_confidence=args.min_confidence)
+        min_confidence=args.min_confidence, vol=vol, data=data)
 
     print(f"Running {', '.join(syms)} over "
           f"{min(data[s].index.min() for s in syms).date()} -> "
@@ -437,9 +545,9 @@ def main():
         raise SystemExit("Backtest produced no results; check logs.")
 
     equity = [p['portfolio_value'] for p in engine.portfolio_history]
-    strat = analyse(equity, engine.trades, capital, args.periods_per_year)
+    strat = analyse(equity, engine.trades, capital, args.periods_per_year, risk_free)
     bench_curve = buy_and_hold(data, syms, capital)
-    bench = analyse(bench_curve, [], capital, args.periods_per_year)
+    bench = analyse(bench_curve, [], capital, args.periods_per_year, risk_free)
 
     warnings_list = [
         "No LLM validation layer: the live agent sends every candidate trade to an "
@@ -447,6 +555,8 @@ def main():
         "is excluded here. Live results will differ.",
         "No news or sentiment input, and no sector-specialist context.",
         "Long only. No shorting, no leverage, no options.",
+        "Idle cash accrues at the risk-free rate, so a strategy that stays out of "
+        "the market is not scored as earning zero. Set --risk-free-rate 0 to disable.",
         "Orders fill at the same bar's close plus modelled slippage. Intraday "
         "stop fills are therefore approximated at close, which flatters stop-loss exits.",
         "Survivorship: only symbols with usable history are included.",
@@ -455,9 +565,31 @@ def main():
         f"your own broker's schedule; NSE commissions are materially higher than US ones.",
     ]
 
+    # Per-market cost table, plus a loud warning for any market still priced
+    # from a placeholder schedule.
+    from src.agent.cost_model import classify, costs_for, round_trip_pct, unverified_markets
+    by_market = {}
+    for sym in syms:
+        by_market.setdefault(classify(sym, cfg), []).append(sym)
+    cost_rows = []
+    for market, market_syms in sorted(by_market.items()):
+        c = costs_for(market_syms[0], cfg)
+        shown = ', '.join(market_syms[:4]) + (' ...' if len(market_syms) > 4 else '')
+        cost_rows.append(
+            f"| {market} | {shown} | {c.get('commission_pct', 0):.3%} | "
+            f"{c.get('slippage_pct', 0):.3%} | {round_trip_pct(market_syms[0], cfg):.2%} | "
+            f"{'yes' if c.get('verified') else '**NO**'} |")
+
+    unverified = {m: note for m, note in unverified_markets(cfg).items() if m in by_market}
+    for market, note in unverified.items():
+        warnings_list.insert(0, f"**Costs for `{market}` are unverified.** {note}")
+
     os.makedirs(args.out, exist_ok=True)
     meta = {
         'symbols': syms,
+        'risk_free_rate': risk_free,
+        'cost_rows': cost_rows,
+        'unverified_markets': unverified,
         'start': str(min(data[s].index.min() for s in syms).date()),
         'end': str(max(data[s].index.max() for s in syms).date()),
         'capital': capital,
@@ -471,6 +603,7 @@ def main():
         'min_confidence': args.min_confidence,
         'total_commission': engine.total_commission,
         'total_slippage': engine.total_slippage,
+        'interest_earned': getattr(engine, 'interest_earned', 0.0),
     }
 
     write_report(os.path.join(args.out, 'report.md'), meta, strat, bench,
@@ -503,10 +636,25 @@ def main():
         fa = pct(strat[key]) if is_pct else f"{strat[key]:,.2f}"
         fb = pct(bench[key]) if is_pct else f"{bench[key]:,.2f}"
         print(f"{label:<26}{fa:>14}{fb:>14}")
+    print(f"{'Excess over risk-free':<26}{pct(strat['excess_cagr']):>14}"
+          f"{pct(bench['excess_cagr']):>14}")
     print(f"\nRound trips: {strat['round_trips']}  "
           f"win rate: {pct(strat['trade_win_rate'])}  "
           f"profit factor: {strat['profit_factor']:.2f}")
-    print(f"Report written to {os.path.join(args.out, 'report.md')}")
+    interest = meta['interest_earned']
+    trading_pnl = strat['final_equity'] - capital - interest
+    print(f"\nProfit split: {trading_pnl:,.2f} from trading, "
+          f"{interest:,.2f} from interest on idle cash")
+    if trading_pnl <= 0:
+        print("Verdict: THE TRADING LOST MONEY. All profit is interest on "
+              "undeployed cash; holding T-bills and trading nothing beats this.")
+    else:
+        verdict = "CLEARS" if strat['beats_risk_free'] else "DOES NOT CLEAR"
+        print(f"Verdict: {verdict} the {pct(risk_free)} risk-free hurdle.")
+    for market in unverified:
+        print(f"WARNING: costs for '{market}' are a placeholder, not a verified "
+              f"broker schedule. Treat these numbers as provisional.")
+    print(f"\nReport written to {os.path.join(args.out, 'report.md')}")
 
 
 if __name__ == '__main__':

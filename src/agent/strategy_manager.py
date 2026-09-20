@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 from src.utils.paths import DATA_DIR
+from src.agent.regime import RegimeDetector, filter_signals, UNKNOWN
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,12 @@ class StrategyManager:
         self.config = config
         self.strategies = {}
         self.strategy_weights = {}
+
+        rf = config.get('regime_filter', {}) if isinstance(config, dict) else {}
+        self.regime_filter_enabled = rf.get('enabled', True)
+        self.regime_detector = RegimeDetector(
+            fast_period=rf.get('fast_period', 20),
+            slow_period=rf.get('slow_period', 50))
         self.ensemble_method = config.get('ensemble_method', 'weighted_average')
         self.performance_window = config.get('performance_window', 30)  # Days
         self.rebalance_frequency = config.get('rebalance_frequency', 7)  # Days
@@ -201,6 +208,13 @@ class StrategyManager:
                     'timestamp': datetime.utcnow().isoformat()
                 }
             
+            # Feed the regime detector before collecting votes, so the
+            # classification includes the current bar.
+            if self.regime_detector is not None:
+                price = data.get('price') or data.get('close')
+                if price:
+                    self.regime_detector.update(data.get('symbol', 'UNKNOWN'), price)
+
             strategy_signals = self.collect_strategy_signals(data)
 
             # Combine signals using ensemble method
@@ -228,6 +242,15 @@ class StrategyManager:
         signals start immediately instead of after lookback_period live
         cycles. Returns the number of (strategy, symbol) buffers seeded."""
         seeded = 0
+        # Seed the regime detector too, otherwise every symbol reads as
+        # `unknown` (and so unfiltered) for slow_period cycles after a restart.
+        if self.regime_detector is not None:
+            for symbol, closes in bars_by_symbol.items():
+                try:
+                    self.regime_detector.warm_start(symbol, closes)
+                except Exception as e:
+                    logger.debug(f"Regime warm-start failed for {symbol}: {e}")
+
         for name, strategy in self.strategies.items():
             if not hasattr(strategy, 'seed_history'):
                 continue
@@ -320,20 +343,38 @@ class StrategyManager:
                 }
             
             symbol = data.get('symbol', 'UNKNOWN')
-            
+
+            # Let only the strategies suited to this regime vote, before the
+            # blend runs. Momentum buys strength and mean reversion buys
+            # weakness; averaging them leaves neither able to clear the
+            # confidence gate, which is why 1,372 component buy votes became
+            # 9 ensemble buys on the GOOG backtest. Applied here rather than
+            # inside one method so every ensemble_method gets it.
+            regime = UNKNOWN
+            if self.regime_filter_enabled and self.regime_detector is not None:
+                try:
+                    regime = self.regime_detector.regime(symbol)
+                    strategy_signals = filter_signals(strategy_signals, regime)
+                except Exception as e:
+                    logger.debug(f"Regime filter failed for {symbol}: {e}")
+                    regime = UNKNOWN
+
             if self.ensemble_method == 'weighted_average':
-                return self._weighted_average_ensemble(strategy_signals, symbol)
+                result = self._weighted_average_ensemble(strategy_signals, symbol)
             elif self.ensemble_method == 'majority_vote':
-                return self._majority_vote_ensemble(strategy_signals, symbol)
+                result = self._majority_vote_ensemble(strategy_signals, symbol)
             elif self.ensemble_method == 'confidence_weighted':
-                return self._confidence_weighted_ensemble(strategy_signals, symbol)
+                result = self._confidence_weighted_ensemble(strategy_signals, symbol)
             elif self.ensemble_method == 'performance_weighted':
-                return self._performance_weighted_ensemble(strategy_signals, symbol)
+                result = self._performance_weighted_ensemble(strategy_signals, symbol)
             elif self.ensemble_method == 'adaptive_confidence':
-                return self._adaptive_confidence_ensemble(strategy_signals, symbol, data)
+                result = self._adaptive_confidence_ensemble(strategy_signals, symbol, data)
             else:
                 logger.warning(f"Unknown ensemble method: {self.ensemble_method}")
-                return self._weighted_average_ensemble(strategy_signals, symbol)
+                result = self._weighted_average_ensemble(strategy_signals, symbol)
+            if isinstance(result, dict):
+                result['regime'] = regime
+            return result
             
         except Exception as e:
             logger.error(f"Error combining signals: {str(e)}")
@@ -536,10 +577,19 @@ class StrategyManager:
         
         for name, signals in strategy_signals.items():
             performance = self.strategy_performance.get(name, {})
-            sharpe_ratio = performance.get('sharpe_ratio', 1.0)
-            win_rate = performance.get('win_rate', 0.5)
-            
-            base_weight = max(0.1, sharpe_ratio * win_rate)
+            # _initialize_strategies seeds these keys at 0.0, so the 1.0/0.5
+            # defaults below never applied: every strategy scored
+            # max(0.1, 0.0 * 0.0) = 0.1 and the configured `weight` values
+            # were ignored entirely on this path. Start from the configured
+            # weight and only tilt it once real attribution exists.
+            base_weight = self.strategy_weights.get(name, 1.0)
+            sharpe_ratio = performance.get('sharpe_ratio') or 0.0
+            win_rate = performance.get('win_rate') or 0.0
+            if sharpe_ratio > 0 and win_rate > 0:
+                # Scaled around 0.5 win rate so an average performer keeps its
+                # configured weight rather than being halved.
+                base_weight *= max(0.25, min(2.0, sharpe_ratio * win_rate * 2.0))
+            base_weight = max(0.01, base_weight)
             
             # Adaptive logic:
             if market_volatility > 0.03: # High volatility

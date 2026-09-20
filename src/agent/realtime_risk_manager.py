@@ -516,19 +516,36 @@ class RealTimeRiskManager:
         except Exception as e:
             logger.error(f"Market data update error: {e}")
             
-    def check_trailing_stops(self, trailing_stop_pct: float) -> List[Dict[str, Any]]:
+    def check_trailing_stops(self, trailing_stop_pct) -> List[Dict[str, Any]]:
         """
         Check if any positions have triggered their trailing stop loss.
         Returns a list of symbols and actions to close.
+
+        `trailing_stop_pct` is either a flat fraction applied to every
+        position, or a callable taking a symbol and returning that symbol's
+        fraction. The callable form lets the caller widen the stop to a
+        multiple of the instrument's own ATR: a flat 3% sits inside one
+        average day's range for most equities and is tripped by noise rather
+        than by a change in thesis.
         """
         stop_actions = []
+        resolve = trailing_stop_pct if callable(trailing_stop_pct) \
+            else (lambda _symbol: trailing_stop_pct)
         try:
             for symbol, position in self.positions.items():
                 if position['quantity'] > 0 and position['market_value'] > 0:
                     current_price = position['market_value'] / position['quantity']
                     high = position['high_watermark']
-                    
-                    if high > 0 and current_price < high * (1.0 - trailing_stop_pct):
+
+                    try:
+                        pct = float(resolve(symbol))
+                    except Exception as e:
+                        logger.debug(f"Trailing-stop resolver failed for {symbol}: {e}")
+                        continue
+                    if pct <= 0:
+                        continue
+
+                    if high > 0 and current_price < high * (1.0 - pct):
                         logger.warning(
                             f"TRAILING STOP TRIGGERED for {symbol}: "
                             f"Current={current_price:.2f}, HighWM={high:.2f}, Drop={(high - current_price)/high:.2%}"
