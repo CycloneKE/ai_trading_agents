@@ -9,7 +9,7 @@ RUN apt-get update \
 WORKDIR /app
 
 # Copy only runtime requirements and install
-COPY requirements-runtime.txt ./requirements-runtime.txt
+COPY scripts/requirements-runtime.txt ./requirements-runtime.txt
 RUN pip install --no-cache-dir -r requirements-runtime.txt
 
 # Copy application code

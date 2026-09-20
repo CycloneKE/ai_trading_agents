@@ -25,7 +25,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy only requirements first to leverage Docker layer caching
-COPY requirements-runtime.txt ./requirements-runtime.txt
+COPY scripts/requirements-runtime.txt ./requirements-runtime.txt
 
 # Upgrade pip and install runtime deps (cacheable layer)
 RUN python -m pip install --upgrade pip setuptools wheel \
@@ -37,7 +37,7 @@ RUN python -m pip install --upgrade pip setuptools wheel \
 # Usage: docker build --target ml -t ai-trading-agent-ml:latest .
 # -----------------------
 FROM deps-builder AS ml-builder
-COPY requirements-ml.txt ./requirements-ml.txt
+COPY scripts/requirements-ml.txt ./requirements-ml.txt
 RUN pip install --no-cache-dir -r requirements-ml.txt || echo "ML packages installation failed; build may require more resources"
 
 

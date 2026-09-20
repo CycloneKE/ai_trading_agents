@@ -1,0 +1,34 @@
+# Dependency set for CI.
+#
+# The workflow previously installed `requirements-test.txt` from the repository
+# root, where no such file exists, so the guard `if [ -f requirements-test.txt ]`
+# was always false and CI ran with nothing installed at all. It then failed at
+# the first lint step with "pylint: command not found".
+#
+# This file composes what the suite actually needs: the lean runtime set, the
+# test tooling, and the handful of packages the tests import transitively.
+# torch and tensorflow are deliberately excluded. They are multi-gigabyte, no
+# test imports them, and the strategy layer degrades gracefully without them.
+
+-r requirements-runtime.txt
+-r requirements-test.txt
+
+# Auth stack: tests/test_roles.py, tests/test_portfolio_api.py
+PyJWT>=2.8.0
+bcrypt>=4.0.0
+
+# Imported transitively: paper_trading -> real_price_feed
+yfinance>=0.2.60
+
+# Broker research ingest: tests/test_pdf_parser.py
+pdfplumber>=0.11.0
+
+# Used by supervised_learning and the portfolio optimiser
+scikit-learn>=1.5.0
+scipy>=1.9.0
+
+# Technical indicators. Only releases requiring Python >= 3.12 remain on PyPI,
+# which is why the matrix below no longer includes 3.9/3.10. Without this the
+# technical strategies fail to import and StrategyManager silently substitutes
+# MockStrategy, which always holds.
+pandas_ta==0.4.71b0; python_version >= "3.12"
