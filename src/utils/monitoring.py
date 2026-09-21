@@ -52,14 +52,22 @@ class MonitoringService:
         # instead of silently falling back to defaults.
         mon = config.get('monitoring') if isinstance(config.get('monitoring'), dict) else config
         self._mon_config = mon
-        self.enabled = mon.get('enabled', True) and PSUTIL_AVAILABLE
+        # psutil gates SYSTEM metrics (CPU, memory, disk) and nothing else.
+        # It used to gate the whole service, which meant a missing optional
+        # dependency silently took down /health — the one endpoint that tells
+        # an operator whether an unattended run is still alive. Losing CPU
+        # graphs is an inconvenience; losing the liveness probe for ninety
+        # days is not the same kind of problem.
+        self.enabled = mon.get('enabled', True)
         self.port = mon.get('port', 8080)
         self.metrics_interval = mon.get('metrics_interval', 15)  # seconds
         self.system_metrics_enabled = mon.get('system_metrics_enabled', True) and PSUTIL_AVAILABLE
-        
+
         if not PSUTIL_AVAILABLE:
-            logger.warning("psutil not available. System metrics disabled. Install psutil to enable monitoring.")
-            self.enabled = False
+            logger.warning(
+                "psutil not available: system metrics (CPU, memory, disk) are "
+                "disabled. Health checks and the /health endpoint still run. "
+                "Install psutil to restore system metrics.")
         
         # Metrics storage
         self.metrics = {
@@ -697,15 +705,27 @@ class MonitoringService:
                     logger.error(f"Error updating Prometheus metrics: {str(e)}")
             
             def _handle_status(self):
-                """Handle status endpoint."""
+                """Handle status endpoint.
+
+                Uptime comes from psutil, which is optional. Reporting nulls
+                for two fields is better than a 500 that makes the whole
+                endpoint look dead when only a metrics library is missing.
+                """
                 status = {
                     'status': 'running' if monitoring_service.is_running else 'stopped',
                     'timestamp': datetime.utcnow().isoformat(),
-                    'uptime': time.time() - psutil.boot_time(),
-                    'process_uptime': time.time() - psutil.Process(os.getpid()).create_time(),
+                    'uptime': None,
+                    'process_uptime': None,
                     'system': monitoring_service.metrics['system']
                 }
-                
+                if PSUTIL_AVAILABLE:
+                    try:
+                        status['uptime'] = time.time() - psutil.boot_time()
+                        status['process_uptime'] = (
+                            time.time() - psutil.Process(os.getpid()).create_time())
+                    except Exception as e:
+                        logger.debug(f"Could not read uptime: {e}")
+
                 self._send_json_response(status)
             
             def _handle_portfolio(self):
