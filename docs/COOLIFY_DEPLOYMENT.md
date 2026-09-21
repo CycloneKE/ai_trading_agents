@@ -216,14 +216,39 @@ using your Alpaca paper account. The behaviour is honest but it is not the same
 thing, so if you specifically want Alpaca to handle the simulation, add it to
 `scripts/requirements-runtime.txt` and test the build before relying on it.
 
-Before any real money is involved, two things still need settling, and neither
-is a software problem:
+Before any real money is involved, one thing still needs settling, and it is
+not a software problem:
 
 - The Nairobi Securities Exchange transaction costs in `config/config.json` are
   a placeholder at 1.7% per side, pending confirmation from AIB-AXYS. On the
   NSE that figure is large enough to turn an apparently profitable strategy
   into a losing one.
-- Your position sizing has three settings that disagree:
-  `cash_policy.base_risk_per_trade` at 2%, `trading.risk_per_trade` at 0.5%,
-  and `risk_limits.max_position_size` capping at 5%. One of them needs to be
-  the authoritative answer.
+
+## How positions are sized
+
+Worth understanding before you read any results, because three settings work
+together and it is easy to misread one for another.
+
+`trading.risk_per_trade` (0.5%) is the authority. It is how much of your
+equity you lose if a position's stop is hit, not how large the position is.
+The position size follows from it and from how volatile the instrument is:
+
+    position = equity x risk_per_trade / (stop distance)
+
+where the stop distance is `risk_limits.stop_loss_atr_mult` (2.5) multiplied by
+the instrument's recent average daily range. A calm stock gets a large
+position because its stop is close; a volatile one gets a small position
+because its stop has to be far away. Both risk the same 0.5%.
+
+`risk_limits.max_position_size` (5%) is a hard ceiling on the resulting
+position, so no single name dominates the book regardless of how calm it looks.
+Below roughly 4% daily range this ceiling is what decides the size.
+
+`cash_policy.max_risk_multiplier` (2.5) stretches the risk budget, up to 2.5
+times, when the portfolio is sitting on idle cash and a signal has real
+conviction. It never shrinks a position and never overrides the 5% ceiling.
+
+The live agent and the backtest now use this identical formula. Until
+recently they did not: the live loop sized every position at a flat fraction
+of equity and ignored volatility entirely, which meant backtest results
+described a sizing method the running agent never used.

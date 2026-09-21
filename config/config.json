@@ -107,9 +107,9 @@
     "enabled": true,
     "target_deployment": 0.8,
     "min_cash_buffer": 0.1,
-    "base_risk_per_trade": 0.02,
-    "max_risk_per_trade": 0.05,
-    "min_confidence_to_boost": 0.55
+    "min_confidence_to_boost": 0.55,
+    "max_risk_multiplier": 2.5,
+    "_max_risk_multiplier_note": "Multiplier on trading.risk_per_trade, not a position cap. 1.0 normally; up to this when the book is under-deployed AND confidence clears min_confidence_to_boost. Replaces base_risk_per_trade/max_risk_per_trade, which were notional caps that competed with risk_limits.max_position_size and ignored volatility. 2.5 preserves the old 5%/2% ratio."
   },
   "sleeve": {
     "enabled": false,
@@ -206,7 +206,7 @@
     "commission": 0.001,
     "slippage": 0.0005,
     "risk_per_trade": 0.005,
-    "_risk_per_trade_note": "Fraction of equity risked per position if its stop is hit. Interacts with risk_limits.max_position_size: with 2.5x ATR stops and a 5% cap, the cap binds below about 4% ATR. Note cash_policy.base_risk_per_trade (0.02) is a separate, older knob that cannot coexist with a 5% cap; reconcile the two before relying on either."
+    "_risk_per_trade_note": "THE authority for position size. Fraction of equity lost if a position's stop is hit. Notional = equity * risk_per_trade * cash_policy multiplier / (risk_limits.stop_loss_atr_mult * ATR%), then capped at risk_limits.max_position_size. At 0.5% risk with 2.5x ATR stops the 5% cap binds below about 4% ATR, so quiet instruments sit at the cap and volatile ones are sized down. Both the live loop and the backtest use this same formula (src/agent/position_sizing.volatility_scaled_value)."
   },
   "trading_loop_interval": 60,
   "nlp": {
