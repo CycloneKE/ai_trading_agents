@@ -79,8 +79,12 @@ except ImportError as e:
 try:
     from src.api.api_server import TradingAPI
     API_AVAILABLE = True
-except ImportError:
-    logger.warning("Flask not available - API server disabled")
+except ImportError as e:
+    # Name the actual missing module. This used to read "Flask not available"
+    # regardless of cause, which is how a missing torch (pulled in three levels
+    # down by the sentiment analyser) presented as a Flask problem and took the
+    # REST API and the whole dashboard down with it.
+    logger.error(f"API server disabled - could not import TradingAPI: {e}")
     API_AVAILABLE = False
     TradingAPI = None
 
@@ -196,7 +200,7 @@ class TradingAgent:
                 )
             else:
                 self.api_server = None
-                logger.info("API server disabled - Flask not available")
+                logger.error("API server disabled - see the import error above")
             
             # Strategy Management
             self.components['strategy_manager'] = StrategyManager(

@@ -15,7 +15,6 @@
       "XLF",
       "XLV",
       "XLE",
-      "DIA",
       "BTC-USD",
       "ETH-USD",
       "SOL-USD"
@@ -31,19 +30,10 @@
       "KCB",
       "COOP",
       "SCBK",
-      "SBIC",
       "ABSA",
       "BAT",
       "EABL",
-      "KEGN",
-      "KNRE",
-      "BAMB",
-      "TOTL",
-      "CTUM",
-      "NMG",
-      "NCBA",
-      "BRIT",
-      "CIC"
+      "NCBA"
     ],
     "update_interval": 60,
     "max_retries": 3,
