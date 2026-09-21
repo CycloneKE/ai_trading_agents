@@ -4,6 +4,7 @@
   "llm_cooldown_seconds": 60,
   "sector_analysis_interval": 390,
   "data_manager": {
+    "_symbol_lists": "Two kinds of list. TRADING lists say what the agent acts on: `symbols` is walked by the main loop every trading_loop_interval seconds, `nse_symbols` by the NSE pass every nse_eval_interval seconds during Nairobi hours. CLASSIFICATION lists say how a symbol is costed: `crypto_symbols` is expected to overlap `symbols`, since a pair must be in `symbols` to be traded and in `crypto_symbols` to be priced as crypto rather than as a US equity. An overlap between the two trading lists would be a real conflict; an overlap with the classification list is intended.",
     "symbols": [
       "AAPL",
       "GOOGL",
@@ -63,7 +64,8 @@
         "cache_ttl": 1800,
         "comment": "Kenyan NSE via Afristox + Mansa APIs"
       }
-    }
+    },
+    "nse_scrape_interval_minutes": 30
   },
   "ensemble_method": "adaptive_confidence",
   "performance_window": 30,

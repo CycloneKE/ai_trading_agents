@@ -32,8 +32,23 @@ from src.utils.price_files import load_price_dir  # noqa: E402
 
 logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
 
-# Which config list each market's symbols live in.
-MARKET_LISTS = {'nse': 'nse_symbols', 'crypto': 'crypto_symbols',
+# The config lists serve two different purposes, and conflating them is how
+# an intentional overlap gets reported as a bug.
+#
+# TRADING lists say what the agent acts on:
+#   data_manager.symbols      walked by the main loop every cycle
+#   data_manager.nse_symbols  walked by the NSE pass on its own slower cadence
+#
+# CLASSIFICATION lists say how a symbol is costed and treated. They are
+# expected to intersect the trading lists: a crypto pair belongs in `symbols`
+# so the loop trades it AND in `crypto_symbols` so cost_model prices it as
+# crypto rather than as a US equity.
+TRADING_LISTS = ('symbols', 'nse_symbols')
+CLASSIFICATION_LISTS = ('crypto_symbols',)
+ALL_LISTS = TRADING_LISTS + CLASSIFICATION_LISTS
+
+# Where `add` files a newly approved symbol, by market.
+MARKET_LISTS = {'nse': 'nse_symbols', 'crypto': 'symbols',
                 'us_equity': 'symbols'}
 
 
@@ -56,11 +71,10 @@ def save_config(cfg, path):
     return backup
 
 
-def config_lists(cfg):
+def config_lists(cfg, keys=ALL_LISTS):
     """{config key: [symbols]} exactly as written."""
     dm = cfg.get('data_manager', {})
-    return {key: [s.upper() for s in dm.get(key, []) or []]
-            for key in MARKET_LISTS.values()}
+    return {key: [s.upper() for s in dm.get(key, []) or []] for key in keys}
 
 
 def universe(cfg):
@@ -77,23 +91,41 @@ def universe(cfg):
     return {m: sorted(s) for m, s in by_market.items()}
 
 
-def duplicates(cfg):
-    """Symbols appearing in more than one config list.
+def conflicts(cfg):
+    """Symbols claimed by more than one TRADING list.
 
-    The loop iterates `data_manager.symbols`, so a pair listed both there
-    and in `crypto_symbols` is processed once per cycle but counted twice
-    when sizing the universe, and it is ambiguous which list governs it.
+    This is a genuine conflict: two execution paths on different cadences
+    would both act on the same name. An overlap between a trading list and a
+    classification list is not a conflict and is not reported here.
     """
-    lists = config_lists(cfg)
     seen = {}
-    for key, syms in lists.items():
+    for key, syms in config_lists(cfg, TRADING_LISTS).items():
         for sym in syms:
             seen.setdefault(sym, []).append(key)
     return {sym: keys for sym, keys in seen.items() if len(keys) > 1}
 
 
+def unclassified_crypto(cfg):
+    """Dash-suffixed fiat pairs traded but not listed in `crypto_symbols`.
+
+    These still classify as crypto through cost_model's suffix rule, but
+    relying on that leaves the fee schedule to a naming convention.
+    """
+    traded = {s for syms in config_lists(cfg, TRADING_LISTS).values() for s in syms}
+    declared = set(config_lists(cfg, CLASSIFICATION_LISTS)['crypto_symbols'])
+    return sorted(s for s in traded - declared
+                  if '-' in s and s.rsplit('-', 1)[-1] in
+                  {'USD', 'USDT', 'USDC', 'EUR'})
+
+
 def all_symbols(cfg):
-    return {s for syms in config_lists(cfg).values() for s in syms}
+    """Every distinct symbol the agent acts on.
+
+    Classification lists are excluded: a name appears there to describe a
+    symbol that is already in a trading list, so counting it again would
+    inflate the universe.
+    """
+    return {s for syms in config_lists(cfg, TRADING_LISTS).values() for s in syms}
 
 
 def cmd_list(args, cfg):
@@ -112,14 +144,18 @@ def cmd_list(args, cfg):
             print("    " + "  ".join(syms[i:i + 8]))
         print()
 
-    dupes = duplicates(cfg)
-    if dupes:
-        print("Listed in more than one place:")
-        for sym, keys in sorted(dupes.items()):
+    clashes = conflicts(cfg)
+    if clashes:
+        print("Claimed by two trading paths (a real conflict):")
+        for sym, keys in sorted(clashes.items()):
             print(f"    {sym}: {', '.join(keys)}")
-        print("    The main loop iterates data_manager.symbols, so these are "
-              "processed from there; the second listing is redundant and makes "
-              "it ambiguous which one governs.\n")
+        print("    Both would act on it, on different cadences.\n")
+
+    stray = unclassified_crypto(cfg)
+    if stray:
+        print(f"Traded crypto not declared in crypto_symbols: {', '.join(stray)}")
+        print("    They fall back to cost_model's dash-suffix rule, which "
+              "leaves the fee schedule to a naming convention.\n")
 
     unverified = unverified_markets(cfg)
     active = {m for m, s in by_market.items() if s}
@@ -195,7 +231,7 @@ def cmd_remove(args, cfg):
     targets = [s.strip().upper() for s in args.symbols if s.strip()]
     removed = []
     for sym in targets:
-        for key in MARKET_LISTS.values():
+        for key in ALL_LISTS:
             lst = cfg.get('data_manager', {}).get(key) or []
             matches = [s for s in lst if s.upper() == sym]
             for m in matches:
