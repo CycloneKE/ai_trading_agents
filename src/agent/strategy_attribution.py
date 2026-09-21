@@ -106,3 +106,71 @@ def compute_attribution(fills: List[Dict[str, Any]],
         del agg['wins']
 
     return result
+
+
+def compute_symbol_attribution(fills: List[Dict[str, Any]],
+                               price_lookup: Optional[Callable[[str], Optional[float]]] = None
+                               ) -> Dict[str, Dict[str, Any]]:
+    """Attribute realized P&L to symbols rather than strategies.
+
+    The question this answers is "is this name earning its place in the
+    universe", which strategy-level attribution cannot: a symbol can be
+    quietly losing money across every strategy that touches it and still be
+    invisible in a per-strategy view.
+
+    Uses the same average-cost book as `compute_attribution`, keyed by
+    symbol alone.
+    """
+    books: Dict[str, Dict[str, float]] = {}
+    out: Dict[str, Dict[str, Any]] = {}
+
+    for f in sorted(fills, key=lambda r: r.get('created_at') or ''):
+        symbol = f.get('symbol')
+        qty = float(f.get('filled_quantity') or 0)
+        price = float(f.get('filled_avg_price') or 0)
+        side = f.get('side')
+        if not symbol or qty <= 0 or price <= 0 or side not in ('buy', 'sell'):
+            continue
+
+        book = books.setdefault(symbol, {'qty': 0.0, 'avg': 0.0})
+        rec = out.setdefault(symbol, {
+            'realized_pnl': 0.0, 'closed_trades': 0, 'wins': 0,
+            'buys': 0, 'sells': 0, 'first_seen': f.get('created_at'),
+            'last_seen': f.get('created_at'),
+        })
+        rec['last_seen'] = f.get('created_at') or rec['last_seen']
+
+        if side == 'buy':
+            rec['buys'] += 1
+            total = book['avg'] * book['qty'] + price * qty
+            book['qty'] += qty
+            book['avg'] = (total / book['qty']) if book['qty'] else 0.0
+        else:
+            rec['sells'] += 1
+            closing = min(qty, book['qty'])
+            if closing > 0:
+                pnl = (price - book['avg']) * closing
+                rec['realized_pnl'] += pnl
+                rec['closed_trades'] += 1
+                if pnl > 0:
+                    rec['wins'] += 1
+                book['qty'] -= closing
+                if book['qty'] <= 1e-9:
+                    book['qty'], book['avg'] = 0.0, 0.0
+
+    for symbol, rec in out.items():
+        book = books.get(symbol, {'qty': 0.0, 'avg': 0.0})
+        rec['open_quantity'] = book['qty']
+        rec['avg_entry_price'] = book['avg']
+        rec['win_rate'] = (rec['wins'] / rec['closed_trades']
+                           if rec['closed_trades'] else 0.0)
+        rec['unrealized_pnl'] = 0.0
+        if price_lookup and book['qty'] > 0:
+            try:
+                current = price_lookup(symbol)
+                if current:
+                    rec['unrealized_pnl'] = (float(current) - book['avg']) * book['qty']
+            except Exception as e:
+                logger.debug(f"Price lookup failed for {symbol}: {e}")
+        rec['total_pnl'] = rec['realized_pnl'] + rec['unrealized_pnl']
+    return out
