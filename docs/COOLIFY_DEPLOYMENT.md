@@ -249,6 +249,17 @@ This requires the health endpoint to be reachable from the internet, which is
 why step 4 above suggested mapping a domain to the backend on port 8080. It
 stays password protected.
 
+**How much to trust it.** GitHub Actions is free and needs no extra account,
+but it is not a minute-accurate monitor: scheduled runs are delayed or
+dropped under load. The schedule deliberately avoids the quarter hours, which
+are the most congested slots, after an earlier version on `*/15` produced no
+runs at all in its first hour. Read it as "you will hear within the hour",
+not "within fifteen minutes".
+
+If you want a firm guarantee that someone notices the agent stopping, point a
+dedicated uptime service at the same health endpoint as well. The two do not
+conflict, and the second one costs nothing on a free tier.
+
 ### 4. Capacity check, weekly
 
 | Field | Value |
