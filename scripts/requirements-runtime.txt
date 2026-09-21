@@ -1,34 +1,50 @@
-# Minimal runtime dependencies for production backend
+# Runtime dependencies for the production container.
+#
+# This is the file the Dockerfile installs. It is NOT requirements.txt, and
+# that distinction has bitten this project once already: PyJWT and bcrypt were
+# in requirements.txt and in requirements-ci.txt (added there with the comment
+# "Auth stack"), but never here. src/api/auth.py imports both at module scope
+# with no guard, so every deployed container answered protected routes with
+# 503 and nobody could log in to the dashboard, while CI stayed green because
+# CI installs requirements-ci.txt.
+#
+# The rule that follows from that: anything imported WITHOUT a try/except
+# guard on the agent or API startup path belongs here. Optional, degrading
+# imports (torch, transformers, nltk, pandas_ta) deliberately do not.
+# tests/test_runtime_requirements.py enforces it.
+
+# --- Core web and process layer -------------------------------------------
+flask>=2.3.0
+flask-cors>=4.0.0
+waitress>=3.0.0          # Production WSGI server. Without it api_server falls
+                         # back to the Flask development server, which prints
+                         # its own warning not to use it in production.
+
+# --- Authentication -------------------------------------------------------
+# Both are imported unguarded by src/api/auth.py. Missing either one locks the
+# entire API down: AUTH_AVAILABLE goes False and protected routes return 503.
+PyJWT>=2.8.0
+bcrypt>=4.0.0
+
+# --- Configuration and transport ------------------------------------------
 python-dotenv>=0.21.0
 requests>=2.32.4
-flask>=2.3.0
-flask-cors>=4.0.0
-prometheus-client>=0.12.0
-redis>=4.5.3
-psycopg2-binary>=2.9.0
-cryptography>=3.4.8
 websocket-client>=1.3.0
 aiohttp>=3.8.0
-psutil>=5.9.0
+cryptography>=3.4.8
+
+# --- State and metrics ----------------------------------------------------
+redis>=4.5.3
+psycopg2-binary>=2.9.0
+prometheus-client>=0.12.0
+psutil>=5.9.0            # System metrics only. The monitoring service and the
+                         # /health endpoint run without it.
+
+# --- Numeric ---------------------------------------------------------------
 numpy>=1.22.0
 pandas>=1.3.0
 
-# Optional / extended features (install in separate build if needed)
-# scikit-learn, tensorflow, torch, xgboost, optuna, scipy, matplotlib# Minimal runtime requirements (keep small to avoid heavy ML packages in the container)
-python-dotenv>=0.19.0
-requests>=2.32.4
-flask>=2.3.0
-flask-cors>=4.0.0
-prometheus-client>=0.12.0
-redis>=4.5.3
-psycopg2-binary>=2.9.0
-
-# Data and numeric packages required by the backend
-numpy>=1.22.0
-pandas>=1.3.0
-psutil>=5.9.0
-
-# Additional runtime packages required by the application
-cryptography>=3.4.8
-websocket-client>=1.3.0
-aiohttp>=3.8.0
+# Heavier optional features (scikit-learn, torch, transformers, yfinance,
+# alpaca-trade-api) are intentionally absent. Each is guarded at its import
+# site and the system degrades rather than failing. See
+# scripts/requirements-ml.txt and docs/COOLIFY_DEPLOYMENT.md.
