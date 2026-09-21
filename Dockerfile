@@ -1,16 +1,11 @@
-
-## Multi-stage Dockerfile optimized for production
-
-# -----------------------
-# Builder: frontend
-# -----------------------
-FROM node:20 AS frontend-builder
-WORKDIR /build/frontend
-COPY frontend/package.json frontend/package-lock.json* ./
-RUN if [ -f package.json ]; then npm ci --legacy-peer-deps || npm install --legacy-peer-deps; fi
-COPY frontend/ ./
-RUN if [ -f package.json ]; then npm run build || echo "frontend build failed or not present"; fi
-
+## Backend image: the trading agent, its REST API and its monitoring endpoint.
+##
+## This image deliberately does NOT contain the dashboard. It used to: a
+## node:20 stage built Next.js and the result was copied into a
+## python:3.11-slim final stage that has no Node runtime at all. `npx next
+## start` in that image fails with "not found", so the dashboard never ran,
+## silently in the single-container path and as a restart loop in Compose.
+## The dashboard now lives in Dockerfile.frontend, on a base that can run it.
 
 # -----------------------
 # Builder: python dependencies (cacheable)
@@ -45,6 +40,7 @@ RUN pip install --no-cache-dir -r requirements-ml.txt || echo "ML packages insta
 # Final runtime image
 # -----------------------
 FROM python:3.11-slim
+
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install minimal system deps for runtime
@@ -58,30 +54,37 @@ WORKDIR /app
 COPY --from=deps-builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=deps-builder /usr/local/bin /usr/local/bin
 
-# Copy only application files required at runtime
-# Exclude tests, docs, local configs via .dockerignore
+# Application code. .dockerignore keeps .env, the journals and .git out.
 COPY . .
 
-# Copy built frontend assets if present
-COPY --from=frontend-builder /build/frontend/.next ./frontend/.next
-COPY --from=frontend-builder /build/frontend/package.json ./frontend/package.json
+# Fail the build rather than ship an image whose auth layer cannot load.
+# PyJWT and bcrypt are imported unguarded by src/api/auth.py; without them
+# the API starts, reports healthy, and answers every protected route with 503.
+RUN python -c "import jwt, bcrypt, waitress, flask, flask_cors; print('runtime import check OK')"
 
-# Create runtime dirs
+# Runtime dirs. /app/data MUST be a mounted volume in any real deployment:
+# the SQLite journals are the run's only durable record and an unmounted
+# path is destroyed on every redeploy.
 RUN mkdir -p /app/data /app/logs
+VOLUME ["/app/data"]
 
-# Add start script and make executable if present
+# Install the entrypoint while still root: /usr/local/bin is not writable by
+# the unprivileged user, so the chmod has to happen before the USER switch.
 COPY start.sh /usr/local/bin/start.sh
-RUN chmod +x /usr/local/bin/start.sh || true
+RUN chmod 0755 /usr/local/bin/start.sh
+
+# Run as a non-root user.
+RUN useradd --create-home --uid 10001 trader \
+    && chown -R trader:trader /app
+USER trader
 
 ENV PYTHONUNBUFFERED=1
 ENV TZ=UTC
 
-# Expose ports used by the app
-EXPOSE 8080
+# 8080 monitoring/health, 5001 REST API (config.json api.port)
+EXPOSE 8080 5001
 
-# Healthcheck (optional)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
   CMD curl -fsS --max-time 5 http://localhost:8080/health || exit 1
 
-# Default command
 CMD ["/usr/local/bin/start.sh"]

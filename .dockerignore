@@ -1,0 +1,59 @@
+# What must never enter the image.
+#
+# The Dockerfile does `COPY . .`, and until this file existed that copied the
+# whole working tree: the operator's .env with broker keys and SECRET_KEY, the
+# live SQLite journals, and the entire .git history. The CI pipeline has a
+# DockerHub push path, so anything in the image can leave the machine.
+
+# --- Secrets ---------------------------------------------------------------
+# .env is created on the deploy host, so it is present exactly when it is most
+# dangerous. Coolify injects environment variables directly and needs no file.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+config/run_config.json
+config/run_local.json
+
+# --- Live state ------------------------------------------------------------
+# Journals belong in a mounted volume, never baked into an image. A copied
+# journal would also be restored on every redeploy, silently resurrecting old
+# orders for reconciliation.
+data/
+logs/
+reports/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
+
+# --- Version control and CI -------------------------------------------------
+.git
+.gitignore
+.github
+.dockerignore
+
+# --- Build and cache artefacts ---------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+node_modules/
+frontend/node_modules/
+frontend/.next/
+.next/
+
+# --- Not needed at runtime --------------------------------------------------
+tests/
+docs/
+*.md
+!README.md
+Dockerfile*
+docker-compose*.yml

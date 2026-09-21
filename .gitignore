@@ -56,7 +56,10 @@ secrets/*
 *.key
 
 # Docker
-.dockerignore
+# .dockerignore is NOT ignored. It decides what enters the image, so it
+# has to be in version control: ignoring it meant every clone and every
+# CI build ran `COPY . .` with no exclusions, copying .env, the SQLite
+# journals and .git into the published image.
 
 # Testing
 .coverage

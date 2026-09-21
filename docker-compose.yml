@@ -1,8 +1,10 @@
-version: "3.8"
+# Local and plain-VPS deployment. For Coolify use docker-compose.coolify.yml.
 
 services:
   backend:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: ai_trading_agents:backend
     container_name: ai-trading-backend
     env_file: .env
@@ -12,29 +14,39 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
       # Dashboard origin(s) the API accepts; must match how traders reach it.
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3001}
+    volumes:
+      # The order and decision journals are the run's only durable record.
+      # Without this mount they live in the container's writable layer and are
+      # destroyed by every redeploy, rebuild or `docker compose down`, which on
+      # a ninety-day run means losing the evidence the run exists to produce.
+      # A NAMED volume, not a bind mount: it inherits the image's ownership, so
+      # the non-root `trader` user (uid 10001) can write to it.
+      - trading_data:/app/data
+      - trading_logs:/app/logs
     # Ports bound to loopback only: expose the app through the Caddy TLS
     # proxy (deploy/Caddyfile), never plaintext HTTP on a public interface.
     ports:
-      - "127.0.0.1:8080:8080" # monitoring
+      - "127.0.0.1:8080:8080" # monitoring / health
       - "127.0.0.1:5001:5001" # api (config.json api.port)
-    command: ["python3", "-m", "src.agent.main"]
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     networks:
       - ai_trading_net
     restart: unless-stopped
 
   frontend:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
     image: ai_trading_agents:frontend
     container_name: ai-trading-frontend
-    env_file: .env
+    environment:
+      - NODE_ENV=production
     depends_on:
       - backend
     ports:
       - "127.0.0.1:3001:3001"
-    # Start only the Next.js frontend process
-    command: ["npx", "next", "start", "-p", "3001", "-H", "0.0.0.0"]
     networks:
       - ai_trading_net
     restart: unless-stopped
@@ -48,12 +60,15 @@ services:
     networks:
       - ai_trading_net
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
 volumes:
+  trading_data: {}
+  trading_logs: {}
   redis_data: {}
 
 networks:

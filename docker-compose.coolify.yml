@@ -1,0 +1,85 @@
+# Coolify deployment.
+#
+# In Coolify: New Resource -> Docker Compose, point it at this repository and
+# set this file as the compose path. Coolify builds the images, injects the
+# environment variables you define in its UI, and puts its own reverse proxy
+# in front with automatic Let's Encrypt certificates.
+#
+# Two differences from docker-compose.yml, both deliberate:
+#
+# 1. `expose` instead of `ports`. Coolify's proxy reaches a service over the
+#    Docker network, not through a published host port. Publishing to
+#    127.0.0.1 would leave the proxy unable to route to it. Assign the domain
+#    in Coolify's UI against the port named here.
+#
+# 2. No `env_file`. Coolify supplies environment variables itself, so a .env
+#    baked into the repository would only shadow them (and .dockerignore keeps
+#    .env out of the image entirely).
+#
+# Set these in Coolify's Environment Variables tab before the first deploy:
+#   SECRET_KEY              long random string; signs dashboard login tokens
+#   REDIS_PASSWORD          long random string
+#   CORS_ALLOWED_ORIGINS    https://<your dashboard domain>
+#   TRADING_ALPACA_API_KEY  and TRADING_ALPACA_API_SECRET, for paper trading
+#   plus whichever market data keys you use (see .env.example)
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?set REDIS_PASSWORD in Coolify}
+      - SECRET_KEY=${SECRET_KEY:?set SECRET_KEY in Coolify, or nobody can log in}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3001}
+    volumes:
+      # Coolify redeploys by rebuilding the image on every git push. Anything
+      # not in a named volume is destroyed each time. These journals ARE the
+      # record of the trading run, so losing them silently resets the
+      # experiment to zero while appearing to work.
+      - trading_data:/app/data
+      - trading_logs:/app/logs
+    expose:
+      - "8080"   # monitoring / health  -> point a domain here to watch the run
+      - "5001"   # REST API             -> the dashboard calls this
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    environment:
+      - NODE_ENV=production
+    expose:
+      - "3001"   # dashboard -> point your main domain here
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD:?set REDIS_PASSWORD in Coolify}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  trading_data: {}
+  trading_logs: {}
+  redis_data: {}

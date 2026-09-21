@@ -1,0 +1,47 @@
+## Dashboard image: the Next.js frontend.
+##
+## This exists because the dashboard previously had no image that could run
+## it. The main Dockerfile built Next.js in a node:20 stage and copied the
+## output into a python:3.11-slim final image with no Node runtime, so
+## `npx next start` failed with "not found" and the dashboard silently never
+## came up.
+
+# -----------------------
+# Builder
+# -----------------------
+FROM node:22-slim AS builder
+WORKDIR /build
+
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm ci --legacy-peer-deps || npm install --legacy-peer-deps
+
+COPY frontend/ ./
+
+# Fail the build when the dashboard does not build, rather than shipping an
+# image that serves a blank page. The .next check catches a build that exits
+# 0 without emitting anything, which is just as broken and even quieter.
+RUN npm run build \
+    && test -d .next \
+    || (echo "FATAL: frontend build produced no .next directory" >&2; exit 1)
+
+
+# -----------------------
+# Runtime
+# -----------------------
+FROM node:22-slim
+ENV NODE_ENV=production
+ENV TZ=UTC
+WORKDIR /app
+
+# node:22-slim ships a non-root `node` user (uid 1000); use it.
+COPY --from=builder --chown=node:node /build/.next ./.next
+COPY --from=builder --chown=node:node /build/node_modules ./node_modules
+COPY --from=builder --chown=node:node /build/package.json ./package.json
+
+USER node
+
+EXPOSE 3001
+
+# `next start` is provided by the local next package, so this needs no npx
+# and no network at runtime.
+CMD ["./node_modules/.bin/next", "start", "-p", "3001", "-H", "0.0.0.0"]
