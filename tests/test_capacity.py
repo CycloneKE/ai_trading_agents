@@ -1,4 +1,7 @@
 """Universe capacity arithmetic."""
+import os
+import sys
+
 import pytest
 
 from src.agent.capacity import (DEFAULT_PROVIDER_LIMITS, assess,
@@ -121,3 +124,38 @@ def test_projection_marks_where_each_limit_is_crossed():
 
 def test_gemini_free_tier_default_is_documented():
     assert DEFAULT_PROVIDER_LIMITS['gemini'] == 10
+
+
+# --------------------------------------------- the scheduled job's exit code
+
+def _run_monitor(*args):
+    """The CLI, with figures supplied so it does not measure (slow)."""
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return subprocess.run(
+        [sys.executable, os.path.join(root, 'scripts', 'monitor_capacity.py'),
+         '--per-symbol-seconds', '0.0054', *args],
+        capture_output=True, text=True, cwd=root, timeout=120)
+
+
+def test_strict_fails_when_the_universe_is_over_quota():
+    """The reason the scheduled job passes --strict.
+
+    A quota overrun leaves the cycle well inside its time budget, so without
+    --strict the job reports success while LLM validation silently switches
+    off for the whole run.
+    """
+    over = _run_monitor('--symbols', '60', '--signal-rate', '0.5', '--strict')
+    assert over.returncode != 0, over.stdout[-500:]
+    assert 'strict' in over.stderr.lower()
+
+
+def test_without_strict_the_same_overrun_reports_success():
+    """Pins the default, so the difference is deliberate rather than luck."""
+    lenient = _run_monitor('--symbols', '60', '--signal-rate', '0.5')
+    assert lenient.returncode == 0
+
+
+def test_strict_passes_a_universe_that_fits():
+    ok = _run_monitor('--symbols', '4', '--signal-rate', '0.1', '--strict')
+    assert ok.returncode == 0, ok.stdout[-500:]

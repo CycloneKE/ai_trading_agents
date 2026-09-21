@@ -1,0 +1,50 @@
+# Dependency updates.
+#
+# This matters more here than in a typical project: the container installs
+# scripts/requirements-runtime.txt with version ranges rather than pins, so a
+# rebuild months from now can pull different libraries with no code change.
+# Dependabot turns that drift into reviewable pull requests that CI tests,
+# instead of a surprise on a redeploy.
+#
+# Grouped so a quiet week produces one pull request rather than nine.
+
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Africa/Nairobi
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-and-patch:
+        update-types: [minor, patch]
+    labels: [dependencies, python]
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Africa/Nairobi
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+    labels: [dependencies, frontend]
+    commit-message:
+      prefix: "deps"
+
+  # Pinned action versions go stale silently and are a supply-chain surface.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    labels: [dependencies, ci]
+    commit-message:
+      prefix: "ci"
