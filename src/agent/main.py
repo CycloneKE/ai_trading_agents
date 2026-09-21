@@ -50,6 +50,8 @@ from src.agent.realtime_risk_manager import RealTimeRiskManager
 from src.agent.performance_analytics import PerformanceAnalytics
 from src.agent.heartbeat_monitor import HeartbeatMonitor
 from src.agent.risk_calculator import RiskCalculator
+from src.agent.position_sizing import (DEFAULT_RISK_PER_TRADE,
+                                       volatility_scaled_value)
 from src.agent.llm_orchestrator import LLMOrchestrator
 from src.agent.bias_detector import BiasDetector
 from src.agent.adaptive_integration import AdaptiveStrategyIntegration
@@ -1416,10 +1418,40 @@ class TradingAgent:
                         if not hasattr(self, 'cash_policy'):
                             from src.agent.cash_policy import CashDeploymentPolicy
                             self.cash_policy = CashDeploymentPolicy(self.config)
-                        max_risk_per_trade = self.cash_policy.risk_cap(deployed_pct, confidence)
 
-                        # Position value based on signal (confidence * position_size)
-                        target_pos_value = portfolio_value * min(position_size, max_risk_per_trade)
+                        # Size off the stop distance, the same way the backtest
+                        # does. This loop used to size as a flat fraction of
+                        # equity (confidence * max_position_size, capped by the
+                        # cash policy) and never looked at volatility, even
+                        # though the stops right below it do. The result was
+                        # the same notional in an NSE bank moving 1% a day and
+                        # a crypto pair moving 6%, which is six times the risk
+                        # for the same signal — and it meant the live agent
+                        # sized positions by a method the backtest never
+                        # measured, so backtest results did not describe it.
+                        limits = self.config.get('risk_limits', {})
+                        atr_pct = None
+                        tracker = getattr(self, 'volatility', None)
+                        if tracker is not None:
+                            try:
+                                atr_pct = tracker.atr_pct(symbol)
+                            except Exception as e:
+                                logger.debug(f"No ATR for {symbol}: {e}")
+
+                        risk_per_trade = float(
+                            self.config.get('trading', {}).get('risk_per_trade',
+                                                               DEFAULT_RISK_PER_TRADE))
+                        # Conviction and spare cash stretch the risk budget;
+                        # they no longer compete with the position cap.
+                        risk_per_trade *= self.cash_policy.risk_multiplier(
+                            deployed_pct, confidence)
+
+                        target_pos_value = volatility_scaled_value(
+                            portfolio_value, atr_pct,
+                            confidence=confidence,
+                            risk_per_trade=risk_per_trade,
+                            stop_atr_mult=float(limits.get('stop_loss_atr_mult', 2.5)),
+                            max_position_pct=float(limits.get('max_position_size', 0.05)))
 
                         # Known risk windows (elections, FOMC) scale sizing
                         # down deterministically — cycles are treated as
