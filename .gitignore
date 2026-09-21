@@ -76,3 +76,6 @@ scratch/
 backups/
 # Coverage artifacts
 coverage.xml
+
+# Timestamped config backups written by scripts/manage_universe.py --apply
+config/*.bak.*

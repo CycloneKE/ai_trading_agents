@@ -9,35 +9,75 @@ from typing import Dict, Any, List, Optional, Tuple
 import logging
 from datetime import datetime
 import re
-import torch
+
+# torch is only needed on the FinBERT path below. Importing it unconditionally
+# made this module unimportable without a multi-gigabyte ML dependency, and
+# api_server imports this module, so the entire REST API and dashboard were
+# disabled by its absence — reported as "Flask not available", which sent
+# anyone debugging it in the wrong direction. VADER and TextBlob need none of it.
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    torch = None
+    TORCH_AVAILABLE = False
 
 try:
     from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
-    TRANSFORMERS_AVAILABLE = True
+    TRANSFORMERS_AVAILABLE = TORCH_AVAILABLE
 except ImportError:
     import logging
-    logging.warning("transformers not installed. NLP capabilities will be disabled.")
+    logging.warning("transformers not installed. FinBERT sentiment disabled; "
+                    "VADER and TextBlob still available.")
     TRANSFORMERS_AVAILABLE = False
     
 logger = logging.getLogger(__name__)
 
-from textblob import TextBlob
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-import nltk
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize, sent_tokenize
-from nltk.stem import WordNetLemmatizer
+# Each backend is optional and independent. None of them were declared in
+# requirements.txt, so on a clean install this module raised ImportError, and
+# because api_server imports it at module scope the REST API and dashboard
+# never started at all. Degrade per backend instead: a missing lexicon should
+# cost one sentiment source, not the whole web interface.
+try:
+    from textblob import TextBlob
+    TEXTBLOB_AVAILABLE = True
+except ImportError:
+    TextBlob = None
+    TEXTBLOB_AVAILABLE = False
+
+try:
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+    VADER_AVAILABLE = True
+except ImportError:
+    SentimentIntensityAnalyzer = None
+    VADER_AVAILABLE = False
+
+try:
+    import nltk
+    from nltk.corpus import stopwords
+    from nltk.tokenize import word_tokenize, sent_tokenize
+    from nltk.stem import WordNetLemmatizer
+    NLTK_AVAILABLE = True
+except ImportError:
+    nltk = None
+    stopwords = word_tokenize = sent_tokenize = WordNetLemmatizer = None
+    NLTK_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
+if not (TEXTBLOB_AVAILABLE or VADER_AVAILABLE or TRANSFORMERS_AVAILABLE):
+    logger.warning("No sentiment backend available (textblob, vaderSentiment, "
+                   "transformers all missing). Sentiment scores will be neutral.")
+
 # Download required NLTK data
-try:
-    nltk.download('punkt', quiet=True)
-    nltk.download('stopwords', quiet=True)
-    nltk.download('wordnet', quiet=True)
-    nltk.download('vader_lexicon', quiet=True)
-except:
-    pass
+if NLTK_AVAILABLE:
+    try:
+        nltk.download('punkt', quiet=True)
+        nltk.download('stopwords', quiet=True)
+        nltk.download('wordnet', quiet=True)
+        nltk.download('vader_lexicon', quiet=True)
+    except Exception as e:
+        logger.debug(f"NLTK corpus download skipped: {e}")
 
 
 class FinancialSentimentAnalyzer:
@@ -47,18 +87,22 @@ class FinancialSentimentAnalyzer:
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = (torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                       if TORCH_AVAILABLE else None)
         
         # Model configurations
-        self.use_finbert = config.get('use_finbert', True)
-        self.use_vader = config.get('use_vader', True)
-        self.use_textblob = config.get('use_textblob', True)
+        self.use_finbert = config.get('use_finbert', True) and TRANSFORMERS_AVAILABLE
+        # Config asks for a backend; availability decides whether it can run.
+        self.use_vader = config.get('use_vader', True) and VADER_AVAILABLE
+        self.use_textblob = config.get('use_textblob', True) and TEXTBLOB_AVAILABLE
         
         # Initialize models
         self.finbert_model = None
         self.finbert_tokenizer = None
         self.vader_analyzer = None
-        self.lemmatizer = WordNetLemmatizer()
+        # None when nltk is absent; every use site must tolerate that
+        # rather than assume a lemmatiser exists.
+        self.lemmatizer = WordNetLemmatizer() if NLTK_AVAILABLE else None
         
         # Financial keywords and phrases
         self.positive_keywords = {
@@ -250,9 +294,16 @@ class FinancialSentimentAnalyzer:
             if not text:
                 return {'positive_count': 0, 'negative_count': 0, 'sentiment_score': 0.0}
             
-            # Tokenize and lemmatize
-            tokens = word_tokenize(text.lower())
-            lemmatized_tokens = [self.lemmatizer.lemmatize(token) for token in tokens]
+            # Tokenize and lemmatize. Without nltk both degrade to a plain
+            # split: keyword matching on raw tokens is weaker than on lemmas
+            # but still useful, and far better than the whole module refusing
+            # to import and taking the REST API with it.
+            if NLTK_AVAILABLE and word_tokenize is not None:
+                tokens = word_tokenize(text.lower())
+            else:
+                tokens = text.lower().split()
+            lemmatized_tokens = ([self.lemmatizer.lemmatize(t) for t in tokens]
+                                 if self.lemmatizer is not None else tokens)
             
             # Count positive and negative keywords
             positive_count = sum(1 for token in lemmatized_tokens if token in self.positive_keywords)

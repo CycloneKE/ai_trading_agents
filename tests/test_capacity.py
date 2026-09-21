@@ -38,15 +38,50 @@ def test_a_small_universe_has_no_findings():
     assert r.findings == []
 
 
-def test_the_real_configuration_is_over_the_free_tier_quota():
-    """32 symbols at the 43.9% signal rate measured on real GOOG bars needs
-    about 14 validation calls a cycle against 10 allowed."""
-    r = assess(32, per_symbol_seconds=0.0054, cycle_budget_seconds=60,
+def test_counting_both_symbol_sets_per_cycle_overstates_demand():
+    """The mistake this model exists to avoid.
+
+    Treating all 32 configured symbols as one per-cycle load implies ~14
+    calls a minute against 10 allowed. In reality only `data_manager.symbols`
+    is walked every 60s; `nse_symbols` runs every 30 minutes during Nairobi
+    hours. Sustained demand is well under the quota.
+    """
+    naive = assess(32, per_symbol_seconds=0.0054, cycle_budget_seconds=60,
+                   signal_rate=0.439, llm_limit_per_minute=10)
+    assert naive.detail['sustained_calls_per_minute'] > 10      # the wrong answer
+
+    real = assess(14, per_symbol_seconds=0.0054, cycle_budget_seconds=60,
+                  signal_rate=0.439, llm_limit_per_minute=10,
+                  burst_symbols=18, burst_interval_seconds=1800)
+    assert real.detail['sustained_calls_per_minute'] < 10       # the right one
+
+
+def test_a_slow_burst_is_reported_as_a_spike_not_a_sustained_overrun():
+    r = assess(14, per_symbol_seconds=0.0054, cycle_budget_seconds=60,
+               signal_rate=0.439, llm_limit_per_minute=10,
+               burst_symbols=18, burst_interval_seconds=1800)
+    assert r.detail['sustained_calls_per_minute'] == pytest.approx(6.1, abs=0.2)
+    assert r.detail['peak_calls_per_minute'] == pytest.approx(14.0, abs=0.2)
+    assert any('burst' in f for f in r.findings)
+    # The finding must point at the burst, not at the universe size.
+    assert any('without trimming the universe' in f for f in r.findings)
+
+
+def test_the_trimmed_configuration_fits_the_quota():
+    """13 loop symbols plus a 9-symbol NSE burst: the shipped trim."""
+    r = assess(13, per_symbol_seconds=0.0054, cycle_budget_seconds=60,
+               signal_rate=0.439, llm_limit_per_minute=10,
+               burst_symbols=9, burst_interval_seconds=1800)
+    assert r.detail['peak_calls_per_minute'] < 10
+    assert r.findings == []
+
+
+def test_burst_headroom_says_how_many_slow_symbols_fit():
+    r = assess(13, per_symbol_seconds=0.0054, cycle_budget_seconds=60,
                signal_rate=0.439, llm_limit_per_minute=10)
-    assert r.within_budget                      # time is fine
-    assert r.binding_constraint == 'LLM quota'  # quota is not
-    assert r.max_symbols_by_llm == 22
-    assert any('validation calls' in f for f in r.findings)
+    # ~5.7 calls/min sustained leaves ~4.3 of the quota, which at a 43.9%
+    # signal rate is about 9 symbols in the slow pass.
+    assert r.max_burst_symbols == 9
 
 
 def test_cycle_time_binds_when_per_symbol_cost_is_high():

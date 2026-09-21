@@ -58,3 +58,12 @@ pandas_ta==0.4.71b0; python_version >= "3.12"
 
 # Price feed used by src/utils/real_price_feed.py (was imported but undeclared)
 yfinance>=0.2.60
+
+# NLP / sentiment. All were imported by src/agent/sentiment_analyzer.py and
+# src/agent/text_processor.py without appearing here, so a clean install could
+# not import them — and because src/api/api_server.py imports the sentiment
+# analyser at module scope, the REST API and dashboard never started.
+# Each is now optional at runtime; install them to get real sentiment scores.
+textblob>=0.18.0
+vaderSentiment>=3.3.2
+nltk>=3.9
