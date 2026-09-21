@@ -144,7 +144,33 @@
       "payout_ratio_max": 0.7,
       "years_paid_target": 5,
       "min_avg_daily_volume": 50000,
-      "stale_days": 400
+      "stale_days": 400,
+      "require_sustainable": true,
+      "min_dividend_cover": 1.2,
+      "yield_trap_pct": 12.0,
+      "min_years_paid": 3,
+      "max_per_sector": 2,
+      "ex_date_tilt": 0.1
+    },
+    "sectors": {
+      "KCB": "banking",
+      "EQTY": "banking",
+      "COOP": "banking",
+      "SCBK": "banking",
+      "ABSA": "banking",
+      "SBIC": "banking",
+      "NCBA": "banking",
+      "SCOM": "telecom",
+      "EABL": "consumer",
+      "BAT": "consumer",
+      "KEGN": "energy",
+      "TOTL": "energy",
+      "BAMB": "industrial",
+      "KNRE": "insurance",
+      "BRIT": "insurance",
+      "CIC": "insurance",
+      "NMG": "media",
+      "CTUM": "investment"
     }
   },
   "risk_limits": {
@@ -299,5 +325,14 @@
     "enabled": true,
     "fast_period": 20,
     "slow_period": 50
+  },
+  "momentum_rotation": {
+    "_comment": "Cross-sectional momentum: rank the universe by 12-1 return, hold the leaders, rebalance monthly. Distinct from the per-symbol `momentum` technical strategy. absolute_filter holds cash rather than buying the best-performing loser in a falling market.",
+    "lookback": 12,
+    "skip_recent": 1,
+    "top_n": 3,
+    "min_momentum": 0.0,
+    "absolute_filter": true,
+    "max_weight": 0.5
   }
 }

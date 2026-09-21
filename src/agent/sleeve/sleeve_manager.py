@@ -38,6 +38,12 @@ def _scoring_config_from_dict(d: Dict[str, Any]) -> ScoringConfig:
     if yield_cap_pct <= 0:
         yield_cap_pct = 0.1
     return ScoringConfig(
+        require_sustainable=d.get('require_sustainable', True),
+        min_dividend_cover=d.get('min_dividend_cover', 1.2),
+        yield_trap_pct=d.get('yield_trap_pct', 12.0),
+        min_years_paid=d.get('min_years_paid', 3),
+        max_per_sector=d.get('max_per_sector', 2),
+        ex_date_tilt=d.get('ex_date_tilt', 0.10),
         yield_cap_pct=yield_cap_pct,
         yield_weight=d.get('yield_weight', 0.5),
         quality_weight=d.get('quality_weight', 0.5),
@@ -61,6 +67,10 @@ class SleeveManager:
         self.weighting_mode = sc.get('weighting_mode', 'equal')
         self.universe = sc.get('universe', [])
         self.scoring_cfg = _scoring_config_from_dict(sc.get('scoring', {}))
+        # Sector map for the concentration cap. Kenyan banks dominate the
+        # high-yield list, so without this the sleeve becomes a single bet on
+        # one credit cycle. Unmapped symbols are never capped.
+        self.sector_map = sc.get('sectors', {}) or {}
 
         self.nse_order_queue = nse_order_queue
         self.fundamentals_store = fundamentals_store
@@ -125,7 +135,8 @@ class SleeveManager:
 
         try:
             candidates = self.fundamentals_store.get_all(self.universe)
-            ranked = rank_candidates(candidates, self.scoring_cfg, self.top_n)
+            ranked = rank_candidates(candidates, self.scoring_cfg, self.top_n,
+                                     sector_lookup=self.sector_map)
             ranked = [c for c in ranked if quotes.get(c.symbol, 0) > 0]
             weights = self._target_weights(ranked)
 

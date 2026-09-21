@@ -313,6 +313,80 @@ def build_strategy_fn(cfg, manager, engine, stop_loss_pct, trailing_pct,
     return strategy
 
 
+def build_rotation_fn(cfg, engine, data, rebalance_every=1):
+    """Cross-sectional momentum rotation: rank the universe, hold the leaders,
+    rebalance on a fixed schedule.
+
+    Unlike the ensemble path this sees every symbol at once, which is the
+    whole point: it is a relative-strength ranking, not a per-symbol verdict.
+    """
+    from src.agent.momentum_rotation import config_from_dict, rebalance_orders, target_weights
+
+    rot_cfg = config_from_dict(cfg.get('momentum_rotation', {}))
+    history = {}
+    stats = {'signals': 0, 'stops': 0, 'blocked_cash': 0, 'atr_sized': 0,
+             'rebalances': 0, 'periods_in_cash': 0}
+    state = {'bar': 0}
+
+    def strategy(timestamp, prices, portfolio):
+        state['bar'] += 1
+        for sym, price in prices.items():
+            history.setdefault(sym, []).append(float(price))
+
+        if (state['bar'] - 1) % max(1, rebalance_every) != 0:
+            return []
+
+        target = target_weights(history, rot_cfg)
+        if not target:
+            stats['periods_in_cash'] += 1
+
+        pv = portfolio.get('portfolio_value', 0.0) or 0.0
+        held = portfolio.get('positions', {})
+        current = {sym: (pos.get('market_value', 0.0) / pv if pv > 0 else 0.0)
+                   for sym, pos in held.items() if pos.get('quantity', 0)}
+
+        deltas = rebalance_orders(current, target, pv, prices)
+        if not deltas:
+            return []
+        stats['rebalances'] += 1
+        stats['signals'] += len(deltas)
+
+        # Sells first: they free the cash the buys need, and the engine
+        # rejects a buy it cannot fund rather than borrowing.
+        orders = []
+        budget = engine.cash
+        for sym, notional in sorted(deltas.items(), key=lambda kv: kv[1]):
+            price = prices.get(sym)
+            if not price or price <= 0:
+                continue
+            if notional < 0:
+                qty = math.floor(min(abs(notional) / price,
+                                     held.get(sym, {}).get('quantity', 0.0)))
+                if qty > 0:
+                    orders.append(Order(symbol=sym, side=OrderSide.SELL,
+                                        order_type=OrderType.MARKET,
+                                        quantity=qty, timestamp=timestamp))
+                    # Proceeds fund the buys below. Discounted because the
+                    # fill price and commission are not known until execution.
+                    budget += qty * price * 0.98
+            else:
+                # Each buy draws from the running budget rather than the
+                # opening balance; sizing them all against the same figure
+                # is what made every order after the first unfundable.
+                spend = min(notional, budget * 0.98)
+                qty = math.floor(spend / price) if spend > 0 else 0
+                if qty > 0:
+                    orders.append(Order(symbol=sym, side=OrderSide.BUY,
+                                        order_type=OrderType.MARKET,
+                                        quantity=qty, timestamp=timestamp))
+                    budget -= qty * price
+                    stats['blocked_cash'] += 1 if spend < notional else 0
+        return orders
+
+    strategy.stats = stats
+    return strategy
+
+
 # ------------------------------------------------------------------- reporting
 
 def pct(x):
@@ -418,6 +492,9 @@ def write_report(path, meta, strat, bench, strategy_stats, warnings_list):
         f"- Stop-loss / trailing exits: {strategy_stats['stops']}",
         f"- Entries sized from ATR (rest fell back to the flat cap): "
         f"{strategy_stats.get('atr_sized', 0)}",
+    ] + ([f"- Rebalances: {strategy_stats['rebalances']}",
+          f"- Periods held fully in cash: {strategy_stats['periods_in_cash']}"]
+         if 'rebalances' in strategy_stats else []) + [
         f"- Total commission paid: {meta['total_commission']:,.2f}",
         f"- Interest earned on idle cash: {meta['interest_earned']:,.2f}",
         f"- Total slippage paid: {meta['total_slippage']:,.2f}",
@@ -447,6 +524,87 @@ def write_report(path, meta, strat, bench, strategy_stats, warnings_list):
         f.write('\n'.join(lines))
 
 
+# -------------------------------------------------------------- robustness
+
+def leave_one_out(args, cfg, data, syms, capital, risk_free):
+    """Re-run the strategy once per symbol, with that symbol removed.
+
+    A backtest whose result depends on a single name is measuring that name,
+    not the rule. On a five-symbol US universe over 2000-2010 the rotation
+    returned 16.1% a year, beating buy-and-hold; dropping AAPL took it to
+    6.7% against a 8.7% benchmark, and dropping AAPL and AMZN made it lose
+    money. Nothing in the headline said so.
+    """
+    results = []
+    for dropped in syms:
+        kept = [s for s in syms if s != dropped]
+        subset = {s: data[s] for s in kept}
+        try:
+            sub_engine = _build_engine(cfg, capital, risk_free, args)
+            sub_engine.add_market_data(subset)
+            fn = build_rotation_fn(cfg, sub_engine, subset,
+                                   rebalance_every=args.rebalance_every) \
+                if args.strategy == 'rotation' else None
+            if fn is None:
+                return []          # only meaningful for the rotation path today
+            sub_engine.run_backtest(fn)
+            eq = [p['portfolio_value'] for p in sub_engine.portfolio_history]
+            a = analyse(eq, sub_engine.trades, capital, args.periods_per_year, risk_free)
+            b = analyse(buy_and_hold(subset, kept, capital), [], capital,
+                        args.periods_per_year, risk_free)
+            results.append({
+                'dropped': dropped,
+                'cagr': a['cagr'],
+                'benchmark_cagr': b['cagr'],
+                'beats_benchmark': a['cagr'] > b['cagr'],
+                'trading_pnl': a['final_equity'] - capital
+                               - getattr(sub_engine, 'interest_earned', 0.0),
+                'profit_factor': a['profit_factor'],
+            })
+        except Exception as e:
+            logger.warning(f"Leave-one-out failed for {dropped}: {e}")
+    return results
+
+
+def format_leave_one_out(results, full_cagr):
+    if not results:
+        return ""
+    lines = ["Leave-one-out robustness (full universe CAGR "
+             f"{pct(full_cagr)}):", "",
+             f"  {'dropped':<10}{'CAGR':>9}{'vs B&H':>10}{'trading P&L':>15}{'PF':>7}"]
+    for r in sorted(results, key=lambda r: r['cagr']):
+        flag = "" if r['beats_benchmark'] else "   <- loses to buy & hold"
+        lines.append(f"  {r['dropped']:<10}{pct(r['cagr']):>9}"
+                     f"{pct(r['benchmark_cagr']):>10}{r['trading_pnl']:>15,.0f}"
+                     f"{r['profit_factor']:>7.2f}{flag}")
+    worst = min(results, key=lambda r: r['cagr'])
+    losers = [r for r in results if not r['beats_benchmark']]
+    lines += ["", f"  Worst case drops CAGR to {pct(worst['cagr'])} "
+                  f"(removing {worst['dropped']})."]
+    if losers:
+        lines.append(f"  {len(losers)} of {len(results)} subsets LOSE to buy & hold. "
+                     f"The headline rests on specific names, not the rule.")
+    else:
+        lines.append("  Every subset still beats buy & hold, so the result does "
+                     "not rest on any single name.")
+    return "\n".join(lines)
+
+
+def _build_engine(cfg, capital, risk_free, args):
+    trading = cfg.get('trading', {})
+    return BacktestEngine({
+        'initial_capital': capital,
+        'commission_rate': trading.get('commission', 0.001),
+        'min_commission': 0.0,
+        'slippage_rate': trading.get('slippage', 0.0005),
+        'slippage_model': 'linear',
+        'market_impact_model': 'sqrt',
+        'cost_config': cfg,
+        'cash_yield': risk_free,
+        'periods_per_year': args.periods_per_year,
+    })
+
+
 # ------------------------------------------------------------------------ main
 
 def main():
@@ -466,6 +624,18 @@ def main():
                          'Defaults to config analytics.risk_free_rate. For a Kenyan '
                          'investor this is the 91-day T-bill: a strategy that cannot '
                          'beat it after costs is not worth running.')
+    ap.add_argument('--strategy', choices=['ensemble', 'rotation'], default='ensemble',
+                    help="'ensemble' drives the live StrategyManager bar by bar; "
+                         "'rotation' runs cross-sectional momentum, ranking the "
+                         "whole universe and rebalancing on a schedule.")
+    ap.add_argument('--rebalance-every', type=int, default=1,
+                    help='bars between rotation rebalances (1 for monthly bars, '
+                         '~21 for daily). Ignored for --strategy ensemble.')
+    ap.add_argument('--leave-one-out', action='store_true',
+                    help='after the main run, re-run once per symbol with that '
+                         'symbol removed, and report the spread. A result that '
+                         'collapses when one name is dropped rests on that name, '
+                         'not on the rule.')
     ap.add_argument('--out', default='reports/backtest')
     args = ap.parse_args()
 
@@ -517,27 +687,34 @@ def main():
     engine = BacktestEngine(engine_cfg)
     engine.add_market_data(data)
 
-    manager = StrategyManager(cfg)
-    mocks = [n for n, s in manager.strategies.items() if isinstance(s, MockStrategy)]
-    if mocks:
-        raise SystemExit(
-            f"Refusing to run: {mocks} loaded as MockStrategy (always 'hold'), so the "
-            f"result would be a flat line, not a backtest. Install the strategy "
-            f"dependencies and retry.")
+    if args.strategy == 'ensemble':
+        manager = StrategyManager(cfg)
+        mocks = [n for n, s in manager.strategies.items() if isinstance(s, MockStrategy)]
+        if mocks:
+            raise SystemExit(
+                f"Refusing to run: {mocks} loaded as MockStrategy (always 'hold'), so the "
+                f"result would be a flat line, not a backtest. Install the strategy "
+                f"dependencies and retry.")
+    else:
+        manager = None
 
     # Feed a volatility tracker from the same bars, so stops and sizing use
     # each symbol's own ATR rather than one flat percentage for all of them.
     from src.agent.volatility import VolatilityTracker
     vol = VolatilityTracker(length=limits.get('atr_length', 14))
 
-    strat_fn = build_strategy_fn(
-        cfg, manager, engine,
-        stop_loss_pct=limits.get('stop_loss_pct', 0.05),
-        trailing_pct=limits.get('trailing_stop_pct', 0.03),
-        max_position_pct=limits.get('max_position_size', 0.05),
-        min_confidence=args.min_confidence, vol=vol, data=data)
+    if args.strategy == 'rotation':
+        strat_fn = build_rotation_fn(cfg, engine, data,
+                                     rebalance_every=args.rebalance_every)
+    else:
+        strat_fn = build_strategy_fn(
+            cfg, manager, engine,
+            stop_loss_pct=limits.get('stop_loss_pct', 0.05),
+            trailing_pct=limits.get('trailing_stop_pct', 0.03),
+            max_position_pct=limits.get('max_position_size', 0.05),
+            min_confidence=args.min_confidence, vol=vol, data=data)
 
-    print(f"Running {', '.join(syms)} over "
+    print(f"[{args.strategy}] Running {', '.join(syms)} over "
           f"{min(data[s].index.min() for s in syms).date()} -> "
           f"{max(data[s].index.max() for s in syms).date()} ...")
     results = engine.run_backtest(strat_fn)
@@ -654,6 +831,12 @@ def main():
     for market in unverified:
         print(f"WARNING: costs for '{market}' are a placeholder, not a verified "
               f"broker schedule. Treat these numbers as provisional.")
+    if args.leave_one_out and len(syms) > 2:
+        loo = leave_one_out(args, cfg, data, syms, capital, risk_free)
+        print("\n" + format_leave_one_out(loo, strat['cagr']))
+        with open(os.path.join(args.out, 'leave_one_out.json'), 'w') as f:
+            json.dump(loo, f, indent=2, default=str)
+
     print(f"\nReport written to {os.path.join(args.out, 'report.md')}")
 
 
