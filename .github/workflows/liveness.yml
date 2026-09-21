@@ -18,9 +18,19 @@ name: Liveness
 
 on:
   schedule:
-    # Every 15 minutes. GitHub delays scheduled runs under load, so treat
-    # this as "within the hour" rather than a precise interval.
-    - cron: '*/15 * * * *'
+    # Every 15 minutes, deliberately NOT on the quarter hours.
+    #
+    # This started as '*/15 * * * *', firing at :00, :15, :30 and :45. Those
+    # are the most congested slots on GitHub's scheduler, and scheduled runs
+    # are delayed or dropped entirely under load. In practice it produced no
+    # runs at all in the hour after it was added. Odd minutes sit outside the
+    # crush.
+    #
+    # Even so, treat this as "within the hour" rather than a precise
+    # interval: Actions is free and convenient, not a minute-accurate
+    # monitor. If you need a firm guarantee that the agent is watched, point
+    # an external uptime service at the same health endpoint as well.
+    - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
 
 # A stuck check should never block the next one.
