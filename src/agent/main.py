@@ -586,10 +586,18 @@ class TradingAgent:
         if NSE_SCRAPER_AVAILABLE and NSEPeriodicScraper is not None:
             try:
                 nse_connector = self.components.get('data_manager').connectors.get('nse') if self.components.get('data_manager') else None
+                # Pass the configured universe. Without this the scraper
+                # falls back to its own hardcoded DEFAULT_SYMBOLS and keeps
+                # fetching names that were removed from config, so trimming
+                # the universe saved no bandwidth and the data directory
+                # filled with series nothing reads.
+                nse_cfg_symbols = self.config.get('data_manager', {}).get('nse_symbols')
                 self.nse_scraper = NSEPeriodicScraper(
                     database_manager=self.database,
                     nse_connector=nse_connector,
-                    interval_minutes=30,
+                    interval_minutes=self.config.get('data_manager', {})
+                                        .get('nse_scrape_interval_minutes', 30),
+                    symbols=nse_cfg_symbols or None,
                 )
                 # Seed historical data if this is first run
                 self.nse_scraper.seed_historical(days=730)

@@ -39,6 +39,11 @@ logger = logging.getLogger(__name__)
 
 EAT = timezone(timedelta(hours=3))
 
+# Fallback only, for the CLI entry point and any caller that passes no
+# symbols. The running agent passes data_manager.nse_symbols instead; see
+# NSEPeriodicScraper.__init__. Keep this list broad rather than in sync with
+# config: narrowing it would silently shrink what a bare `python -m
+# src.connectors.nse_scraper` backfills.
 DEFAULT_SYMBOLS = [
     "SCOM", "EQTY", "KCB", "COOP", "SCBK", "SBIC", "ABSA",
     "BAT", "EABL", "KEGN", "KNRE", "BAMB",
