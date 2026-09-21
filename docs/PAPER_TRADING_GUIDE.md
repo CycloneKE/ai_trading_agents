@@ -1,5 +1,11 @@
 # 🚀 Paper Trading Deployment Guide
 
+> **This guide is out of date.** It refers to scripts that are no longer at the
+> paths shown, and its performance targets were never measured against this
+> codebase. For running a paper trade today, follow
+> [PAPER_RUN_RUNBOOK.md](PAPER_RUN_RUNBOOK.md), which uses
+> `scripts/start_paper_run.py` and `scripts/paper_run_report.py`.
+
 ## **Step-by-Step Deployment Process**
 
 ### **Phase 1: Pre-Deployment Setup (15 minutes)**

@@ -145,7 +145,17 @@ class TradingAgent:
             if self.monitoring_service:
                 monitoring_port = self.config.get('monitoring', {}).get('port', 8080)
                 self.monitoring_service.start(port=monitoring_port)
-                logger.info(f"Monitoring service started on port {monitoring_port}")
+                # Report what happened, not what was attempted. This line used
+                # to claim success unconditionally, so a service that refused
+                # to start still logged "started on port 8080" and the missing
+                # health endpoint looked like a network problem.
+                if getattr(self.monitoring_service, 'is_running', False):
+                    logger.info(f"Monitoring service listening on port {monitoring_port}")
+                else:
+                    logger.error(
+                        "Monitoring service did NOT start; /health is "
+                        "unavailable, so nothing will report whether this "
+                        "agent is alive.")
             
             # Initialize Immutable Audit Journal & Decoupled Task Queue Engine
             from src.agent.audit_journal import AuditJournal
