@@ -1,0 +1,89 @@
+# Is the trading agent still alive?
+#
+# The agent has an internal dead-man's switch, but it runs on a thread inside
+# the process, so it cannot report the process being gone. Over a ninety-day
+# unattended run the most likely silent failure is that the agent stopped on
+# day twelve and nobody noticed until week eight. This checks from outside.
+#
+# A failing run sends GitHub's normal workflow-failure notification to the
+# repository owner, which is the alert. No extra monitoring service needed.
+#
+# Setup: add two repository secrets.
+#   HEALTH_URL           e.g. https://health.example.com/health
+#   MONITORING_PASSWORD  the same value the agent runs with
+# Without them this workflow reports "not configured" and passes, rather than
+# failing every quarter of an hour for someone who has not set it up yet.
+
+name: Liveness
+
+on:
+  schedule:
+    # Every 15 minutes. GitHub delays scheduled runs under load, so treat
+    # this as "within the hour" rather than a precise interval.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+# A stuck check should never block the next one.
+concurrency:
+  group: liveness
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      # An `if:` expression cannot read the `secrets` context. Resolve
+      # presence into an output first and gate on that, the same way
+      # ci.yml's preflight job does.
+      - id: config
+        env:
+          HEALTH_URL: ${{ secrets.HEALTH_URL }}
+          MONITORING_PASSWORD: ${{ secrets.MONITORING_PASSWORD }}
+        run: |
+          if [ -n "$HEALTH_URL" ] && [ -n "$MONITORING_PASSWORD" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Not configured
+        if: steps.config.outputs.configured != 'true'
+        run: |
+          echo "::notice::Liveness checking is off. Add the HEALTH_URL and" \
+               "MONITORING_PASSWORD repository secrets to switch it on."
+
+      - name: Check the agent responds
+        if: steps.config.outputs.configured == 'true'
+        env:
+          HEALTH_URL: ${{ secrets.HEALTH_URL }}
+          MONITORING_PASSWORD: ${{ secrets.MONITORING_PASSWORD }}
+        run: |
+          set -u
+          # Three attempts with backoff: a single failure is as likely to be
+          # a redeploy or a network blip as a dead agent, and crying wolf
+          # every fifteen minutes trains you to ignore the alert.
+          attempt=1
+          max=3
+          while [ "$attempt" -le "$max" ]; do
+            body=$(curl -fsS --max-time 15 -u ":$MONITORING_PASSWORD" "$HEALTH_URL" 2>&1) && {
+              echo "$body" | head -c 400
+              case "$body" in
+                *'"status": "ok"'*|*'"status":"ok"'*|*'"status": "running"'*|*'"status":"running"'*)
+                  echo "::notice::Agent is alive."
+                  exit 0
+                  ;;
+              esac
+              echo "::warning::Endpoint answered but reported an unhealthy status (attempt $attempt/$max)."
+            } || echo "::warning::No answer from the health endpoint (attempt $attempt/$max)."
+            attempt=$((attempt + 1))
+            [ "$attempt" -le "$max" ] && sleep $((attempt * 10))
+          done
+
+          echo "::error::The trading agent did not report healthy after $max attempts."
+          echo "The agent is most likely stopped. Check the container is running," \
+               "then read the journals with scripts/paper_run_report.py — they" \
+               "record everything up to the moment it stopped."
+          exit 1

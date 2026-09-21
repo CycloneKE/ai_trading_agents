@@ -168,6 +168,87 @@ configuration would actually place a trade. It also records the run's start
 time, which is what lets the weekly report tell "nothing for three weeks" apart
 from "started an hour ago".
 
+## Scheduled jobs
+
+Three things should run on a schedule. Two run inside the container and go in
+Coolify's **Scheduled Tasks** tab for the backend resource; the third has to
+run from outside and lives in GitHub Actions.
+
+Coolify scheduled tasks run a command inside the running container, which is
+what these need: the container's Python environment and the mounted data
+volume. Host cron would have to exec into the container and would break every
+time the container is recreated.
+
+### 1. Back up the journals, daily
+
+In Coolify, **Scheduled Tasks** on the `backend` resource, add:
+
+| Field | Value |
+|---|---|
+| Name | `Daily journal backup` |
+| Command | `python scripts/backup_state.py --keep-days 30` |
+| Frequency | `0 2 * * *` |
+| Container | `backend` |
+
+That cron expression means 02:00 every day, in UTC. Nairobi is UTC+3, so it
+runs at 05:00 your time, comfortably outside both the Nairobi and New York
+sessions.
+
+The backup lands in `data/backups/`, inside the mounted volume, so it survives
+redeploys. It uses SQLite's online backup interface, so it is safe to run while
+the agent is trading, and it reads every copy back afterwards to confirm the
+file is usable. A backup that cannot be opened is not a backup.
+
+Be clear about what this protects. Backups sitting beside the journals survive
+a redeploy, a bad configuration change and an accidental deletion, which are
+the realistic failures. They do not survive losing the volume or the server.
+For that, copy `data/backups/` off the machine periodically as well.
+
+To check the most recent backup by hand:
+
+```bash
+python scripts/backup_state.py --verify-only
+```
+
+### 2. Weekly report, Monday morning
+
+| Field | Value |
+|---|---|
+| Name | `Weekly paper run report` |
+| Command | `python scripts/paper_run_report.py --since 7 --out data/reports/week-$(date +%Y-%m-%d).md` |
+| Frequency | `0 4 * * 1` |
+| Container | `backend` |
+
+04:00 UTC on Mondays, which is 07:00 in Nairobi. Note the output path is under
+`data/`, deliberately: anywhere else and the report is destroyed by the next
+redeploy.
+
+### 3. Liveness check, every fifteen minutes
+
+This one cannot run inside the container, because a container that has stopped
+cannot report that it has stopped. The agent does have an internal dead-man's
+switch, but it runs on a thread inside the process and dies with it.
+
+`.github/workflows/liveness.yml` polls the health endpoint from GitHub's
+runners and fails the workflow when the agent does not answer, which sends you
+GitHub's normal failure notification. It retries three times with backoff
+first, so a redeploy or a momentary network problem does not cry wolf.
+
+To switch it on, add two repository secrets under **Settings, Secrets and
+variables, Actions**:
+
+| Secret | Value |
+|---|---|
+| `HEALTH_URL` | `https://<your health domain>/health` |
+| `MONITORING_PASSWORD` | the same value the agent runs with |
+
+Until both are set the workflow reports "not configured" and passes, rather
+than failing every quarter of an hour.
+
+This requires the health endpoint to be reachable from the internet, which is
+why step 4 above suggested mapping a domain to the backend on port 8080. It
+stays password protected.
+
 ## Reading the run each week
 
 From a terminal in the backend container:
