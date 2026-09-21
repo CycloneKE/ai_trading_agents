@@ -68,13 +68,15 @@ RUN python -c "import jwt, bcrypt, waitress, flask, flask_cors; print('runtime i
 RUN mkdir -p /app/data /app/logs
 VOLUME ["/app/data"]
 
+# Install the entrypoint while still root: /usr/local/bin is not writable by
+# the unprivileged user, so the chmod has to happen before the USER switch.
+COPY start.sh /usr/local/bin/start.sh
+RUN chmod 0755 /usr/local/bin/start.sh
+
 # Run as a non-root user.
 RUN useradd --create-home --uid 10001 trader \
     && chown -R trader:trader /app
 USER trader
-
-COPY --chown=trader:trader start.sh /usr/local/bin/start.sh
-RUN chmod +x /usr/local/bin/start.sh
 
 ENV PYTHONUNBUFFERED=1
 ENV TZ=UTC
