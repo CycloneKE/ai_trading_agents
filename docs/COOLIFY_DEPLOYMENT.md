@@ -249,6 +249,68 @@ This requires the health endpoint to be reachable from the internet, which is
 why step 4 above suggested mapping a domain to the backend on port 8080. It
 stays password protected.
 
+### 4. Capacity check, weekly
+
+| Field | Value |
+|---|---|
+| Name | `Weekly capacity check` |
+| Command | `python scripts/monitor_capacity.py --csv-dir data/nse_historical --strict` |
+| Frequency | `30 4 * * 1` |
+| Container | `backend` |
+
+Catches the language model quota ceiling before validation quietly switches
+itself off. This matters most right after you add symbols, which is exactly
+when you would forget to check.
+
+`--strict` is important. Without it the script only fails when a cycle
+overruns its time budget, and a quota overrun leaves the cycle well inside
+its budget, so a scheduled job would report success while the thing you are
+watching for is happening.
+
+### 5. Data freshness check, daily after the close
+
+| Field | Value |
+|---|---|
+| Name | `Daily data freshness` |
+| Command | `python scripts/check_data_freshness.py` |
+| Frequency | `0 15 * * 1-5` |
+| Container | `backend` |
+
+15:00 UTC is 18:00 in Nairobi, after the NSE close. It checks three things
+and exits non-zero on any of them, so the job goes visibly red:
+
+- **Stale bars.** The scraper logs `0/9 symbols updated` when its sources are
+  unreachable and carries on regardless. The threshold is four days by
+  default, which absorbs a weekend plus a public holiday without crying wolf.
+- **Synthetic bars.** The historical store seeds itself with generated prices
+  so a fresh install has something to work with, and those rows are marked
+  `source=synthetic`. Nothing had ever compared that marker against reality.
+  Recency is not credibility: a generated bar dated today is worse than a
+  real bar from last week, because it looks fine.
+- **A dead live feed.** When the data layer falls back to synthetic quotes
+  the agent correctly refuses to trade and records `fallback_price`. A run
+  that held four thousand times because it could not see prices has not
+  tested your strategy at all, and from the outside that is indistinguishable
+  from a strategy that found nothing.
+
+On a fresh install that has not scraped yet, `--allow-synthetic` stops it
+failing on the seed data. Take that off once the scraper is working, or the
+check stops telling you anything.
+
+### 6. Repository automation, already running
+
+Two things run in GitHub rather than on your server and need no setup:
+
+- **Dependabot** opens grouped weekly pull requests for Python and frontend
+  dependencies, and monthly ones for the workflow actions. This matters more
+  here than usual because the container installs version ranges rather than
+  pins, so what it gets drifts over time.
+- **A weekly CI run on `main`**, Monday 05:00 UTC, with nothing changed. A
+  green history plus a red scheduled run localises dependency drift
+  immediately: the code did not change, so something underneath it did. It
+  runs the tests, both image builds and the startup smoke test, and
+  deliberately does not deploy or publish anything.
+
 ## Reading the run each week
 
 From a terminal in the backend container:

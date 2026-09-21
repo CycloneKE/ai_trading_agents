@@ -7,6 +7,17 @@ on:
     branches: [ main, develop ]
   # Allow manual runs for integration tests
   workflow_dispatch:
+  # Weekly run against main with nothing changed.
+  #
+  # requirements-runtime.txt and requirements-ci.txt use version ranges, not
+  # pins, so the libraries a build installs drift over time. A green history
+  # plus a red scheduled run localises that immediately: the code did not
+  # change, so something underneath it did. Without this the first sign is a
+  # redeploy failing months later with no obvious cause.
+  #
+  # 05:00 UTC Monday, which is 08:00 in Nairobi.
+  schedule:
+    - cron: '0 5 * * 1'
 
 jobs:
   preflight:
@@ -113,7 +124,7 @@ jobs:
   smoke_startup:
     needs: test
     # Run smoke startup on pushes to main (lightweight fallback-only smoke test)
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' }}
     # Lightweight smoke startup test that ensures the agent can initialize and serve /health
     runs-on: ubuntu-latest
 
@@ -143,7 +154,7 @@ jobs:
     # to main, so a Dockerfile change reached a deployed server before anything
     # had proved it builds. Pushing to a registry stays restricted to `push`
     # events, so a pull request never authenticates to or publishes anything.
-    if: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')) || github.event_name == 'pull_request' }}
+    if: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')) || github.event_name == 'pull_request' || github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     
     steps:

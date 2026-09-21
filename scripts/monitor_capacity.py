@@ -125,6 +125,12 @@ def main():
                     help='provider whose quota to check (default: config '
                          'primary_llm_provider)')
     ap.add_argument('--measure-only', action='store_true')
+    ap.add_argument('--strict', action='store_true',
+                    help='exit non-zero on ANY finding, not just a cycle that '
+                         'overruns its budget. Use this when running on a '
+                         'schedule: an LLM quota overrun leaves the cycle well '
+                         'inside its budget, so without this the job reports '
+                         'success while validation silently switches off.')
     ap.add_argument('--json', help='write the full report here')
     args = ap.parse_args()
 
@@ -231,7 +237,13 @@ def main():
                       f, indent=2, default=str)
         print(f"\nWritten to {args.json}")
 
-    return 0 if report.within_budget else 2
+    if not report.within_budget:
+        return 2
+    if args.strict and report.findings:
+        print(f"\n{len(report.findings)} finding(s) above. Failing because "
+              f"--strict was given.", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == '__main__':
