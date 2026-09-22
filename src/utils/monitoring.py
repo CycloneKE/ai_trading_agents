@@ -33,6 +33,29 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Where the monitoring HTTP server binds.
+#
+# This was hardcoded to 127.0.0.1 "for security", and nothing ever set
+# monitoring.host, so inside a container it bound loopback only. A container's
+# loopback is invisible to every other container, so Coolify's proxy got
+# "connection refused" and health.<domain> served 502 Bad Gateway. Meanwhile
+# the container's own healthcheck (curl localhost:8080 from inside) passed,
+# the container showed healthy, and the log line read "Monitoring service
+# started on port 8080" without ever naming the address it bound to. Every
+# indicator said fine; the endpoint was unreachable.
+#
+# 0.0.0.0 is the correct default here because the port is never published:
+# docker-compose.coolify.yml uses `expose`, not `ports`, so 8080 is reachable
+# only on the Docker network and through the proxy, never from the host or the
+# internet directly. /health and / are deliberately unauthenticated, because a
+# liveness probe that needs a credential is not a liveness probe. /metrics and
+# /status fail closed without MONITORING_PASSWORD.
+#
+# Override with MONITORING_HOST in the environment or monitoring.host in the
+# config when running the agent directly on a host rather than in a container.
+DEFAULT_BIND_ADDRESS = '0.0.0.0'
+
+
 class MonitoringService:
     """
     Service for monitoring system health and metrics.
@@ -60,6 +83,10 @@ class MonitoringService:
         # days is not the same kind of problem.
         self.enabled = mon.get('enabled', True)
         self.port = mon.get('port', 8080)
+        # The address actually bound, filled in by start(). Kept as an
+        # attribute so the log line and the tests can name it instead of
+        # reporting only a port, which is what hid the loopback bug.
+        self.bind_address: Optional[str] = None
         self.metrics_interval = mon.get('metrics_interval', 15)  # seconds
         self.system_metrics_enabled = mon.get('system_metrics_enabled', True) and PSUTIL_AVAILABLE
 
@@ -128,8 +155,10 @@ class MonitoringService:
             self.port = port
         
         try:
-            # Get bind address — default to 127.0.0.1 for security
-            bind_address = self._mon_config.get('host', '127.0.0.1')
+            # See DEFAULT_BIND_ADDRESS above for why this is not loopback.
+            bind_address = (os.environ.get('MONITORING_HOST')
+                            or self._mon_config.get('host')
+                            or DEFAULT_BIND_ADDRESS)
             
             # Set the running flag BEFORE starting threads: the metrics loop
             # guards on `while self.is_running`, so if it's set afterwards the
@@ -147,7 +176,11 @@ class MonitoringService:
             self.metrics_thread = threading.Thread(target=self._collect_metrics_loop, daemon=True)
             self.metrics_thread.start()
 
-            logger.info(f"Monitoring service started on port {self.port}")
+            # Name the address, not just the port. "started on port 8080"
+            # is true of a server nothing can reach.
+            self.bind_address = bind_address
+            logger.info("Monitoring service started on %s:%s (bound to %s)",
+                        bind_address, self.port, self.server.server_address[0])
             
         except Exception as e:
             self.is_running = False

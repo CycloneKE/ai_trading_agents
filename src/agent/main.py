@@ -152,7 +152,13 @@ class TradingAgent:
                 # to start still logged "started on port 8080" and the missing
                 # health endpoint looked like a network problem.
                 if getattr(self.monitoring_service, 'is_running', False):
-                    logger.info(f"Monitoring service listening on port {monitoring_port}")
+                    # Include the bind address. Naming only the port is how a
+                    # loopback-only server looked healthy for a whole
+                    # deployment while the proxy got connection refused.
+                    logger.info(
+                        "Monitoring service listening on %s:%s",
+                        getattr(self.monitoring_service, 'bind_address', '?'),
+                        monitoring_port)
                 else:
                     logger.error(
                         "Monitoring service did NOT start; /health is "
