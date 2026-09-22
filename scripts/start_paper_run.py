@@ -110,7 +110,11 @@ def probe_broker(cfg):
     try:
         mgr = BrokerManager(cfg)
         mgr.connect_all()
-        broker = getattr(mgr, 'primary_broker', None)
+        # get_broker() resolves the name to the object. This used to return
+        # mgr.primary_broker directly, which is the broker's NAME: a string.
+        # The gate then asked a str whether it was connected, got False, and
+        # blocked a run whose broker was fine.
+        broker = mgr.get_broker()
         if broker is None:
             for b in (getattr(mgr, 'brokers', {}) or {}).values():
                 if getattr(b, 'is_connected', False):

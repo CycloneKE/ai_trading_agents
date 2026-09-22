@@ -135,6 +135,50 @@ def test_a_disconnected_broker_blocks_because_orders_cannot_fill():
     assert not c.ok and c.level == BLOCK
 
 
+def test_a_broker_whose_connector_failed_to_import_blocks():
+    """The gate used to certify the config's intent, never what was built."""
+    cfg = _cfg(brokers={'ibkr_broker': {'type': 'interactive_brokers',
+                                        'enabled': True, 'paper': True}})
+    r = Readiness()
+    check_broker(cfg, r)
+    c = _named(r, 'every enabled broker can be created')
+    assert not c.ok and c.level == BLOCK
+    assert 'ibkr_broker' in c.detail
+
+
+def test_a_primary_broker_that_was_never_built_blocks():
+    """Exactly the production state: Alpaca primary, connector unimportable,
+    orders quietly filled by the internal simulator, gate said READY."""
+    cfg = _cfg(brokers={'paper_broker': {'type': 'paper', 'enabled': True},
+                        'ghost': {'type': 'interactive_brokers',
+                                  'enabled': True, 'primary': True}})
+    r = Readiness()
+    check_broker(cfg, r)
+    c = _named(r, 'primary broker is the configured one')
+    assert not c.ok and c.level == BLOCK
+    assert 'different venue' in c.detail
+
+
+def test_a_live_broker_without_an_enabled_flag_still_blocks():
+    """The gate defaulted any broker not named 'paper_broker' to disabled and
+    skipped it, which would have waved a live-money broker through."""
+    cfg = _cfg(brokers={'ibkr': {'type': 'alpaca', 'paper': False}})
+    r = Readiness()
+    check_broker(cfg, r)
+    assert not _named(r, 'all enabled brokers are paper mode').ok
+
+
+def test_the_real_config_passes_the_broker_checks():
+    import json
+    cfg = json.load(open('config/config.json'))
+    r = Readiness()
+    check_broker(cfg, r)
+    for name in ('all enabled brokers are paper mode',
+                 'every enabled broker can be created',
+                 'primary broker is the configured one'):
+        assert _named(r, name).ok, f"{name}: {_named(r, name).detail}"
+
+
 # ----------------------------------------------------------- the signal path
 
 class _Holds:

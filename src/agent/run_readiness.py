@@ -126,13 +126,43 @@ def check_market_data(cfg: Dict[str, Any], r: Readiness,
 
 
 def check_broker(cfg: Dict[str, Any], r: Readiness, broker=None) -> None:
-    """Paper mode, and actually connected."""
-    enabled = {n: b for n, b in (cfg.get('brokers') or {}).items()
-               if b.get('enabled', n == 'paper_broker')}
+    """Paper mode, actually creatable, actually the configured one, connected.
+
+    This used to stop at the config's stated intent, which is how it passed a
+    run whose execution venue was not the configured one: config/config.json
+    marks Alpaca primary, the Alpaca connector could not import, BrokerManager
+    dropped it with a warning, and the internal simulator took every order.
+    The gate certified what the file said rather than what the process built.
+    """
+    try:
+        from src.agent.broker_manager import available_broker_types, broker_is_enabled
+    except Exception as e:
+        r.add(BLOCK, 'broker layer importable', False,
+              f'src.agent.broker_manager could not be imported: {e}')
+        return
+
+    configured = cfg.get('brokers') or {}
+    enabled = {n: b for n, b in configured.items() if broker_is_enabled(b)}
+
     live = [n for n, b in enabled.items()
             if b.get('paper') is False or b.get('is_paper') is False]
     r.add(BLOCK, 'all enabled brokers are paper mode', not live,
           f"{live} would trade real money" if live else '')
+
+    available = available_broker_types()
+    unavailable = {n: (b.get('type') or '') for n, b in enabled.items()
+                   if (b.get('type') or '').lower() not in available}
+    r.add(BLOCK, 'every enabled broker can be created', not unavailable,
+          f"{unavailable} name broker types this process cannot build "
+          f"(available: {sorted(available)}); the connector import failed"
+          if unavailable else f"{len(enabled)} enabled broker(s)")
+
+    primary = sorted(n for n, b in configured.items() if b.get('primary', False))
+    broken_primary = [n for n in primary if n not in enabled or n in unavailable]
+    r.add(BLOCK, 'primary broker is the configured one', not broken_primary,
+          f"{broken_primary} marked primary but disabled or unavailable, so "
+          f"orders would be routed to a different venue"
+          if broken_primary else (f"{primary[0]}" if primary else 'none marked primary'))
 
     if broker is None:
         r.add(WARN, 'broker connected', False,
@@ -140,7 +170,8 @@ def check_broker(cfg: Dict[str, Any], r: Readiness, broker=None) -> None:
         return
     connected = bool(getattr(broker, 'is_connected', False))
     r.add(BLOCK, 'broker connected', connected,
-          '' if connected else 'orders cannot be submitted')
+          '' if connected else
+          f'orders cannot be submitted (probe returned {type(broker).__name__})')
 
 
 def check_capacity(cfg: Dict[str, Any], r: Readiness,
