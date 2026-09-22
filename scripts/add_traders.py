@@ -22,7 +22,16 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import bcrypt
 
-USERS_FILE = 'users.json'
+# Resolve the users file the same way src/api/auth.py does, so this tool
+# writes where the running API actually reads. It previously hardcoded a
+# relative 'users.json', which in a container wrote to the process working
+# directory while auth.py read USERS_FILE (pointed at the persistent volume),
+# so accounts created here never appeared at the dashboard and were lost on
+# the next redeploy. Env var wins; otherwise the repo-root users.json, which
+# is auth.py's default too.
+USERS_FILE = os.environ.get(
+    'USERS_FILE',
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'users.json'))
 PASSWORD_ALPHABET = string.ascii_letters + string.digits
 PASSWORD_LENGTH = 16
 
@@ -43,6 +52,9 @@ def load_users() -> dict:
 
 
 def save_users(users: dict) -> None:
+    parent = os.path.dirname(USERS_FILE)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(USERS_FILE, 'w') as f:
         json.dump(users, f, indent=4)
 

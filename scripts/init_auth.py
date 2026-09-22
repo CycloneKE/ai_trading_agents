@@ -15,7 +15,12 @@ except ImportError:
     def hash_password(password: str) -> str:
         return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
-USERS_FILE = 'users.json'
+# Same resolution as src/api/auth.py and scripts/add_traders.py: write where
+# the API reads. A hardcoded relative path wrote to the process working
+# directory in a container, not the USERS_FILE the API honours.
+USERS_FILE = os.environ.get(
+    'USERS_FILE',
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'users.json'))
 
 def init_auth(username='admin', password='secure_trading_password_2024'):
     """

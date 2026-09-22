@@ -283,8 +283,20 @@ class DataManager:
         
         self.is_running = False
         
-        # Disconnect all connectors
+        # Disconnect all connectors that have something to disconnect.
+        #
+        # Not every connector defines disconnect(). RealDataConnector fetches
+        # per request and NSEConnector borrows and returns a DB connection
+        # inside each call, so neither holds a resource to release and neither
+        # implements the method. Calling it unconditionally raised
+        # AttributeError on every shutdown, caught and logged at ERROR, which
+        # is the wrong severity for "this connector has no teardown" and would
+        # bury a real teardown failure in noise. The connect side already
+        # guards with hasattr; this now matches it.
         for name, connector in self.connectors.items():
+            if not hasattr(connector, 'disconnect'):
+                logger.debug("Connector %s has no disconnect(); nothing to release", name)
+                continue
             try:
                 connector.disconnect()
                 logger.info(f"Disconnected {name}")
