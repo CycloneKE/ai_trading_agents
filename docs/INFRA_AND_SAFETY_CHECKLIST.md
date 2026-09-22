@@ -59,7 +59,7 @@ This checklist collects the operational and safety items you should satisfy befo
 - Required secrets (examples):
   - DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
   - GCP_WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT
-  - TRADING_ALPACA_API_KEY, TRADING_ALPACA_SECRET
+  - TRADING_ALPACA_API_KEY, TRADING_ALPACA_API_SECRET
   - TRADING_FMP_API_KEY, TRADING_FINNHUB_API_KEY
   - COINBASE_API_KEY, COINBASE_SECRET
 - Rotate credentials immediately if any secret is discovered in the repo's history.

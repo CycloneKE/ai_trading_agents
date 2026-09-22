@@ -17,7 +17,7 @@ pip install yfinance pandas numpy scikit-learn xgboost
 
 # Verify API keys in .env file
 TRADING_FMP_API_KEY=your_fmp_api_key_here
-TRADING_ALPACA_API_KEY=your_alpaca_key_here  # Optional for paper trading
+TRADING_ALPACA_API_KEY=your_alpaca_key_here  # Required: Alpaca is the primary broker
 ```
 
 #### **2. Configuration Check**

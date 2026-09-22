@@ -70,10 +70,26 @@ scipy>=1.9.0
 # ModuleNotFoundError. Exactly the failure PyJWT and bcrypt caused before it.
 yfinance>=0.2.60
 
-# Heavier optional features (scikit-learn, torch, transformers,
-# alpaca-trade-api) are genuinely absent by choice. Each IS guarded at its
-# import site and the system degrades rather than failing: the DQN and
-# supervised-learning strategies log a warning and stand down, and no
-# strategy of those types is enabled in config/config.json. Adding them would
-# put hundreds of megabytes into an image that rebuilds on every deploy.
+# --- Brokers ----------------------------------------------------------------
+# No broker SDK is listed, and none is needed. All three connectors
+# (alpaca, coinbase, oanda) talk to their REST APIs with `requests`, above.
+#
+# src/connectors/alpaca_broker.py used to import `alpaca-trade-api`, which was
+# never installed here, so BrokerManager's guarded import failed, the 'alpaca'
+# type was never registered, and the broker that config/config.json marks
+# `primary` did not exist. Orders went to the internal simulator and the logs
+# said only "Unknown broker type: alpaca".
+#
+# Adding that SDK was the obvious fix and the wrong one: version 0.48 pins
+# `urllib3 < 1.25`, forcing urllib3 1.24.3 (2019) underneath `requests`, which
+# is the HTTP stack that carries the API credentials. It also pulls in
+# alpha-vantage, asyncio-nats-client and peewee. The connector made seven
+# calls, all of them plain REST endpoints, so the dependency bought nothing.
+
+# Heavier optional features (scikit-learn, torch, transformers) are genuinely
+# absent by choice. Each IS guarded at its import site and the system degrades
+# rather than failing: the DQN and supervised-learning strategies log a
+# warning and stand down, and no strategy of those types is enabled in
+# config/config.json. Adding them would put hundreds of megabytes into an
+# image that rebuilds on every deploy.
 # See scripts/requirements-ml.txt and docs/COOLIFY_DEPLOYMENT.md.

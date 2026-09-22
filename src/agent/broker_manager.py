@@ -47,6 +47,47 @@ def _redact_broker_config(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+class BrokerConfigurationError(RuntimeError):
+    """The configured brokers cannot be honoured as written."""
+
+
+def available_broker_types() -> Dict[str, TypingAny]:
+    """Broker types this process can actually construct.
+
+    A type is missing here only because its connector failed to import,
+    which the guarded imports above log as an error. Exposed as a function so
+    src/agent/run_readiness.py can ask the question without building a
+    manager, and so the gate's answer cannot drift from the runtime's.
+    """
+    types: Dict[str, TypingAny] = {'paper': PaperTradingBroker}
+    if ALPACA_AVAILABLE:
+        types['alpaca'] = AlpacaBroker
+    if COINBASE_AVAILABLE:
+        types['coinbase'] = CoinbaseBroker
+        types['coinbase_broker'] = CoinbaseBroker
+    if OANDA_AVAILABLE:
+        types['oanda'] = OandaBroker
+        types['oanda_broker'] = OandaBroker
+    return types
+
+
+def broker_is_enabled(config: Dict[str, Any]) -> bool:
+    """Whether a broker entry in the config should be created.
+
+    Absent means enabled, which keeps configs written before the flag
+    existed working. `enabled: false` used to mean nothing at all: the
+    startup loop never read it, so the Coinbase broker that
+    config/config.json disables was constructed and connected on every run.
+
+    run_readiness.py imports this so the gate and the runtime agree on which
+    brokers count. They did not agree: the gate treated any broker other
+    than one literally named 'paper_broker' with no `enabled` key as
+    disabled, and so skipped it in the paper-mode check. That would have
+    waved through a live-money broker.
+    """
+    return bool(config.get('enabled', True))
+
+
 class BrokerManager:
     """
     Manager for multiple broker connections.
@@ -58,63 +99,112 @@ class BrokerManager:
         self.primary_broker = None
         self.lock = threading.Lock()
         
-        # Available broker types
-        self.broker_types: Dict[str, TypingAny] = {
-            'paper': PaperTradingBroker
-        }
-        if ALPACA_AVAILABLE:
-            self.broker_types['alpaca'] = AlpacaBroker
-        if COINBASE_AVAILABLE:
-            self.broker_types['coinbase'] = CoinbaseBroker
-            self.broker_types['coinbase_broker'] = CoinbaseBroker
-        if OANDA_AVAILABLE:
-            self.broker_types['oanda'] = OandaBroker
-            self.broker_types['oanda_broker'] = OandaBroker
-        # Log available broker types for debugging (moved inside __init__)
+        self.broker_types: Dict[str, TypingAny] = available_broker_types()
+        # Brokers the config names but this process did not build, and why.
+        # The readiness gate reads these: it used to certify the config's
+        # intent without ever checking what actually got created.
+        self.disabled_brokers: List[str] = []
+        self.unavailable_brokers: Dict[str, str] = {}
         logger.info(f"Available broker types: {list(self.broker_types.keys())}")
         # Initialize brokers from config
         self._initialize_brokers()
         logger.info("Broker manager initialized")
     
     def _initialize_brokers(self):
+        """Create the brokers the config asks for, or refuse to run.
+
+        Three things used to fail silently here. `enabled: false` was never
+        read. A broker whose type was unavailable produced a single warning
+        and was dropped. And because the primary was whichever broker
+        happened to get built, losing the one marked `primary` quietly
+        promoted another: config/config.json marks Alpaca primary, its
+        connector could not import, and every order went to the internal
+        paper simulator instead. Nothing said the venue had changed.
         """
-        Initialize brokers from configuration.
+        brokers_config = self.config.get('brokers', {}) or {}
+        logger.info("BrokerManager received brokers config: %s",
+                    {n: _redact_broker_config(c) for n, c in brokers_config.items()})
+        logger.info("BrokerManager available broker types: %s",
+                    sorted(self.broker_types))
+
+        for broker_name, broker_config in brokers_config.items():
+            broker_type = (broker_config.get('type') or '').lower()
+
+            if not broker_is_enabled(broker_config):
+                self.disabled_brokers.append(broker_name)
+                logger.info("Skipping broker %s (type %s): disabled in config",
+                            broker_name, broker_type or '<none>')
+                continue
+
+            if broker_type not in self.broker_types:
+                self.unavailable_brokers[broker_name] = broker_type
+                logger.error(
+                    "Broker %s is enabled but its type %r is not available. "
+                    "Known types: %s. Its connector failed to import; the "
+                    "reason was logged at import time.",
+                    broker_name, broker_type, sorted(self.broker_types))
+                continue
+
+            try:
+                broker = self.broker_types[broker_type](broker_config)
+            except Exception as e:
+                self.unavailable_brokers[broker_name] = broker_type
+                logger.error("Broker %s (type %s) could not be created: %s",
+                             broker_name, broker_type, e)
+                continue
+
+            self.brokers[broker_name] = broker
+            if broker_config.get('primary', False) or self.primary_broker is None:
+                self.primary_broker = broker_name
+            logger.info("Initialized %s broker: %s", broker_type, broker_name)
+
+        self._verify_configured_brokers(brokers_config)
+
+    def _verify_configured_brokers(self, brokers_config: Dict[str, Any]) -> None:
+        """Refuse to trade against a venue the operator did not choose.
+
+        Raising stops the agent. That is the point: an order routed to the
+        wrong broker is worse than an agent that does not start, and the
+        failure is visible in the logs on the first line rather than
+        inferred from a P&L that does not match anybody's expectations.
         """
-        try:
-            brokers_config = self.config.get('brokers', {})
-            redacted_brokers_config = {
-                name: _redact_broker_config(cfg) for name, cfg in brokers_config.items()
-            }
-            logger.info(f"BrokerManager received brokers config: {redacted_brokers_config}")
-            logger.info(f"BrokerManager available broker types: {list(self.broker_types.keys())}")
-            for broker_name, broker_config in brokers_config.items():
-                broker_type = broker_config.get('type', '').lower()
-                logger.info(f"Processing broker: {broker_name}, type: {broker_type}, "
-                            f"config: {_redact_broker_config(broker_config)}")
-                if broker_type in self.broker_types:
-                    broker_class = self.broker_types[broker_type]
-                    broker = broker_class(broker_config)
-                    self.brokers[broker_name] = broker
-                    # Set primary broker
-                    if broker_config.get('primary', False) or self.primary_broker is None:
-                        self.primary_broker = broker_name
-                    logger.info(f"Initialized {broker_type} broker: {broker_name}")
-                else:
-                    logger.warning(f"Unknown broker type: {broker_type} for broker {broker_name}")
-            if not self.brokers:
-                # Create default paper trading broker
-                default_config = {
-                    'type': 'paper',
-                    'initial_cash': 100000,
-                    'commission_per_trade': 0.0
-                }
-                broker = PaperTradingBroker(default_config)
-                self.brokers['default_paper'] = broker
-                self.primary_broker = 'default_paper'
-                logger.info("Created default paper trading broker")
-        except Exception as e:
-            logger.error(f"Error initializing brokers: {str(e)}")
-    
+        if not brokers_config:
+            # Nothing configured at all. Long-standing behaviour, kept.
+            self.brokers['default_paper'] = PaperTradingBroker({
+                'type': 'paper',
+                'initial_cash': 100000,
+                'commission_per_trade': 0.0,
+            })
+            self.primary_broker = 'default_paper'
+            logger.info("No brokers configured; created default paper trading broker")
+            return
+
+        missing_primary = {
+            n: t for n, t in sorted(self.unavailable_brokers.items())
+            if brokers_config.get(n, {}).get('primary', False)
+        }
+        if missing_primary:
+            raise BrokerConfigurationError(
+                f"Broker(s) marked primary could not be created: {missing_primary}. "
+                f"Available types: {sorted(self.broker_types)}. Refusing to start, "
+                "because orders would be routed to a venue other than the "
+                "configured one. Fix the broker config or the connector import.")
+
+        disabled_primary = sorted(
+            n for n, c in brokers_config.items()
+            if c.get('primary', False) and not broker_is_enabled(c))
+        if disabled_primary:
+            raise BrokerConfigurationError(
+                f"Broker(s) {disabled_primary} are marked primary but disabled. "
+                "Refusing to start; mark an enabled broker as primary.")
+
+        if not self.brokers:
+            raise BrokerConfigurationError(
+                f"{len(brokers_config)} broker(s) configured, none created. "
+                f"Disabled: {sorted(self.disabled_brokers) or 'none'}. "
+                f"Unavailable: {self.unavailable_brokers or 'none'}. Refusing to "
+                "start rather than substituting a paper broker nobody configured.")
+
     def add_broker(self, name: str, broker_type: str, config: Dict[str, Any]) -> bool:
         """
         Add a new broker.
