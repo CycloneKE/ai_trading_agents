@@ -44,7 +44,36 @@ psutil>=5.9.0            # System metrics only. The monitoring service and the
 numpy>=1.22.0
 pandas>=1.3.0
 
-# Heavier optional features (scikit-learn, torch, transformers, yfinance,
-# alpaca-trade-api) are intentionally absent. Each is guarded at its import
-# site and the system degrades rather than failing. See
-# scripts/requirements-ml.txt and docs/COOLIFY_DEPLOYMENT.md.
+# Also required, not optional. src/agent/risk_calculator.py imports
+# `from scipy import stats` and `from scipy.optimize import minimize` at
+# module scope, and src/agent/main.py imports RiskCalculator at module scope,
+# so the process cannot start without it. Found by the import-graph walk in
+# tests/test_runtime_requirements.py immediately after the yfinance fix: it
+# would have been the next crash loop.
+scipy>=1.9.0
+
+# --- Market data -----------------------------------------------------------
+# Required, not optional, despite what this file used to claim.
+#
+# src/utils/real_price_feed.py imports yfinance at module scope with no
+# guard, and the startup path reaches it unconditionally:
+#
+#     src/agent/main.py
+#       -> src/agent/broker_manager.py       (module scope)
+#         -> src/agent/paper_trading.py      (module scope)
+#           -> src/utils/real_price_feed.py  (module scope)
+#             -> import yfinance
+#
+# Listing it as optional here put it in requirements.txt and
+# requirements-ci.txt but not in the image, so the tests passed, the image
+# built, and the container crash-looped on the server with
+# ModuleNotFoundError. Exactly the failure PyJWT and bcrypt caused before it.
+yfinance>=0.2.60
+
+# Heavier optional features (scikit-learn, torch, transformers,
+# alpaca-trade-api) are genuinely absent by choice. Each IS guarded at its
+# import site and the system degrades rather than failing: the DQN and
+# supervised-learning strategies log a warning and stand down, and no
+# strategy of those types is enabled in config/config.json. Adding them would
+# put hundreds of megabytes into an image that rebuilds on every deploy.
+# See scripts/requirements-ml.txt and docs/COOLIFY_DEPLOYMENT.md.
