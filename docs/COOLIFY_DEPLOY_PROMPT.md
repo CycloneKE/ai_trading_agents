@@ -216,10 +216,15 @@ Two things remain that Coolify cannot do, both in GitHub, under
 | `HEALTH_URL` | `https://<your health domain>/health` |
 | `MONITORING_PASSWORD` | the same value you gave Coolify |
 
-These switch on the liveness workflow, which checks every fifteen minutes that
-the agent is still answering and emails you when it stops. Until both are set
-the workflow runs, reports "not configured", and passes without watching
-anything.
+These switch on the liveness workflow, which checks that the agent is still
+answering and emails you when it stops. Until both are set the workflow runs,
+reports "not configured", and passes without watching anything.
+
+It asks GitHub for a check every fifteen minutes and GitHub delivers roughly
+one every five hours, so treat it as a backstop rather than your alarm. For
+prompt notice, point a dedicated uptime service at the same health endpoint;
+see the "How much to trust it" note in
+[COOLIFY_DEPLOYMENT.md](COOLIFY_DEPLOYMENT.md).
 
 Then read the run weekly:
 

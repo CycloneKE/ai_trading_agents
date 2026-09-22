@@ -26,10 +26,16 @@ on:
     # runs at all in the hour after it was added. Odd minutes sit outside the
     # crush.
     #
-    # Even so, treat this as "within the hour" rather than a precise
-    # interval: Actions is free and convenient, not a minute-accurate
-    # monitor. If you need a firm guarantee that the agent is watched, point
-    # an external uptime service at the same health endpoint as well.
+    # The offset helped: scheduled runs happen at all now, where '*/15'
+    # produced none. It did not make them dependable. Measured over the
+    # first 7.8 hours: 2 runs against ~31 requested, a 6% delivery rate, an
+    # average gap of 4.7 hours, and they did not land on the requested
+    # minutes either.
+    #
+    # So this is a BACKSTOP, not a monitor. Point a dedicated uptime service
+    # at the same health endpoint for the primary alarm; free tiers check
+    # every one to five minutes and honour it. Keep this running alongside
+    # as a second pair of eyes if that service itself fails.
     - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
 

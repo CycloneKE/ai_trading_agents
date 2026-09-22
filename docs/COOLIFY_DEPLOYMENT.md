@@ -223,7 +223,7 @@ python scripts/backup_state.py --verify-only
 `data/`, deliberately: anywhere else and the report is destroyed by the next
 redeploy.
 
-### 3. Liveness check, every fifteen minutes
+### 3. Liveness check, nominally every fifteen minutes
 
 This one cannot run inside the container, because a container that has stopped
 cannot report that it has stopped. The agent does have an internal dead-man's
@@ -249,16 +249,34 @@ This requires the health endpoint to be reachable from the internet, which is
 why step 4 above suggested mapping a domain to the backend on port 8080. It
 stays password protected.
 
-**How much to trust it.** GitHub Actions is free and needs no extra account,
-but it is not a minute-accurate monitor: scheduled runs are delayed or
-dropped under load. The schedule deliberately avoids the quarter hours, which
-are the most congested slots, after an earlier version on `*/15` produced no
-runs at all in its first hour. Read it as "you will hear within the hour",
-not "within fifteen minutes".
+**How much to trust it: measured, not assumed.**
 
-If you want a firm guarantee that someone notices the agent stopping, point a
-dedicated uptime service at the same health endpoint as well. The two do not
-conflict, and the second one costs nothing on a free tier.
+The workflow asks for a run every fifteen minutes. Over the first 7.8 hours
+after it was set up, GitHub delivered **two runs**, against roughly 31
+requested. That is a 6% delivery rate, an average gap of 4.7 hours, and the
+runs did not even land on the requested minutes.
+
+| | Requested | Actually delivered |
+|---|---|---|
+| Interval | 15 minutes | ~4.7 hours |
+| Runs in 7.8 hours | ~31 | 2 |
+| Fire times | :07, :22, :37, :52 | :01, :41 |
+
+An earlier version on `*/15` produced no scheduled runs at all in its first
+hour, which is why the schedule now avoids the quarter hours. That change
+helped, in that scheduled runs happen at all now. It did not make the
+schedule dependable.
+
+**So treat this workflow as a backstop, not as your monitor.** If the agent
+dies at one in the morning you may not hear until five. For a ninety-day
+unattended run that is probably tolerable; for anything you actually care
+about it is not.
+
+**Use a dedicated uptime service as the primary alarm.** Point it at the same
+health endpoint. Free tiers from the usual providers check every one to five
+minutes and actually honour that. The GitHub workflow costs nothing to leave
+running alongside, so keep both: the external service tells you promptly, and
+the workflow is a second pair of eyes if that service itself fails.
 
 ### 4. Capacity check, weekly
 
