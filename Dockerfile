@@ -57,10 +57,18 @@ COPY --from=deps-builder /usr/local/bin /usr/local/bin
 # Application code. .dockerignore keeps .env, the journals and .git out.
 COPY . .
 
-# Fail the build rather than ship an image whose auth layer cannot load.
-# PyJWT and bcrypt are imported unguarded by src/api/auth.py; without them
-# the API starts, reports healthy, and answers every protected route with 503.
-RUN python -c "import jwt, bcrypt, waitress, flask, flask_cors; print('runtime import check OK')"
+# Fail the build rather than ship an image that cannot start.
+#
+# This used to name five packages explicitly, which caught the auth stack and
+# missed everything else. yfinance and scipy then shipped missing: the image
+# built, CI passed, and the container crash-looped on the server with
+# ModuleNotFoundError, three module-scope hops from the entry point.
+#
+# Importing the real entry points exercises the whole startup graph, so any
+# missing dependency fails here, where it costs a build, instead of on a
+# server at two in the morning. No SECRET_KEY is set during a build and that
+# is fine: the API logs that its auth layer is locked down and still imports.
+RUN python -c "import src.agent.main, src.api.api_server; print('startup import check OK')"
 
 # Runtime dirs. /app/data MUST be a mounted volume in any real deployment:
 # the SQLite journals are the run's only durable record and an unmounted

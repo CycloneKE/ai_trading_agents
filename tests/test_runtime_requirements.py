@@ -109,33 +109,107 @@ def test_critical_package_is_in_the_runtime_requirements(package):
         f'into the image, so listing it there does not help.')
 
 
-def test_auth_module_dependencies_are_installed_in_the_container():
-    """The specific regression: auth imports that the image did not ship."""
-    auth = os.path.join(ROOT, 'src', 'api', 'auth.py')
-    declared = _declared()
-    missing = []
-    for name in sorted(_third_party(_unguarded_imports(auth))):
-        dist = DISTRIBUTION.get(name, name).lower()
-        if dist not in declared:
-            missing.append(f'{name} (distribution: {dist})')
-    assert not missing, (
-        f'src/api/auth.py imports {missing} at module scope with no '
-        f'try/except, but the container does not install them. The API will '
-        f'set AUTH_AVAILABLE=False and answer every protected route with 503.')
+def _module_path(name):
+    """Absolute path of a `src.*` module, or None if it is not one of ours."""
+    rel = name.replace('.', os.sep)
+    for candidate in (os.path.join(ROOT, rel + '.py'),
+                      os.path.join(ROOT, rel, '__init__.py')):
+        if os.path.exists(candidate):
+            return candidate
+    return None
 
 
-def test_api_server_dependencies_are_installed_in_the_container():
-    api = os.path.join(ROOT, 'src', 'api', 'api_server.py')
+def _resolve(node, current_module):
+    """Absolute module name for an ImportFrom, handling relative imports."""
+    if node.level == 0:
+        return node.module
+    parts = current_module.split('.')
+    base = parts[:-node.level] if node.level <= len(parts) else []
+    return '.'.join(base + ([node.module] if node.module else []))
+
+
+def _walk_startup_graph(entry_modules):
+    """Every unguarded third-party import reachable from the entry points.
+
+    Follows only module-scope imports, because those are the ones that run at
+    startup. An import inside a function or a try/except is not on this path:
+    the first is deferred, the second is a dependency the code is prepared to
+    lose.
+
+    This walk is the point of the file. The previous version checked two
+    hand-picked API modules and therefore missed yfinance, which sits three
+    module-scope hops from the agent's entry point and crash-looped the
+    container in production.
+    """
+    stdlib = set(sys.stdlib_module_names)
+    seen, queue, found = set(), list(entry_modules), {}
+
+    while queue:
+        module = queue.pop()
+        if module in seen:
+            continue
+        seen.add(module)
+        path = _module_path(module)
+        if path is None:
+            continue
+        try:
+            with open(path, encoding='utf-8') as f:
+                tree = ast.parse(f.read())
+        except (OSError, SyntaxError):
+            continue
+
+        for node in tree.body:          # module scope only
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                resolved = _resolve(node, module)
+                names = [resolved] if resolved else []
+            else:
+                continue
+
+            for name in names:
+                if not name:
+                    continue
+                if name.startswith('src.') or _module_path(name):
+                    queue.append(name)          # ours: keep walking
+                    continue
+                top = name.split('.')[0]
+                if top in stdlib or top == 'src':
+                    continue
+                found.setdefault(top, []).append(
+                    f'{os.path.relpath(path, ROOT)} (via {module})')
+    return found
+
+
+def test_the_agent_startup_path_is_fully_installed():
+    """Walks from the real entry points rather than a hand-picked list.
+
+    The regression: src/agent/main.py imports broker_manager, which imports
+    paper_trading, which imports real_price_feed, which imports yfinance --
+    every hop at module scope and unguarded. yfinance was in requirements.txt
+    and requirements-ci.txt but not in the image, so CI passed, the image
+    built, and the container crash-looped with ModuleNotFoundError.
+    """
     declared = _declared()
     missing = []
-    for name in sorted(_third_party(_unguarded_imports(api))):
+    for name, sites in sorted(_walk_startup_graph(
+            ['src.agent.main', 'src.api.api_server']).items()):
         dist = DISTRIBUTION.get(name, name).lower()
         if dist not in declared:
-            missing.append(f'{name} (distribution: {dist})')
+            missing.append(f'{name} (distribution: {dist}) imported by {sites[0]}')
     assert not missing, (
-        f'src/api/api_server.py imports {missing} at module scope with no '
-        f'try/except, but the container does not install them. The API will '
-        f'not start at all.')
+        'These are imported at module scope on the startup path but are not '
+        'installed in the container, so it will fail to start:\n  '
+        + '\n  '.join(missing))
+
+
+def test_the_walk_actually_reaches_the_deep_modules():
+    """A walk that silently reached nothing would pass the test above."""
+    reached = _walk_startup_graph(['src.agent.main'])
+    sites = ' '.join(s for v in reached.values() for s in v)
+    assert 'real_price_feed' in sites or 'yfinance' in reached, (
+        'the walk never reached real_price_feed, so it is not following '
+        'the import graph and would not catch a missing dependency')
 
 
 def test_optional_heavy_packages_stay_out_of_the_runtime_image():
