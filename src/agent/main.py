@@ -1152,6 +1152,29 @@ class TradingAgent:
                 if price <= 0:
                     continue
 
+                # Never evaluate on synthetic seed prices. The scraper seeds
+                # 730 days of generated history on first run and overlays
+                # real bars only when a live source answers; if every live
+                # scrape fails, the newest "price" is invented. The US and
+                # crypto loop already refuses synthetic prices; this path did
+                # not, and it proposes tickets the operator places with real
+                # money. Recorded as fallback_price (the existing reason for
+                # "price is not real") so it shows on the dashboard rather
+                # than disappearing, and checked before the freshness guard
+                # so an invented price never enters the strategy buffers.
+                if quote.get('source') == 'synthetic':
+                    if self.decision_journal:
+                        try:
+                            self.decision_journal.record({
+                                'symbol': symbol, 'cycle': cycle, 'action': 'hold',
+                                'skip_reason': 'fallback_price', 'price': price,
+                                'ensemble_confidence': 0.0, 'per_strategy': {},
+                                'llm_verdict': {}, 'executed': False,
+                            })
+                        except Exception as e:
+                            logger.debug(f"NSE decision record error: {e}")
+                    continue
+
                 # Freshness guard: skip a symbol whose price hasn't moved since
                 # last eval so we don't feed a repeated stale price into the
                 # strategies' rolling SMA/RSI buffers.

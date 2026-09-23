@@ -498,6 +498,13 @@ class NSEPeriodicScraper:
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._last_run: Optional[float] = None
+        # What the last cycle actually got. get_status() used to report only
+        # that the thread was running, which is equally true of a scraper
+        # that has never fetched one real price and is serving synthetic
+        # seed data. These make "is it working?" answerable from outside.
+        self._last_real_count: Optional[int] = None
+        self._last_missing: List[str] = []
+        self._last_real_success: Optional[float] = None
 
     def start(self):
         """Start the periodic scraper in a background daemon thread."""
@@ -545,7 +552,19 @@ class NSEPeriodicScraper:
             self.nse_connector.refresh_cache()
 
         scraped = sum(1 for v in results.values() if v > 0)
-        logger.info(f"NSE scraper cycle complete: {scraped}/{len(self.symbols)} symbols updated")
+        self._last_real_count = scraped
+        self._last_missing = sorted(s for s, v in results.items() if v == 0)
+        if scraped:
+            self._last_real_success = time.time()
+        if scraped == 0:
+            # Every live source failed. The connector will keep serving
+            # whatever is newest on disk, which after first-run seeding is
+            # synthetic. Say so at WARNING, not buried in an INFO count.
+            logger.warning(
+                f"NSE scraper cycle got NO real prices (0/{len(self.symbols)}); "
+                f"NSE quotes are stale or synthetic until a live source answers")
+        else:
+            logger.info(f"NSE scraper cycle complete: {scraped}/{len(self.symbols)} symbols updated")
         self._last_run = time.time()
         return results
 
@@ -613,6 +632,11 @@ class NSEPeriodicScraper:
             "last_run": datetime.fromtimestamp(self._last_run, tz=EAT).isoformat() if self._last_run else None,
             "interval_minutes": self.interval // 60,
             "symbols_count": len(self.symbols),
+            # None until the first cycle finishes.
+            "last_cycle_real_prices": self._last_real_count,
+            "last_cycle_missing": self._last_missing,
+            "last_real_price_at": (datetime.fromtimestamp(self._last_real_success, tz=EAT).isoformat()
+                                   if self._last_real_success else None),
         }
 
 
