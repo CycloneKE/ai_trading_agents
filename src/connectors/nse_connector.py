@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 # East Africa Time offset (UTC+3)
 EAT_OFFSET = timezone(timedelta(hours=3))
 
+# Where the scraper writes daily bars (src/connectors/nse_scraper.py DATA_DIR).
+# On the persistent /app/data volume in the container.
+from pathlib import Path as _Path
+NSE_CSV_DIR = _Path(__file__).resolve().parent.parent.parent / "data" / "nse_historical"
+
 # NSE equities session (Nairobi time): pre-open auction 09:00-09:30,
 # continuous trading 09:30-15:00. Orders may only be submitted while 'open'.
 from datetime import time as dtime
@@ -148,9 +153,14 @@ class NSEConnector:
     def is_market_open(self, now=None) -> bool:
         return self.market_phase(now) == 'open'
 
-    def get_all_quotes(self) -> List[Dict[str, Any]]:
+    def get_all_quotes(self, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Latest quote per symbol. Defaults to every known NSE symbol,
+        which the universe scout relies on; the dashboard passes the
+        configured universe instead, because listing symbols nothing
+        fetches showed nine rows of 0.00 beside a claim that the agent
+        watched all eighteen."""
         results = []
-        for symbol in ALL_NSE_SYMBOLS:
+        for symbol in (symbols or ALL_NSE_SYMBOLS):
             q = self.get_quote(symbol)
             if q:
                 results.append(q)
@@ -179,8 +189,8 @@ class NSEConnector:
 
         return self._empty_quote(symbol)
 
-    def get_top_movers(self) -> Dict[str, List[Dict[str, Any]]]:
-        quotes = self.get_all_quotes()
+    def get_top_movers(self, symbols: Optional[List[str]] = None) -> Dict[str, List[Dict[str, Any]]]:
+        quotes = self.get_all_quotes(symbols)
         valid = [q for q in quotes if q.get("change_pct") is not None]
         s = sorted(valid, key=lambda x: x.get("change_pct", 0), reverse=True)
         return {
@@ -188,8 +198,8 @@ class NSEConnector:
             "losers": s[-5:][::-1] if len(s) >= 5 else [],
         }
 
-    def get_sector_performance(self) -> List[Dict[str, Any]]:
-        quotes = {q["symbol"]: q for q in self.get_all_quotes()}
+    def get_sector_performance(self, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        quotes = {q["symbol"]: q for q in self.get_all_quotes(symbols)}
         perf = []
         for sector, symbols in NSE_SECTORS.items():
             changes = [quotes[s]["change_pct"] for s in symbols if s in quotes and quotes[s].get("change_pct") is not None]
@@ -284,7 +294,7 @@ class NSEConnector:
     def _read_from_csv(self, symbol: str) -> Optional[Dict[str, Any]]:
         import csv
         from pathlib import Path
-        csv_path = Path(__file__).resolve().parent.parent.parent / "data" / "nse_historical" / f"{symbol}.csv"
+        csv_path = NSE_CSV_DIR / f"{symbol}.csv"
         if not csv_path.exists():
             return None
         try:
@@ -309,7 +319,11 @@ class NSEConnector:
                     "prev_close_kes": price_kes,
                     "kes_usd_rate": kes_usd,
                     "timestamp": last.get('date', ''),
-                    "source": "csv",
+                    # The bar's own origin: nse_website, afx_kwayisi,
+                    # afx_history, or synthetic. This used to be the
+                    # constant "csv", which erased the one field that says
+                    # whether the price is real.
+                    "source": last.get('source') or 'csv',
                     "tier": "tier1" if symbol in NSE_TIER1_SYMBOLS else "tier2",
                     "sector": self._get_sector(symbol),
                 }

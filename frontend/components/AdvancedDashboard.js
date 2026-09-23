@@ -780,20 +780,64 @@ const AdvancedDashboard = ({ onLogout }) => {
     const eatMin = ((now.getUTCHours() + 3) % 24) * 60 + now.getUTCMinutes();
     const day = (now.getUTCDay() + (now.getUTCHours() + 3 >= 24 ? 1 : 0)) % 7;
     const OPEN = 9 * 60 + 30, CLOSE = 15 * 60, PRE = 9 * 60;
+    // Trust the backend's phase ('closed' | 'preopen' | 'open'). This used to
+    // recompute trading hours from the clock starting at 09:00, while the
+    // backend reports 'open' only from 09:30, so the two disagreed through
+    // every morning's pre-open auction and the disagreement was shown as
+    // "CLOSED · HOLIDAY" on ordinary trading days.
+    const phase = nseData.market_phase;
     if (day === 0 || day === 6) return { label: 'CLOSED · WEEKEND', color: theme.colors.textMuted };
-    // Local time/weekday logic doesn't know gazetted public holidays — the
-    // backend's is_market_open() does. If local math says we're inside
-    // trading hours on a weekday but the backend disagrees, that gap is a
-    // holiday closure; defer to the backend rather than showing a bogus
-    // "OPEN · CLOSES IN Xh" countdown.
-    const inHoursLocally = eatMin >= PRE && eatMin < CLOSE;
-    if (inHoursLocally && !nseData.market_open) {
-      return { label: 'CLOSED · HOLIDAY', color: theme.colors.textMuted };
+    if (phase === 'open') {
+      return { label: `OPEN · CLOSES IN ${Math.floor((CLOSE - eatMin) / 60)}h ${(CLOSE - eatMin) % 60}m`, color: theme.colors.primary };
     }
+    if (phase === 'preopen') {
+      return { label: `PRE-OPEN · TRADING IN ${Math.max(0, OPEN - eatMin)}m`, color: theme.colors.warning };
+    }
+    const inHoursLocally = eatMin >= PRE && eatMin < CLOSE;
+    if (!phase) {
+      // Status not loaded yet, or the request failed. Say so; never infer a
+      // holiday from missing data.
+      return { label: inHoursLocally ? 'STATUS UNAVAILABLE' : 'CLOSED', color: theme.colors.textMuted };
+    }
+    // Backend says closed on a weekday inside trading hours: a gazetted closure.
+    if (inHoursLocally) return { label: 'CLOSED · HOLIDAY', color: theme.colors.textMuted };
     if (eatMin < PRE) return { label: `PRE-OPEN IN ${Math.floor((PRE - eatMin) / 60)}h ${(PRE - eatMin) % 60}m`, color: theme.colors.textMuted };
-    if (eatMin < OPEN) return { label: `PRE-OPEN · TRADING IN ${OPEN - eatMin}m`, color: theme.colors.warning };
-    if (eatMin < CLOSE) return { label: `OPEN · CLOSES IN ${Math.floor((CLOSE - eatMin) / 60)}h ${(CLOSE - eatMin) % 60}m`, color: theme.colors.primary };
     return { label: 'CLOSED', color: theme.colors.warning };
+  };
+
+  // Sources the scraper stamps on prices it actually fetched. Mirrors
+  // REAL_NSE_SOURCES in src/api/api_server.py.
+  const REAL_NSE_SOURCES = ['nse_website', 'afx_kwayisi', 'afx_history'];
+  const NSE_SOURCE_NOTE = {
+    synthetic: 'Generated seed data, not a market price. No live source has answered for this symbol yet.',
+    none: 'No price available for this symbol.',
+  };
+  const isRealNsePrice = (q) => REAL_NSE_SOURCES.includes(q.source);
+
+  // One line that answers "are these prices real?". The scraper used to
+  // report only that it was running, which is equally true when every live
+  // source fails and the newest price is invented seed data.
+  const nseProvenanceBanner = () => {
+    const p = nseData.provenance;
+    if (!p) return null;
+    const notReal = (p.synthetic || 0) + (p.missing || 0) + (p.unverified || 0);
+    const total = (p.real || 0) + notReal;
+    const s = nseData.scraper || {};
+    const lastReal = s.last_real_price_at ? new Date(s.last_real_price_at).toLocaleString() : 'never';
+    const warn = notReal > 0;
+    return (
+      <div style={{ marginBottom: '12px', padding: '10px 12px', borderRadius: '8px', fontSize: '11px',
+                    background: warn ? `${theme.colors.danger}15` : 'rgba(255,255,255,0.03)',
+                    border: `1px solid ${warn ? theme.colors.danger + '55' : theme.colors.border}`,
+                    color: warn ? theme.colors.danger : theme.colors.textMuted }}>
+        <strong>{p.real || 0} of {total} prices are live market data.</strong>
+        {p.synthetic ? ` ${p.synthetic} synthetic.` : ''}
+        {p.missing ? ` ${p.missing} with no data.` : ''}
+        {p.unverified ? ` ${p.unverified} of unrecorded origin.` : ''}
+        {' '}Last real price received: {lastReal}.
+        {warn && ' The agent will not evaluate a synthetic price.'}
+      </div>
+    );
   };
 
   const renderKenyaNSE = () => {
@@ -831,6 +875,7 @@ const AdvancedDashboard = ({ onLogout }) => {
         <div style={{ marginBottom: '12px', fontSize: '11px', color: theme.colors.textMuted }}>
           The agent watches all {nseData.quotes?.length || 0} symbols below every cycle. Rows highlighted are symbols currently held.
         </div>
+        {nseProvenanceBanner()}
         <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
           {[['all', 'ALL'], ['held', 'HELD'], ['movers', 'MOVERS ±1%']].map(([id, label]) => (
             <button key={id} onClick={() => setNseFilter(id)} style={{
@@ -859,7 +904,17 @@ const AdvancedDashboard = ({ onLogout }) => {
                         onMouseEnter={(e) => e.currentTarget.style.background = `${theme.colors.primary}25`}
                         onMouseLeave={(e) => e.currentTarget.style.background = pos ? `${theme.colors.primary}15` : 'transparent'}>
                       <td style={{ padding: '12px', fontWeight: '700' }}>{q.symbol} <span style={{ color: theme.colors.textMuted, fontSize: '10px' }}>↗</span></td>
-                      <td style={{ padding: '12px' }}>{q.price_kes?.toFixed(2)}</td>
+                      <td style={{ padding: '12px', color: isRealNsePrice(q) ? undefined : theme.colors.textMuted }}>
+                        {q.price_kes?.toFixed(2)}
+                        {!isRealNsePrice(q) && (
+                          <span title={NSE_SOURCE_NOTE[q.source] || 'Origin of this price is not recorded'}
+                                style={{ marginLeft: '6px', fontSize: '9px', fontWeight: 800, padding: '1px 5px', borderRadius: '4px',
+                                         background: q.source === 'synthetic' ? `${theme.colors.danger}30` : 'rgba(255,255,255,0.08)',
+                                         color: q.source === 'synthetic' ? theme.colors.danger : theme.colors.textMuted }}>
+                            {q.source === 'synthetic' ? 'SYNTHETIC' : q.source === 'none' ? 'NO DATA' : 'UNVERIFIED'}
+                          </span>
+                        )}
+                      </td>
                       <td style={{ padding: '12px', color: q.change_pct >= 0 ? theme.colors.primary : theme.colors.danger }}>{q.change_pct >= 0 ? '+' : ''}{q.change_pct?.toFixed(2)}%</td>
                       <td style={{ padding: '12px' }}>{q.volume?.toLocaleString()}</td>
                       <td style={{ padding: '12px', color: pos ? (pos.unrealized_pl >= 0 ? theme.colors.primary : theme.colors.danger) : theme.colors.textMuted }}>

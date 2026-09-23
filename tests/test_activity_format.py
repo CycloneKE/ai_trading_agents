@@ -35,3 +35,19 @@ def test_missing_fields_do_not_crash():
     rec = format_agent_activity([{}])[0]
     assert rec['type'] == 'HOLD'
     assert rec['time'] == ''
+
+
+def test_a_hold_is_reported_as_no_signal_not_blocked():
+    """Every decision starts life with skip_reason='hold'. Rendering that as
+    'Blocked: hold' made the dashboard look like a gate was stopping every
+    trade when the strategies had simply found nothing to do."""
+    rec = format_agent_activity([{'ts': '2026-09-23T06:01:00', 'symbol': 'SOL-USD',
+                                  'action': 'hold', 'skip_reason': 'hold'}])[0]
+    assert rec['reason'] == 'No signal'
+    assert 'blocked' not in rec['message'].lower()
+
+
+def test_a_genuine_block_still_says_blocked():
+    rec = format_agent_activity([{'ts': '2026-09-23T06:01:00', 'symbol': 'SPY',
+                                  'action': 'buy', 'skip_reason': 'risk_limits'}])[0]
+    assert rec['reason'] == 'Blocked: risk_limits'

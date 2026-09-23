@@ -16,6 +16,10 @@ from functools import wraps
 from typing import Dict, Any, List
 from src.agent.sentiment_analyzer import FinancialSentimentAnalyzer
 from src.utils.paths import DATA_DIR
+
+# Sources the NSE scraper stamps on bars it actually fetched. Anything else
+# (synthetic seed data, or an unlabelled row) is not a real market price.
+REAL_NSE_SOURCES = frozenset({'nse_website', 'afx_kwayisi', 'afx_history'})
 # NOTE: token_required is imported via the guarded try/except below, NOT here.
 # A top-level import defeats the fail-closed guard: auth.py raises RuntimeError
 # (not ImportError) when SECRET_KEY is unset, which would crash the whole agent
@@ -980,7 +984,7 @@ class TradingAPI:
             """Get Cash vs. Asset exposures for allocation pie chart."""
             try:
                 broker = self.trading_agent.components.get('broker_manager')
-                cash = 100000.0
+                cash = None
                 positions = []
                 if broker:
                     primary = broker.get_broker()
@@ -990,19 +994,25 @@ class TradingAPI:
                             if acct:
                                 cash = acct.cash
                         except Exception:
-                            cash = getattr(primary, 'cash', cash)
+                            cash = getattr(primary, 'cash', None)
                         try:
                             positions = primary.get_positions()
                         except Exception:
                             positions = []
-                        
+
+                # No account data: return nothing, and let the dashboard show
+                # its empty state. This used to default cash to 100000.0, a
+                # balance nobody reported.
+                if cash is None and not positions:
+                    return jsonify([])
+
+                # No positions: the truth is 100% cash. This used to return an
+                # invented split of 35% cash, 30% Safaricom, 20% Equity Group
+                # and 15% KCB, so an empty account displayed $65,000 of
+                # Kenyan holdings that did not exist.
                 if not positions:
-                    return jsonify([
-                        {'name': 'Cash', 'value': cash * 0.35, 'color': '#64748b'},
-                        {'name': 'Safaricom (SCOM)', 'value': cash * 0.30, 'color': '#10b981'},
-                        {'name': 'Equity Group (EQTY)', 'value': cash * 0.20, 'color': '#06b6d4'},
-                        {'name': 'KCB Group (KCB)', 'value': cash * 0.15, 'color': '#f59e0b'}
-                    ])
+                    return jsonify([{'name': 'Cash', 'value': round(float(cash), 2),
+                                     'color': '#64748b'}])
                 
                 allocations = []
                 total_position_val = 0.0
@@ -1017,11 +1027,14 @@ class TradingAPI:
                         'color': theme_colors[idx % len(theme_colors)]
                     })
                 
-                allocations.append({
-                    'name': 'Cash',
-                    'value': round(cash, 2),
-                    'color': '#64748b'
-                })
+                # Positions loaded but the balance did not: show the
+                # positions, and omit a Cash slice rather than invent one.
+                if cash is not None:
+                    allocations.append({
+                        'name': 'Cash',
+                        'value': round(float(cash), 2),
+                        'color': '#64748b'
+                    })
                 return jsonify(allocations)
             except Exception as e:
                 logger.error(f"Error getting portfolio allocation: {e}")
@@ -1120,14 +1133,40 @@ class TradingAPI:
                     scraper_status = {}
                     if hasattr(self.trading_agent, 'nse_scraper') and self.trading_agent.nse_scraper:
                         scraper_status = self.trading_agent.nse_scraper.get_status()
+                    # Only the configured universe: those are the symbols
+                    # the scraper fetches and the agent evaluates. Listing
+                    # the full 18 showed nine rows of 0.00 for symbols
+                    # nothing fetches.
+                    agent_cfg = getattr(self.trading_agent, 'config', {}) or {}
+                    watched = [s.upper() for s in
+                               agent_cfg.get('data_manager', {}).get('nse_symbols', [])] or None
+                    quotes = nse.get_all_quotes(watched)
                     return {
-                        'quotes': nse.get_all_quotes(),
-                        'movers': nse.get_top_movers(),
-                        'sectors': nse.get_sector_performance(),
+                        'quotes': quotes,
+                        'movers': nse.get_top_movers(watched),
+                        'sectors': nse.get_sector_performance(watched),
                         'status': nse.get_status(),
                         'scraper': scraper_status,
                         'kes_usd_rate': nse.get_kes_usd_rate(),
                         'market_open': nse.is_market_open(),
+                        # The backend's own phase: closed / preopen / open.
+                        # The dashboard used to recompute this from the
+                        # clock, disagreed with the backend during the
+                        # 09:00-09:30 pre-open auction, and read the
+                        # disagreement as a public holiday.
+                        'market_phase': nse.market_phase(),
+                        # How many watched prices are real versus synthetic
+                        # seed data, so the dashboard can say so plainly.
+                        # Strict: only a named scraped source counts as
+                        # real. An unlabelled price is 'unverified', not
+                        # given the benefit of the doubt.
+                        'provenance': {
+                            'real': sum(1 for q in quotes if q.get('source') in REAL_NSE_SOURCES),
+                            'synthetic': sum(1 for q in quotes if q.get('source') == 'synthetic'),
+                            'missing': sum(1 for q in quotes if q.get('source') in ('none', None)),
+                            'unverified': sum(1 for q in quotes if q.get('source') not in
+                                              REAL_NSE_SOURCES | {'synthetic', 'none', None}),
+                        },
                     }
 
                 return jsonify(self._cached('nse_market', 60, produce))

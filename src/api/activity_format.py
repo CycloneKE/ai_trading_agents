@@ -15,6 +15,14 @@ def format_agent_activity(decisions: List[Dict[str, Any]]) -> List[Dict[str, Any
         if d.get('executed'):
             message = f"{action} executed at {d.get('price')}"
             reason = 'Executed'
+        elif d.get('skip_reason') == 'hold':
+            # 'hold' is the default every decision starts with: the
+            # strategies found nothing to do. It is not a block, and
+            # labelling it "Blocked: hold" read as though a gate were
+            # stopping trades. Matches SymbolDrilldown's "No directional
+            # signal".
+            message = f"{action}: no signal"
+            reason = 'No signal'
         elif d.get('skip_reason'):
             message = f"{action} blocked: {d.get('skip_reason')}"
             reason = f"Blocked: {d.get('skip_reason')}"
