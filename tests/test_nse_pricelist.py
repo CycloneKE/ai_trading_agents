@@ -301,3 +301,50 @@ def test_without_write_the_script_stores_nothing(tmp_path, monkeypatch, capsys):
 def test_sessions_are_weekdays_ending_at_the_given_day():
     from scripts.backfill_nse_pricelists import sessions
     assert sessions(date(2026, 9, 28), 3) == [date(2026, 9, 24), date(2026, 9, 25), date(2026, 9, 28)]
+
+
+def test_the_ocr_tools_are_found_in_their_own_folder(tmp_path, monkeypatch, capsys):
+    """On the server the OCR stack lives only in --ocr-path (/tmp/nseocr).
+
+    The folder used to be added to the import path only when the engine
+    first loaded, but the PDF library is imported before that, so every
+    server run stopped at once with "No module named 'fitz'". Locally the
+    tools were installed normally, which hid it.
+    """
+    from scripts import backfill_nse_pricelists as script
+    tools = tmp_path / "ocr"
+    tools.mkdir()
+    (tools / "pymupdf.py").write_text(
+        "class _Pix:\n"
+        "    width, height, n = 4, 2, 3\n"
+        "    samples = bytes(24)\n"
+        "class _Page:\n"
+        "    def get_pixmap(self, dpi):\n"
+        "        return _Pix()\n"
+        "class _Doc(list):\n"
+        "    page_count = 1\n"
+        "def open(stream, filetype):\n"
+        "    return _Doc([_Page()])\n")
+    (tools / "rapidocr_onnxruntime.py").write_text(
+        "class RapidOCR:\n"
+        "    def __init__(self, **kw):\n"
+        "        pass\n"
+        "    def __call__(self, img):\n"
+        "        return [[[[676, 10], [800, 10], [800, 30], [676, 30]], 'KE1000001402', 0.99]], 0.1\n")
+
+    class _Pdf:
+        status_code, content = 200, b"%PDF"
+
+    import requests
+    monkeypatch.setattr(requests, "get", lambda url, **kw: _Pdf())
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.setattr(script, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(sys, "argv", ["x", "--end", "2026-09-23", "--days", "1", "--pause", "0",
+                                      "--ocr-path", str(tools)])
+    try:
+        assert script.main() == 0, capsys.readouterr().out
+    finally:
+        for name in ("pymupdf", "fitz", "rapidocr_onnxruntime"):
+            sys.modules.pop(name, None)
+    assert "not installed" not in capsys.readouterr().out
+    assert (tmp_path / "cache" / "2026-09-23.json").exists()

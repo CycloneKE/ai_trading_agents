@@ -87,7 +87,8 @@ def test_mark_filled_writes_order_journal(queue):
             self.intents = []
             self.finals = []
 
-        def record_intent(self, coid, symbol, side, qty, order_type, strategy, limit_price):
+        def record_intent(self, coid, symbol, side, qty, order_type, strategy, limit_price,
+                          strategy_weights=None):
             self.intents.append((coid, symbol, side, qty, strategy))
             return True
 
@@ -99,6 +100,7 @@ def test_mark_filled_writes_order_journal(queue):
     ok, _ = queue.mark_filled(tid, 152.0, 50, order_journal=j)
     assert ok is True
     assert len(j.intents) == 1 and j.intents[0][1] == 'EABL'
+    assert j.intents[0][4] == 'nse_manual'  # a ticket nobody attributed
     assert j.finals[0][1] == 'filled' and j.finals[0][3] == 152.0
 
 

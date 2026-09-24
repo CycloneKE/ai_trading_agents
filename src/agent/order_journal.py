@@ -18,6 +18,7 @@ Idempotency rests on two rules:
 broker, so the agent never starts trading with unknown in-flight state.
 """
 
+import json
 import logging
 import os
 import sqlite3
@@ -70,6 +71,7 @@ CREATE TABLE IF NOT EXISTS orders (
     order_type      TEXT NOT NULL,
     limit_price     REAL,
     strategy        TEXT,
+    strategy_weights TEXT,          -- JSON {strategy: share}: who gets credit
     status          TEXT NOT NULL DEFAULT 'intent',
     detail          TEXT,
     filled_quantity REAL,
@@ -105,6 +107,10 @@ class OrderJournal:
         self._conn.execute('PRAGMA journal_mode=WAL')
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(orders)").fetchall()]
+        if 'strategy_weights' not in cols:  # journals written before credit sharing
+            self._conn.execute("ALTER TABLE orders ADD COLUMN strategy_weights TEXT")
+            self._conn.commit()
         self.db_path = db_path
 
     # ------------------------------------------------------------------
@@ -114,8 +120,13 @@ class OrderJournal:
     def record_intent(self, client_order_id: str, symbol: str, side: str,
                       quantity: float, order_type: str,
                       strategy: Optional[str] = None,
-                      limit_price: Optional[float] = None) -> bool:
+                      limit_price: Optional[float] = None,
+                      strategy_weights: Optional[Dict[str, float]] = None) -> bool:
         """Journal the intent to place an order.
+
+        `strategy_weights` names the strategies that decided it and each
+        one's share of the credit (see strategy_attribution.credit_weights);
+        without it the order is credited wholly to `strategy`.
 
         Returns True if the caller OWNS this order and may submit it.
         Returns False if the id was already journaled (duplicate decision, a
@@ -123,14 +134,16 @@ class OrderJournal:
         must NOT submit.
         """
         now = datetime.utcnow().isoformat()
+        weights = json.dumps(strategy_weights) if strategy_weights else None
         with self._lock:
             try:
                 self._conn.execute(
                     "INSERT INTO orders (client_order_id, symbol, side, quantity,"
-                    " order_type, limit_price, strategy, status, created_at, updated_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, 'intent', ?, ?)",
+                    " order_type, limit_price, strategy, strategy_weights, status,"
+                    " created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'intent', ?, ?)",
                     (client_order_id, symbol, side, quantity, order_type,
-                     limit_price, strategy, now, now))
+                     limit_price, strategy, weights, now, now))
                 self._conn.commit()
                 return True
             except sqlite3.IntegrityError:

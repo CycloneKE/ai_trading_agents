@@ -206,6 +206,22 @@
     "commission": 0.001,
     "slippage": 0.0005,
     "risk_per_trade": 0.005,
+    "add_to_winners": {
+      "_comment": "US/crypto book (src/agent/position_rules.py). A buy signal on a holding in one of `markets` adds to it only when selling it all now would already be profitable after costs, the price is at least min_gain_pct above the last entry, fewer than max_adds adds have been made, and the position stays within max_position_pct of equity. Entries are capped at risk_limits.max_position_size, so this cap sits a little above it. Add \"crypto\" to markets to let crypto add too.",
+      "enabled": true,
+      "markets": ["us_equity"],
+      "min_gain_pct": 0.05,
+      "max_adds": 2,
+      "add_size_pct": 0.5,
+      "max_position_pct": 0.08
+    },
+    "exits": {
+      "_comment": "All markets in the US/crypto book. A sell signal at or above full_exit_confidence closes the position; a weaker one sells trim_fraction of it, at most once a day, unless what would remain is under min_remaining_pct of equity. Stops always close in full.",
+      "partial_exits": true,
+      "full_exit_confidence": 0.75,
+      "trim_fraction": 0.5,
+      "min_remaining_pct": 0.01
+    },
     "_risk_per_trade_note": "THE authority for position size. Fraction of equity lost if a position's stop is hit. Notional = equity * risk_per_trade * cash_policy multiplier / (risk_limits.stop_loss_atr_mult * ATR%), then capped at risk_limits.max_position_size. At 0.5% risk with 2.5x ATR stops the 5% cap binds below about 4% ATR, so quiet instruments sit at the cap and volatile ones are sized down. Both the live loop and the backtest use this same formula (src/agent/position_sizing.volatility_scaled_value)."
   },
   "trading_loop_interval": 60,
@@ -287,6 +303,42 @@
       "sentiment_analyst": "meta-llama/llama-3.3-70b-instruct:free",
       "synthesizer": "meta-llama/llama-3.3-70b-instruct:free"
     }
+  },
+  "nse_paper_trading": {
+    "_comment": "The agent's NSE paper account (src/agent/nse_paper_account.py). With nse_auto_paper_trade on (the default), NSE tickets fill as paper trades against this cash, net of the NSE costs below, under the backtest's rules: no adding to a holding, no short selling, sells close the whole position. Remove or set to 0 to go back to leaving tickets pending for the operator.",
+    "starting_capital_kes": 200000,
+    "add_to_winners": {
+      "_comment": "A buy signal on a holding adds to it only when selling the whole position now would already be profitable after costs, the price is at least min_gain_pct above the last entry, fewer than max_adds adds have been made, and the position stays within max_position_pct of the account at cost. Each add is add_size_pct of a new position's size. Set enabled to false to never add.",
+      "enabled": true,
+      "min_gain_pct": 0.05,
+      "max_adds": 2,
+      "add_size_pct": 0.5,
+      "max_position_pct": 0.4
+    },
+    "exits": {
+      "_comment": "A sell signal at or above full_exit_confidence closes the position; a weaker one sells trim_fraction of it, at most once a day, unless what would remain is under min_remaining_pct of the account, which closes it instead. partial_exits false always closes.",
+      "partial_exits": true,
+      "full_exit_confidence": 0.75,
+      "trim_fraction": 0.5,
+      "min_remaining_pct": 0.02
+    },
+    "stop_loss": {
+      "_comment": "Checked every NSE evaluation before any signal: a position is sold in full when the price is stop_loss_pct below its cost (fees included) or trailing_stop_pct below the highest price since it opened. Where the stock's ATR is known the stops scale to risk_limits' ATR multiples, but never tighter than these: a round trip costs about 3.4%, and a stop tripped by an ordinary day's noise pays that for nothing.",
+      "enabled": true,
+      "stop_loss_pct": 0.08,
+      "trailing_stop_pct": 0.10
+    }
+  },
+  "strategy_tuning": {
+    "_comment": "Re-tunes the momentum threshold, mean-reversion band and RSI levels (src/agent/strategy_tuner.py). Every interval_days, and at most daily for a strategy losing over at least min_closed_trades closed trades (win rate under poor_win_rate or a negative mean return), the current settings and each setting one step either side are run over up to two years of real daily history per symbol with at least min_bars bars, net of costs. A change is adopted only if it beats the current settings on the held-out latest holdout_pct by min_improvement, is no worse in-sample, and made min_trades trades in each. Adopted settings persist in data/strategy_params.json. enabled false freezes them.",
+    "enabled": true,
+    "interval_days": 7,
+    "holdout_pct": 0.3,
+    "min_improvement": 0.005,
+    "min_trades": 5,
+    "min_bars": 120,
+    "min_closed_trades": 10,
+    "poor_win_rate": 0.4
   },
   "costs": {
     "_comment": "Per-side transaction costs by market. A single global rate cannot describe this portfolio: Alpaca is commission-free on US equities while an NSE round trip runs several percent. Set verified=true once you have confirmed a schedule with your broker.",

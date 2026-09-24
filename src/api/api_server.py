@@ -13,7 +13,7 @@ import os
 from collections import defaultdict
 from datetime import datetime
 from functools import wraps
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from src.agent.sentiment_analyzer import FinancialSentimentAnalyzer
 from src.utils.paths import DATA_DIR
 # Sources the NSE scraper stamps on bars it actually fetched. Anything else
@@ -193,6 +193,26 @@ class TradingAPI:
         with self._response_cache_lock:
             self._response_cache[key] = {'value': value, 'at': now}
         return value
+
+    def _nse_paper_summary(self) -> Optional[Dict[str, Any]]:
+        """The NSE paper account, holdings valued at the latest quotes.
+
+        None when the agent has no paper account (older configs).
+        """
+        paper = self.trading_agent.components.get('nse_paper_account')
+        if paper is None:
+            return None
+        prices = {}
+        dm = self.trading_agent.components.get('data_manager')
+        nse = dm.connectors.get('nse') if dm and hasattr(dm, 'connectors') else None
+        for symbol in paper.positions():
+            try:
+                quote = (nse.get_quote(symbol) if nse else None) or {}
+                if quote.get('price_kes') and quote.get('source') in REAL_NSE_SOURCES:
+                    prices[symbol] = float(quote['price_kes'])
+            except Exception as e:
+                logger.debug(f"NSE paper valuation: no quote for {symbol}: {e}")
+        return paper.summary(prices)
 
     def _setup_routes(self):
         """Setup API routes with authentication and rate limiting."""
@@ -1298,6 +1318,7 @@ class TradingAPI:
                     'trading': q.positions(book='trading'),
                     'long_term': q.positions(book='long_term'),
                 },
+                'paper_account': self._nse_paper_summary(),
             }), 200
 
         @self.app.route('/api/operator/nse-tickets/<int:ticket_id>/place', methods=['POST'])

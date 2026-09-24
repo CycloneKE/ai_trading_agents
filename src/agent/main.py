@@ -16,6 +16,7 @@ import logging
 import signal
 import threading
 import time
+import math
 from datetime import datetime
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
@@ -45,6 +46,12 @@ from src.utils.monitoring import get_monitoring_service
 from src.agent.data_manager import DataManager
 from src.agent.strategy_manager import StrategyManager
 from src.agent.daily_bars import utc_bar_date
+from src.agent.nse_paper_account import (HOLDING_RULE_REASONS, NsePaperAccount,
+                                         execute_stop, order_size)
+from src.agent.strategy_attribution import credit_weights
+from src.agent.position_rules import (LIVE_ADD_DEFAULTS, LIVE_EXIT_DEFAULTS, plan_add,
+                                      plan_exit, rule, state_from_journal)
+from src.agent.cost_model import classify, costs_for
 from src.agent.broker_manager import BrokerManager
 from src.agent.order_execution_engine import OrderExecutionEngine
 from src.agent.realtime_risk_manager import RealTimeRiskManager
@@ -259,6 +266,13 @@ class TradingAgent:
             # decisions become tickets a human keys into the AIB-AXYS portal.
             from src.agent.nse_order_queue import NseOrderQueue
             self.components['nse_order_queue'] = NseOrderQueue()
+            self.components['nse_paper_account'] = NsePaperAccount(
+                self.components['nse_order_queue'], self.config)
+            if self.config.get('nse_auto_paper_trade', True) and \
+                    not self.components['nse_paper_account'].enabled:
+                logger.warning("nse_auto_paper_trade is on but nse_paper_trading."
+                               "starting_capital_kes is not set: NSE tickets stay "
+                               "pending for the operator instead of paper-filling")
             self._last_nse_eval = 0.0
             self._nse_last_price = {}  # symbol -> last-evaluated price (freshness guard)
 
@@ -355,7 +369,8 @@ class TradingAgent:
     def _position_gate(self, broker, symbol: str, action: str):
         """The backtest's position rules, applied before any order.
 
-        Returns (allowed, skip_reason, held_quantity). Fails closed: if the
+        Returns (allowed, skip_reason, held_quantity, avg_entry_price).
+        Fails closed: if the
         broker cannot say what is held or pending, no order is placed,
         because an unknown position is exactly how a held symbol gets
         bought again. Brokers exposing strict fetch_positions /
@@ -369,16 +384,17 @@ class TradingAgent:
             pending = fetch_open(symbol) if callable(fetch_open) else (broker.get_orders(symbol) or [])
         except Exception as e:
             logger.warning(f"Cannot confirm holdings for {symbol}; not trading it this cycle: {e}")
-            return False, 'position_unknown', 0.0
-        held = sum(float(getattr(p, 'quantity', 0) or 0)
-                   for p in positions if getattr(p, 'symbol', None) == symbol)
+            return False, 'position_unknown', 0.0, 0.0
+        mine = [p for p in positions if getattr(p, 'symbol', None) == symbol]
+        held = sum(float(getattr(p, 'quantity', 0) or 0) for p in mine)
+        avg_entry = float(getattr(mine[0], 'avg_entry_price', 0) or 0) if mine else 0.0
         if any(getattr(o, 'symbol', None) == symbol for o in pending):
-            return False, 'order_pending', held
-        if action == 'buy' and held > 0:
-            return False, 'already_held', held
+            return False, 'order_pending', held, avg_entry
         if action == 'sell' and held <= 0:
-            return False, 'no_position', held
-        return True, None, held
+            return False, 'no_position', held, avg_entry
+        # A buy on a holding is an add: _execute_trades decides whether the
+        # position has earned one (position_rules.plan_add).
+        return True, None, held, avg_entry
 
     def _history_needed(self) -> int:
         """Daily bars a symbol needs before every strategy can signal."""
@@ -559,6 +575,21 @@ class TradingAgent:
         self._last_history_attempt = 0.0
         self._warm_start_history()
 
+        # Strategy settings re-tune from results, weekly or sooner for a
+        # strategy that is losing, adopting only changes that beat the
+        # current settings on held-out history (strategy_tuner.py). Runs in
+        # a background thread; saved settings are applied here at startup.
+        try:
+            from src.agent.strategy_tuner import StrategyTuner, market_history
+            from src.utils.paths import DATA_DIR
+            self.strategy_tuner = StrategyTuner(
+                self.components.get('strategy_manager'), self.config,
+                history_source=lambda: market_history(self.config),
+                params_path=DATA_DIR / 'strategy_params.json')
+        except Exception as e:
+            logger.error(f"Strategy tuner init failed: {e}")
+            self.strategy_tuner = None
+
         # LLM weight allocator: proposes ensemble weight tilts from realized
         # attribution on a slow cadence; hard guardrails clamp every proposal
         # and it is a no-op without an LLM API key.
@@ -715,6 +746,11 @@ class TradingAgent:
                         self.llm_allocator.maybe_rebalance()
                     except Exception as e:
                         logger.error(f"LLM allocator error: {e}")
+                if getattr(self, 'strategy_tuner', None) and not self.trading_halted:
+                    try:
+                        self.strategy_tuner.maybe_tune()
+                    except Exception as e:
+                        logger.error(f"Strategy tuner error: {e}")
 
                 # Pull fill results for submitted orders into the journal so
                 # attribution and duplicate-close checks see current state.
@@ -1174,6 +1210,9 @@ class TradingAgent:
             logger.debug(f"NSE ticket expiry skipped: {e}")
 
         llm = self.components.get('llm_orchestrator')
+        paper = self.components.get('nse_paper_account')
+        auto_paper = (self.config.get('nse_auto_paper_trade', True)
+                      and paper is not None and paper.enabled)
         base_notional = nse_cfg.get('trade_notional_kes', 50000)
         cycle = int(now // interval)
         nse_symbols = self.config.get('data_manager', {}).get('nse_symbols', [])
@@ -1210,6 +1249,35 @@ class TradingAgent:
                             logger.debug(f"NSE decision record error: {e}")
                     continue
 
+                # Stops before signals, and whatever the signals say: a paper
+                # position below its stop-loss or trailing stop is closed now,
+                # without an LLM call.
+                if auto_paper:
+                    tracker = getattr(self, 'volatility', None)
+                    try:
+                        atr_pct = tracker.atr_pct(symbol) if tracker is not None else None
+                    except Exception:
+                        atr_pct = None
+                    hit = paper.stop_check(symbol, price, atr_pct)
+                    if hit:
+                        reason, qty, why = hit
+                        fill = execute_stop(paper, queue, symbol, price, reason, qty, why,
+                                            order_journal=self.order_journal)
+                        logger.warning(f"NSE {symbol} {why}; "
+                                       f"{'sold' if fill else 'could not sell'} {qty} shares")
+                        if self.decision_journal:
+                            try:
+                                self.decision_journal.record({
+                                    'symbol': symbol, 'cycle': cycle, 'action': 'sell',
+                                    'skip_reason': None if fill else 'duplicate',
+                                    'price': price, 'ensemble_confidence': 1.0,
+                                    'per_strategy': {reason: {'action': 'sell', 'confidence': 1.0}},
+                                    'llm_verdict': {}, 'executed': bool(fill),
+                                })
+                            except Exception as e:
+                                logger.debug(f"NSE decision record error: {e}")
+                        continue
+
                 # Freshness guard: skip a symbol whose price hasn't moved since
                 # last eval so we don't feed a repeated stale price into the
                 # strategies' rolling SMA/RSI buffers.
@@ -1245,7 +1313,20 @@ class TradingAgent:
                     }
 
                 validated = signals
-                if signals and signals.get('action') != 'hold' and llm:
+                proposed = (signals or {}).get('action', 'hold')
+                blocked = None
+                if proposed in ('buy', 'sell'):
+                    # Holding rules first, so a trade the book cannot take (an
+                    # add the holding hasn't earned, a sell of nothing) never
+                    # costs an LLM call. Cash is checked once the size is known.
+                    _, blocked = order_size(symbol, proposed, price, base_notional, queue, paper,
+                                            confidence=float(signals.get('confidence') or 0.0))
+                    if blocked not in HOLDING_RULE_REASONS:
+                        blocked = None
+                if blocked:
+                    dec['skip_reason'] = blocked
+                    validated = {'action': 'hold', 'confidence': 0.0}
+                elif signals and proposed != 'hold' and llm:
                     validated = llm.validate_trade(symbol, signals, symbol_data, None)
                     dec['llm_verdict'] = {
                         'action': validated.get('action'),
@@ -1261,34 +1342,44 @@ class TradingAgent:
                     position_size = (validated.get('position_size')
                                      or signals.get('position_size') or 0.1)
                     notional = base_notional * min(max(position_size, 0.1), 1.0)
-                    qty = int(notional / price)
-                    if qty < 1:
-                        dec['skip_reason'] = 'min_notional'
+                    # Adds only to proven winners, no selling what isn't held,
+                    # a weaker sell trims and a strong one closes, a buy fits
+                    # the cash (position_rules.py).
+                    qty, reason = order_size(symbol, action, price, notional, queue, paper,
+                                             confidence=float(confidence or 0.0))
+                    if reason:
+                        dec['skip_reason'] = reason
                     else:
                         ticket_id = queue.create_ticket(
                             symbol, action, qty, suggested_limit_price=round(price, 2),
                             rationale=f"{action.upper()} signal (ensemble conf {confidence:.2f})",
                             ensemble_confidence=confidence,
-                            llm_reasoning=(validated.get('reasoning') if validated else '') or '')
+                            llm_reasoning=(validated.get('reasoning') if validated else '') or '',
+                            # Credit the strategies that voted for it, so NSE
+                            # results feed the performance weighting too.
+                            strategy='ensemble',
+                            strategy_weights=credit_weights(
+                                (signals or {}).get('per_strategy'), action) or {'ensemble': 1.0})
                         if ticket_id:
                             dec['skip_reason'] = None  # actionable signal, ticket queued
                             logger.info(
                                 f"NSE order ticket #{ticket_id}: {action} {qty} {symbol} "
                                 f"@ {price:.2f} KES (conf {confidence:.2f})")
                             
-                            # Automatically simulate paper fills for NSE when nse_auto_paper_trade is enabled
-                            if self.config.get('nse_auto_paper_trade', True):
-                                ok_fill, fill_data = queue.mark_filled(
-                                    ticket_id,
-                                    fill_price=round(price, 2),
-                                    fill_quantity=qty,
-                                    resolved_by='auto_paper_trader',
-                                    notes='Automated Paper Trade Simulation Fill',
-                                    order_journal=self.order_journal
-                                )
+                            # The agent fills its own ticket as a paper trade:
+                            # slippage in the price, commission as fees, against
+                            # the paper account's cash (nse_paper_account.py).
+                            if auto_paper:
+                                ok_fill, fill_data = paper.fill(
+                                    ticket_id, action, price, qty,
+                                    order_journal=self.order_journal)
                                 if ok_fill:
                                     dec['executed'] = True
-                                    logger.info(f"NSE Automated Paper Fill executed for ticket #{ticket_id}: {action} {qty} {symbol} @ {price:.2f} KES")
+                                    logger.info(
+                                        f"NSE paper fill, ticket #{ticket_id}: {action} {qty} "
+                                        f"{symbol} @ {fill_data['fill_price']:.2f} KES, fees "
+                                        f"{fill_data['fees_kes']:.2f}; cash now "
+                                        f"{paper.cash():,.2f} KES")
                         else:
                             dec['skip_reason'] = 'duplicate'
                 elif self.trading_halted and action in ('buy', 'sell'):
@@ -1478,9 +1569,16 @@ class TradingAgent:
                         # changes every minute, so without this a buy signal
                         # that holds all day places a fresh full-size buy
                         # every cycle: 390 a session per stock.
-                        allowed, why, held_qty = self._position_gate(broker, symbol, action)
+                        allowed, why, held_qty, avg_entry = self._position_gate(broker, symbol, action)
                         if not allowed:
                             _note(symbol, why)
+                            continue
+                        trading_cfg = self.config.get('trading', {})
+                        add_rule = rule(LIVE_ADD_DEFAULTS, trading_cfg.get('add_to_winners'))
+                        exit_rule = rule(LIVE_EXIT_DEFAULTS, trading_cfg.get('exits'))
+                        is_add = action == 'buy' and held_qty > 0
+                        if is_add and classify(symbol, self.config) not in add_rule.get('markets', []):
+                            _note(symbol, 'already_held')
                             continue
 
                         # Calculate quantity (Max 2% of portfolio per trade for safety).
@@ -1583,6 +1681,20 @@ class TradingAgent:
                         if not executions:
                             executions = [(signal_data.get('strategy', 'ensemble'), target_pos_value)]
 
+                        # Adds and trims need the position's history: when it
+                        # opened, its entries, its last trim (position_rules).
+                        state = (state_from_journal(self.order_journal, symbol, held_qty, avg_entry)
+                                 if held_qty > 0 else None)
+                        if is_add:
+                            c = costs_for(symbol, self.config)
+                            add_value, why = plan_add(
+                                state, price, float(c.get('commission_pct', 0)) + float(c.get('slippage_pct', 0)),
+                                portfolio_value, target_pos_value, add_rule)
+                            if why:
+                                _note(symbol, why)
+                                continue
+                            executions = [(signal_data.get('strategy', 'ensemble'), add_value)]
+
                         symbol_executed = False
                         from src.agent.position_sizing import size_order
                         from src.agent.order_journal import make_client_order_id
@@ -1596,15 +1708,26 @@ class TradingAgent:
                         # position in one order, exactly the held quantity,
                         # as the backtest does.
                         allow_fractional = sizing_cfg.get('allow_fractional', True)
+                        sell_qty = held_qty
                         if action == 'sell':
-                            executions = [(signal_data.get('strategy', 'ensemble'), held_qty * price)]
+                            # A strong sell closes the position; a weaker one
+                            # trims it, at most once a day (position_rules).
+                            sell_qty, why = plan_exit(state, confidence, price, portfolio_value,
+                                                      datetime.utcnow().date().isoformat(), exit_rule)
+                            if why:
+                                _note(symbol, why)
+                                continue
+                            if not allow_fractional and asset_type != 'crypto':
+                                sell_qty = math.floor(sell_qty) or held_qty
+                            sell_qty = min(round(sell_qty, 6), held_qty)
+                            executions = [(signal_data.get('strategy', 'ensemble'), sell_qty * price)]
 
                         for strategy_name, target_value in executions:
                             if action == 'sell':
-                                # Exactly what is held: recomputing it from a
-                                # dollar value would drift by float rounding
-                                # and the broker rejects selling more than held.
-                                quantity, order_tif = held_qty, 'day'
+                                # A quantity, not a dollar value: recomputing it
+                                # would drift by float rounding, and the broker
+                                # rejects selling more than held.
+                                quantity, order_tif = sell_qty, 'day'
                             else:
                                 # Dollar-notional sizing with fractional shares,
                                 # so small accounts get properly sized positions
@@ -1624,9 +1747,14 @@ class TradingAgent:
                             # blocks re-submission after a crash/retry, and the
                             # broker deduplicates on the same id server-side.
                             client_order_id = make_client_order_id(strategy_name, symbol, action, cycle)
+                            # Credit: in parallel mode the order is one
+                            # strategy's own; blended, it belongs to the
+                            # strategies that voted for it, by confidence.
+                            weights = ({strategy_name: 1.0} if mode == 'parallel' and per_strategy
+                                       else credit_weights(per_strategy, action) or {strategy_name: 1.0})
                             if self.order_journal and not self.order_journal.record_intent(
                                     client_order_id, symbol, action, float(quantity),
-                                    'market', strategy=strategy_name):
+                                    'market', strategy=strategy_name, strategy_weights=weights):
                                 logger.warning(f"Skipping duplicate order decision: {client_order_id}")
                                 if not symbol_executed:
                                     _note(symbol, 'duplicate')
@@ -1731,7 +1859,7 @@ class TradingAgent:
                                             int(time.time() // 300))
                 if self.order_journal and not self.order_journal.record_intent(
                         coid, p.symbol, side, abs(p.quantity), 'limit',
-                        strategy='kill_switch'):
+                        strategy='kill_switch', strategy_weights={'kill_switch': 1.0}):
                     continue
                 # Marketable extended-hours limit so flattening also works
                 # pre/after-market; market GTC as last resort.
@@ -1903,7 +2031,8 @@ class TradingAgent:
                                                     close_side, int(time.time() // 300))
                         if self.order_journal and not self.order_journal.record_intent(
                                 coid, position.symbol, close_side,
-                                abs(position.quantity), 'market', strategy='stop_loss'):
+                                abs(position.quantity), 'market', strategy='stop_loss',
+                                strategy_weights={'stop_loss': 1.0}):
                             logger.info(f"Stop-loss close already journaled ({coid}); skipping")
                             continue
                         close_order = OrderRequest(
@@ -1947,7 +2076,8 @@ class TradingAgent:
                                                             'sell', int(time.time() // 300))
                                 if self.order_journal and not self.order_journal.record_intent(
                                         coid, position.symbol, 'sell',
-                                        abs(position.quantity), 'market', strategy='trailing_stop'):
+                                        abs(position.quantity), 'market', strategy='trailing_stop',
+                                        strategy_weights={'trailing_stop': 1.0}):
                                     logger.info(f"Trailing-stop close already journaled ({coid}); skipping")
                                     continue
                                 close_order = OrderRequest(

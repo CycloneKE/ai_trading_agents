@@ -87,15 +87,19 @@ def classify(symbol: str, config: Optional[Dict[str, Any]] = None) -> str:
     return DEFAULT_MARKET
 
 
-def costs_for(symbol: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Resolve commission and slippage for one symbol, as fractions per side."""
-    market = classify(symbol, config)
+def market_costs(market: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Resolve commission and slippage for a market key, as fractions per side."""
     base = dict(DEFAULT_COSTS.get(market, DEFAULT_COSTS[DEFAULT_MARKET]))
     override = _configured_markets(config).get(market)
     if override:
         base.update(override)
     base['market'] = market
     return base
+
+
+def costs_for(symbol: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Resolve commission and slippage for one symbol, as fractions per side."""
+    return market_costs(classify(symbol, config), config)
 
 
 def round_trip_pct(symbol: str, config: Optional[Dict[str, Any]] = None) -> float:

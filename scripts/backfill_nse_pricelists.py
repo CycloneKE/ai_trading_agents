@@ -65,13 +65,18 @@ class Reader:
     """Downloads and OCRs lists, loading the engine only if one is needed."""
 
     def __init__(self, ocr_path: str, threads: int, pause: float):
-        self.ocr_path, self.threads, self.pause = ocr_path, threads, pause
+        self.threads, self.pause = threads, pause
         self._engine = None
+        # First on the path, before anything imports numpy: the OCR stack
+        # (pymupdf, onnxruntime, opencv and the numpy they were built with)
+        # lives only here. Adding it when the engine first loaded was too
+        # late, because ocr() imports pymupdf before it asks for the engine,
+        # so every run on the server stopped with "No module named 'fitz'".
+        if ocr_path not in sys.path:
+            sys.path.insert(0, ocr_path)
 
     def engine(self):
         if self._engine is None:
-            if self.ocr_path not in sys.path:
-                sys.path.insert(0, self.ocr_path)
             # Not in the app image by design; installed to --ocr-path for this run.
             from rapidocr_onnxruntime import RapidOCR  # pylint: disable=import-error
             self._engine = RapidOCR(intra_op_num_threads=self.threads)
