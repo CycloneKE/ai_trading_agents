@@ -32,6 +32,11 @@ SKIP_REASONS = {
     'no_account_info',    # account info unavailable, couldn't size
     'dissent',            # parallel mode: no strategy agreed with direction
     'duplicate',          # journal blocked a duplicate decision
+    'already_held',       # buy signal for a symbol already held (no adding)
+    'no_position',        # sell signal with nothing held (no shorting)
+    'order_pending',      # an earlier order for the symbol is still working
+    'position_unknown',   # holdings could not be read; skipped to be safe
+    'insufficient_cash',  # NSE paper account lacks the cash for one share
 }
 
 _SCHEMA = """

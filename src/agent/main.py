@@ -45,6 +45,7 @@ from src.utils.monitoring import get_monitoring_service
 from src.agent.data_manager import DataManager
 from src.agent.strategy_manager import StrategyManager
 from src.agent.daily_bars import utc_bar_date
+from src.agent.nse_paper_account import NsePaperAccount, order_size
 from src.agent.broker_manager import BrokerManager
 from src.agent.order_execution_engine import OrderExecutionEngine
 from src.agent.realtime_risk_manager import RealTimeRiskManager
@@ -259,6 +260,13 @@ class TradingAgent:
             # decisions become tickets a human keys into the AIB-AXYS portal.
             from src.agent.nse_order_queue import NseOrderQueue
             self.components['nse_order_queue'] = NseOrderQueue()
+            self.components['nse_paper_account'] = NsePaperAccount(
+                self.components['nse_order_queue'], self.config)
+            if self.config.get('nse_auto_paper_trade', True) and \
+                    not self.components['nse_paper_account'].enabled:
+                logger.warning("nse_auto_paper_trade is on but nse_paper_trading."
+                               "starting_capital_kes is not set: NSE tickets stay "
+                               "pending for the operator instead of paper-filling")
             self._last_nse_eval = 0.0
             self._nse_last_price = {}  # symbol -> last-evaluated price (freshness guard)
 
@@ -1174,6 +1182,9 @@ class TradingAgent:
             logger.debug(f"NSE ticket expiry skipped: {e}")
 
         llm = self.components.get('llm_orchestrator')
+        paper = self.components.get('nse_paper_account')
+        auto_paper = (self.config.get('nse_auto_paper_trade', True)
+                      and paper is not None and paper.enabled)
         base_notional = nse_cfg.get('trade_notional_kes', 50000)
         cycle = int(now // interval)
         nse_symbols = self.config.get('data_manager', {}).get('nse_symbols', [])
@@ -1245,7 +1256,19 @@ class TradingAgent:
                     }
 
                 validated = signals
-                if signals and signals.get('action') != 'hold' and llm:
+                proposed = (signals or {}).get('action', 'hold')
+                blocked = None
+                if proposed in ('buy', 'sell'):
+                    # Holding rules first, so a trade the book cannot take (a
+                    # second buy of a holding, a sell of nothing) never costs
+                    # an LLM call. Cash is checked once the size is known.
+                    _, blocked = order_size(symbol, proposed, price, base_notional, queue, paper)
+                    if blocked not in ('already_held', 'no_position'):
+                        blocked = None
+                if blocked:
+                    dec['skip_reason'] = blocked
+                    validated = {'action': 'hold', 'confidence': 0.0}
+                elif signals and proposed != 'hold' and llm:
                     validated = llm.validate_trade(symbol, signals, symbol_data, None)
                     dec['llm_verdict'] = {
                         'action': validated.get('action'),
@@ -1261,9 +1284,11 @@ class TradingAgent:
                     position_size = (validated.get('position_size')
                                      or signals.get('position_size') or 0.1)
                     notional = base_notional * min(max(position_size, 0.1), 1.0)
-                    qty = int(notional / price)
-                    if qty < 1:
-                        dec['skip_reason'] = 'min_notional'
+                    # No adding to a holding, no selling what isn't held, a
+                    # sell closes the whole position, a buy fits the cash.
+                    qty, reason = order_size(symbol, action, price, notional, queue, paper)
+                    if reason:
+                        dec['skip_reason'] = reason
                     else:
                         ticket_id = queue.create_ticket(
                             symbol, action, qty, suggested_limit_price=round(price, 2),
@@ -1276,19 +1301,20 @@ class TradingAgent:
                                 f"NSE order ticket #{ticket_id}: {action} {qty} {symbol} "
                                 f"@ {price:.2f} KES (conf {confidence:.2f})")
                             
-                            # Automatically simulate paper fills for NSE when nse_auto_paper_trade is enabled
-                            if self.config.get('nse_auto_paper_trade', True):
-                                ok_fill, fill_data = queue.mark_filled(
-                                    ticket_id,
-                                    fill_price=round(price, 2),
-                                    fill_quantity=qty,
-                                    resolved_by='auto_paper_trader',
-                                    notes='Automated Paper Trade Simulation Fill',
-                                    order_journal=self.order_journal
-                                )
+                            # The agent fills its own ticket as a paper trade:
+                            # slippage in the price, commission as fees, against
+                            # the paper account's cash (nse_paper_account.py).
+                            if auto_paper:
+                                ok_fill, fill_data = paper.fill(
+                                    ticket_id, action, price, qty,
+                                    order_journal=self.order_journal)
                                 if ok_fill:
                                     dec['executed'] = True
-                                    logger.info(f"NSE Automated Paper Fill executed for ticket #{ticket_id}: {action} {qty} {symbol} @ {price:.2f} KES")
+                                    logger.info(
+                                        f"NSE paper fill, ticket #{ticket_id}: {action} {qty} "
+                                        f"{symbol} @ {fill_data['fill_price']:.2f} KES, fees "
+                                        f"{fill_data['fees_kes']:.2f}; cash now "
+                                        f"{paper.cash():,.2f} KES")
                         else:
                             dec['skip_reason'] = 'duplicate'
                 elif self.trading_halted and action in ('buy', 'sell'):

@@ -288,6 +288,10 @@
       "synthesizer": "meta-llama/llama-3.3-70b-instruct:free"
     }
   },
+  "nse_paper_trading": {
+    "_comment": "The agent's NSE paper account (src/agent/nse_paper_account.py). With nse_auto_paper_trade on (the default), NSE tickets fill as paper trades against this cash, net of the NSE costs below, under the backtest's rules: no adding to a holding, no short selling, sells close the whole position. Remove or set to 0 to go back to leaving tickets pending for the operator.",
+    "starting_capital_kes": 200000
+  },
   "costs": {
     "_comment": "Per-side transaction costs by market. A single global rate cannot describe this portfolio: Alpaca is commission-free on US equities while an NSE round trip runs several percent. Set verified=true once you have confirmed a schedule with your broker.",
     "us_equity": {

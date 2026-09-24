@@ -25,6 +25,7 @@ const REASON_LABEL = {
   no_position: 'Sell signal, but nothing held (no short selling)',
   order_pending: 'An earlier order is still working',
   position_unknown: 'Could not confirm holdings; skipped for safety',
+  insufficient_cash: 'Not enough paper cash for the order',
 };
 
 const reasonColor = (r) => {

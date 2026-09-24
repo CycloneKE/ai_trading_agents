@@ -39,10 +39,18 @@ CREATE TABLE IF NOT EXISTS nse_order_tickets (
     fill_at               TEXT,
     operator_notes        TEXT,
     resolved_by           TEXT,
-    book                  TEXT DEFAULT 'trading'  -- 'trading' | 'long_term'
+    book                  TEXT DEFAULT 'trading', -- 'trading' | 'long_term'
+    fees_kes              REAL DEFAULT 0          -- commission charged on the fill
 );
 CREATE INDEX IF NOT EXISTS idx_nse_tickets_status ON nse_order_tickets(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_nse_tickets_symbol ON nse_order_tickets(symbol);
+
+-- When the agent's NSE paper account opened. One row; fills before it are
+-- not the account's (see nse_paper_account.py).
+CREATE TABLE IF NOT EXISTS nse_paper_account (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    started_at  TEXT NOT NULL
+);
 """
 
 
@@ -59,13 +67,17 @@ class NseOrderQueue:
 
     def _migrate_add_book_column(self) -> None:
         """CREATE TABLE IF NOT EXISTS doesn't add columns to a table that
-        already existed before `book` was introduced — do that explicitly so
-        pre-existing escalations.db files keep working."""
+        already existed before `book` (and later `fees_kes`) was introduced —
+        do that explicitly so pre-existing escalations.db files keep working."""
         cols = [row[1] for row in self._conn.execute(
             "PRAGMA table_info(nse_order_tickets)").fetchall()]
         if 'book' not in cols:
             self._conn.execute(
                 "ALTER TABLE nse_order_tickets ADD COLUMN book TEXT DEFAULT 'trading'")
+            self._conn.commit()
+        if 'fees_kes' not in cols:
+            self._conn.execute(
+                "ALTER TABLE nse_order_tickets ADD COLUMN fees_kes REAL DEFAULT 0")
             self._conn.commit()
 
     def create_ticket(self, symbol: str, side: str, quantity: int,
@@ -134,9 +146,11 @@ class NseOrderQueue:
 
     def mark_filled(self, ticket_id: int, fill_price: float, fill_quantity: int,
                     resolved_by: str = 'operator', notes: str = '',
-                    order_journal=None) -> Tuple[bool, Optional[Dict[str, Any]]]:
+                    order_journal=None,
+                    fees_kes: float = 0.0) -> Tuple[bool, Optional[Dict[str, Any]]]:
         """Record the actual fill. Optionally mirror it into the order journal
-        so there is one execution record across US and NSE trades."""
+        so there is one execution record across US and NSE trades. `fees_kes`
+        is the commission charged, so a paper account can be kept net of it."""
         if not fill_price or fill_price <= 0 or not fill_quantity or fill_quantity <= 0:
             return False, None
         with self._lock:
@@ -145,10 +159,10 @@ class NseOrderQueue:
                 return False, None
             self._conn.execute(
                 "UPDATE nse_order_tickets SET status = 'filled', fill_price = ?,"
-                " fill_quantity = ?, fill_at = ?, resolved_by = ?, operator_notes = ?"
-                " WHERE id = ?",
+                " fill_quantity = ?, fill_at = ?, resolved_by = ?, operator_notes = ?,"
+                " fees_kes = ? WHERE id = ?",
                 (float(fill_price), int(fill_quantity), datetime.utcnow().isoformat(),
-                 resolved_by, notes, ticket_id))
+                 resolved_by, notes, float(fees_kes or 0.0), ticket_id))
             self._conn.commit()
             filled = self._get(ticket_id)
 
@@ -201,19 +215,49 @@ class NseOrderQueue:
             self._conn.commit()
             return cur.rowcount
 
-    def positions(self, book: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    def fills(self, book: Optional[str] = None,
+              since: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Filled tickets, oldest first: symbol, side, quantity, price, fees.
+
+        `since` (an ISO timestamp) keeps only fills at or after it, which is
+        how a paper account ignores fills from before it opened.
+        """
+        query = ("SELECT symbol, side, fill_quantity, fill_price, fees_kes, fill_at"
+                 " FROM nse_order_tickets WHERE status = 'filled' AND fill_quantity > 0")
+        params: List[Any] = []
+        if book is not None:
+            query += " AND book = ?"
+            params.append(book)
+        if since is not None:
+            query += " AND fill_at >= ?"
+            params.append(since)
+        query += " ORDER BY fill_at ASC, id ASC"
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return [{'symbol': r[0], 'side': r[1], 'quantity': int(r[2]), 'price': float(r[3]),
+                 'fees_kes': float(r[4] or 0.0), 'fill_at': r[5]} for r in rows]
+
+    def paper_account_started_at(self) -> str:
+        """When the NSE paper account opened, recording now on first call."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT started_at FROM nse_paper_account WHERE id = 1").fetchone()
+            if row:
+                return row[0]
+            started = datetime.utcnow().isoformat()
+            self._conn.execute(
+                "INSERT INTO nse_paper_account (id, started_at) VALUES (1, ?)", (started,))
+            self._conn.commit()
+            return started
+
+    def positions(self, book: Optional[str] = None,
+                  since: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
         """Net position per symbol from filled tickets: signed quantity and
         the volume-weighted average entry price (KES). Pass `book` to scope
-        to just 'trading' or 'long_term' fills; omit for the blended view."""
-        with self._lock:
-            query = ("SELECT symbol, side, fill_quantity, fill_price FROM nse_order_tickets"
-                     " WHERE status = 'filled' AND fill_quantity > 0")
-            params: Tuple[Any, ...] = ()
-            if book is not None:
-                query += " AND book = ?"
-                params = (book,)
-            query += " ORDER BY fill_at ASC"
-            rows = self._conn.execute(query, params).fetchall()
+        to just 'trading' or 'long_term' fills; omit for the blended view.
+        `since` keeps only fills at or after that ISO timestamp."""
+        rows = [(f['symbol'], f['side'], f['quantity'], f['price'])
+                for f in self.fills(book=book, since=since)]
         book_map: Dict[str, Dict[str, Any]] = {}
         for symbol, side, qty, price in rows:
             b = book_map.setdefault(symbol, {'quantity': 0, 'buy_qty': 0, 'buy_cost': 0.0})
