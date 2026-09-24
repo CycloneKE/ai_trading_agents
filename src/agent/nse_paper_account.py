@@ -14,15 +14,29 @@ every result:
 - there was no cash, so it could buy without limit.
 
 This account holds KES `nse_paper_trading.starting_capital_kes` and follows
-the same rules the backtest and the US paper book do: buy only when nothing
-is held, sell only what is held and all of it, never short, never spend
-more cash than there is. Each fill pays slippage (in the price) and
-commission (in `fees_kes`). Its state is derived from the filled tickets in
-the 'trading' book since the account opened, so there is one record of what
-happened and nothing to keep in step with it.
+these rules: sell only what is held and all of it, never short, never spend
+more cash than there is, and add to a holding only once it has proved
+profitable (`add_to_winners`, below). Each fill pays slippage (in the price)
+and commission (in `fees_kes`). Its state is derived from the filled tickets
+in the 'trading' book since the account opened, so there is one record of
+what happened and nothing to keep in step with it.
+
+Adding to winners. The backtest never added to a position, and adding to one
+every cycle a signal persisted was the bug above. But adding to a position
+that is working is a sound, long-established practice, as long as the add
+is earned and bounded. A buy signal on a holding becomes an add only when:
+
+- selling the whole position now would be profitable after the sale's own
+  costs, so the trade has already paid for its round trip;
+- the price is at least `min_gain_pct` above the last entry, so each add
+  needs the move to continue and adds cannot bunch at one price;
+- fewer than `max_adds` adds have been made to this position;
+- the position stays within `max_position_pct` of the account at cost.
+
+An add is `add_size_pct` of a new position's size. A sell still closes the
+whole position, adds included.
 """
 import logging
-import math
 from typing import Any, Dict, Optional, Tuple
 
 from src.agent.cost_model import market_costs
@@ -31,6 +45,14 @@ logger = logging.getLogger(__name__)
 
 BOOK = 'trading'
 RESOLVED_BY = 'auto_paper_trader'
+
+# Reasons a trade is refused by the holding rules alone, whatever its size:
+# checked before the LLM, so a trade the book cannot take costs no call.
+HOLDING_RULE_REASONS = frozenset({'already_held', 'no_position', 'add_not_profitable',
+                                  'max_adds', 'position_cap'})
+
+ADD_DEFAULTS = {'enabled': True, 'min_gain_pct': 0.05, 'max_adds': 2,
+                'add_size_pct': 0.5, 'max_position_pct': 0.4}
 
 
 class NsePaperAccount:
@@ -43,6 +65,8 @@ class NsePaperAccount:
         self.min_commission = float(costs.get('min_commission') or 0.0)
         self.slippage_pct = float(costs.get('slippage_pct') or 0.0)
         self.costs_verified = bool(costs.get('verified'))
+        add = {k: v for k, v in (cfg.get('add_to_winners') or {}).items() if not k.startswith('_')}
+        self.add_rule = {**ADD_DEFAULTS, **add}
         self.started_at = queue.paper_account_started_at() if self.enabled else None
 
     @property
@@ -76,13 +100,18 @@ class NsePaperAccount:
         cash, realised, fees = self.starting_capital, 0.0, 0.0
         book: Dict[str, Dict[str, float]] = {}
         for f in self._fills():
-            p = book.setdefault(f['symbol'], {'quantity': 0, 'cost': 0.0})
+            p = book.setdefault(f['symbol'], {'quantity': 0, 'cost': 0.0, 'entries': 0,
+                                              'last_entry': 0.0})
             notional = f['quantity'] * f['price']
             fees += f['fees_kes']
             if f['side'] == 'buy':
                 cash -= notional + f['fees_kes']
+                if p['quantity'] <= 0:
+                    p['entries'] = 0  # a new position, not an add to a closed one
                 p['quantity'] += f['quantity']
                 p['cost'] += notional + f['fees_kes']
+                p['entries'] += 1
+                p['last_entry'] = f['price']
             else:
                 cash += notional - f['fees_kes']
                 qty = min(f['quantity'], p['quantity'])
@@ -92,7 +121,8 @@ class NsePaperAccount:
                 p['cost'] -= basis
         positions = {
             s: {'quantity': p['quantity'], 'cost_kes': round(p['cost'], 2),
-                'avg_cost_kes': round(p['cost'] / p['quantity'], 4) if p['quantity'] > 0 else 0.0}
+                'avg_cost_kes': round(p['cost'] / p['quantity'], 4) if p['quantity'] > 0 else 0.0,
+                'entries': p['entries'], 'last_entry_kes': p['last_entry']}
             for s, p in book.items()}
         return {'cash': round(cash, 2), 'realised': round(realised, 2),
                 'fees': round(fees, 2), 'positions': positions}
@@ -106,19 +136,47 @@ class NsePaperAccount:
         Reasons match the US book's (see TradingAgent._position_gate) so the
         dashboard reads them the same way.
         """
-        held = self.positions().get(symbol.upper(), {}).get('quantity', 0)
+        ledger = self._ledger()
+        pos = ledger['positions'].get(symbol.upper()) or {}
+        held = pos.get('quantity', 0)
         if side == 'sell':
             return (held, None) if held > 0 else (0, 'no_position')
-        if held > 0:
-            return 0, 'already_held'
+        cash = ledger['cash']
+        if held <= 0:
+            return self._buyable(price, float(target_notional), cash, target_notional)
+        return self._plan_add(pos, price, float(target_notional), ledger)
+
+    def _buyable(self, price: float, budget: float, cash: float,
+                 wanted: float) -> Tuple[int, Optional[str]]:
+        """Whole shares that `budget` buys, fees included, within the cash."""
         px = self.fill_price('buy', price)
-        budget = min(float(target_notional), self.cash())
+        budget = min(budget, cash)
         qty = int(budget // (px * (1 + self.commission_pct))) if px > 0 else 0
-        while qty > 0 and qty * px + self.fees(qty * px) > self.cash():
+        while qty > 0 and qty * px + self.fees(qty * px) > cash:
             qty -= 1  # a minimum commission can push the last share over
         if qty < 1:
-            return 0, 'insufficient_cash' if self.cash() < target_notional else 'min_notional'
+            return 0, 'insufficient_cash' if cash < wanted else 'min_notional'
         return qty, None
+
+    def _plan_add(self, pos: Dict[str, Any], price: float, target_notional: float,
+                  ledger: Dict[str, Any]) -> Tuple[int, Optional[str]]:
+        """An add to a held position, if it has earned one (see module doc)."""
+        rule = self.add_rule
+        if not rule['enabled']:
+            return 0, 'already_held'
+        if pos['entries'] - 1 >= int(rule['max_adds']):
+            return 0, 'max_adds'
+        exit_px = self.fill_price('sell', price)
+        exit_value = pos['quantity'] * exit_px - self.fees(pos['quantity'] * exit_px)
+        if exit_value <= pos['cost_kes'] or price < pos['last_entry_kes'] * (1 + rule['min_gain_pct']):
+            return 0, 'add_not_profitable'
+        at_cost = ledger['cash'] + sum(p['cost_kes'] for p in ledger['positions'].values()
+                                       if p['quantity'] > 0)
+        room = rule['max_position_pct'] * at_cost - pos['cost_kes']
+        budget = min(target_notional * rule['add_size_pct'], room)
+        if budget < self.fill_price('buy', price) * (1 + self.commission_pct):
+            return 0, 'position_cap' if room < target_notional * rule['add_size_pct'] else 'min_notional'
+        return self._buyable(price, budget, ledger['cash'], budget)
 
     def fill(self, ticket_id: int, side: str, price: float, quantity: int, order_journal=None):
         """Book an auto paper fill: slippage in the price, commission as fees."""
@@ -177,6 +235,6 @@ def order_size(symbol: str, action: str, price: float, notional: float,
     if action == 'sell':
         return (held, None) if held > 0 else (0, 'no_position')
     if held > 0:
-        return 0, 'already_held'
+        return 0, 'already_held'  # no cost record here to prove a holding profitable
     qty = int(notional / price) if price > 0 else 0
     return (qty, None) if qty >= 1 else (0, 'min_notional')

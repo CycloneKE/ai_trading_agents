@@ -26,6 +26,9 @@ const REASON_LABEL = {
   order_pending: 'An earlier order is still working',
   position_unknown: 'Could not confirm holdings; skipped for safety',
   insufficient_cash: 'Not enough paper cash for the order',
+  add_not_profitable: 'Holding not yet profitable enough to add to',
+  max_adds: 'Already added to this holding the maximum times',
+  position_cap: 'Holding is at its size limit',
 };
 
 const reasonColor = (r) => {

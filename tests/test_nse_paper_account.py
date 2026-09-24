@@ -56,10 +56,66 @@ def test_a_buy_pays_slippage_and_commission_out_of_cash(queue):
     assert qty * 36.31 + fill['fees_kes'] <= 50000 < (qty + 1) * 36.31 * 1.017
 
 
-def test_a_holding_is_not_added_to(queue):
+def test_a_holding_that_has_not_proved_itself_is_not_added_to(queue):
     paper = NsePaperAccount(queue, _config())
     _buy(paper, queue)
-    assert paper.plan('SCOM', 'buy', 36.2, 50000) == (0, 'already_held')
+    assert paper.plan('SCOM', 'buy', 36.2, 50000) == (0, 'add_not_profitable')
+    # Up 4%: still short of the 5% step, and a sale now would not clear costs.
+    assert paper.plan('SCOM', 'buy', 37.65, 50000) == (0, 'add_not_profitable')
+
+
+def test_a_winning_holding_is_added_to_at_half_size(queue):
+    paper = NsePaperAccount(queue, _config())
+    first, _ = _buy(paper, queue)
+    qty, reason = paper.plan('SCOM', 'buy', 40.0, 50000)
+    assert reason is None
+    assert qty * 40.12 * 1.017 == pytest.approx(25000, rel=0.01)  # add_size_pct 0.5
+
+
+def test_each_add_needs_the_move_to_continue(queue):
+    paper = NsePaperAccount(queue, _config())
+    _buy(paper, queue)
+    _buy(paper, queue, price=40.0, notional=25000)
+    # 40.12 was the add's fill; the next add needs 5% above that.
+    assert paper.plan('SCOM', 'buy', 41.5, 50000) == (0, 'add_not_profitable')
+    assert paper.plan('SCOM', 'buy', 42.2, 50000)[1] in (None, 'position_cap')
+
+
+def test_adds_stop_at_the_limit(queue):
+    config = _config()
+    config['nse_paper_trading']['add_to_winners'] = {'max_adds': 1, 'max_position_pct': 1.0}
+    paper = NsePaperAccount(queue, config)
+    _buy(paper, queue)
+    _buy(paper, queue, price=40.0, notional=25000)
+    assert paper.plan('SCOM', 'buy', 50.0, 50000) == (0, 'max_adds')
+
+
+def test_a_position_never_outgrows_its_share_of_the_account(queue):
+    config = _config()
+    config['nse_paper_trading']['add_to_winners'] = {'max_position_pct': 0.25}
+    paper = NsePaperAccount(queue, config)
+    _buy(paper, queue)  # ~KES 50,000 of 200,000: already at 25%
+    assert paper.plan('SCOM', 'buy', 40.0, 50000) == (0, 'position_cap')
+
+
+def test_adding_can_be_switched_off(queue):
+    config = _config()
+    config['nse_paper_trading']['add_to_winners'] = {'enabled': False}
+    paper = NsePaperAccount(queue, config)
+    _buy(paper, queue)
+    assert paper.plan('SCOM', 'buy', 40.0, 50000) == (0, 'already_held')
+
+
+def test_a_closed_position_starts_counting_adds_afresh(queue):
+    config = _config()
+    config['nse_paper_trading']['add_to_winners'] = {'max_adds': 1, 'max_position_pct': 1.0}
+    paper = NsePaperAccount(queue, config)
+    qty, _ = _buy(paper, queue)
+    add, _ = _buy(paper, queue, price=40.0, notional=25000)
+    tid = queue.create_ticket('SCOM', 'sell', qty + add)
+    paper.fill(tid, 'sell', 41.0, qty + add)
+    _buy(paper, queue, price=41.0)
+    assert paper.plan('SCOM', 'buy', 44.0, 50000)[1] is None
 
 
 def test_a_sell_closes_the_whole_position_and_books_the_result(queue):
@@ -211,8 +267,18 @@ def test_a_buy_signal_that_persists_buys_once(queue):
     buys = [f for f in queue.fills(book='trading') if f['side'] == 'buy']
     assert len(buys) == 1
     assert [d['skip_reason'] for d in agent.decision_journal.records] == \
-        [None, 'already_held', 'already_held', 'already_held']
+        [None, 'add_not_profitable', 'add_not_profitable', 'add_not_profitable']
     assert agent.decision_journal.records[0]['executed'] is True
+
+
+def test_the_loop_adds_to_a_winner_and_a_sell_closes_it_all(queue):
+    agent = _agent(queue, ['buy', 'buy', 'sell'], [36.2, 40.0, 41.0])
+    _run(agent, 3)
+    first, add, sell = queue.fills(book='trading')
+    assert (first['side'], add['side'], sell['side']) == ('buy', 'buy', 'sell')
+    assert add['quantity'] < first['quantity']
+    assert sell['quantity'] == first['quantity'] + add['quantity']
+    assert agent.components['nse_paper_account'].positions() == {}
 
 
 def test_a_sell_signal_with_nothing_held_does_not_short(queue):

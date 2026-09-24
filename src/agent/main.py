@@ -45,7 +45,7 @@ from src.utils.monitoring import get_monitoring_service
 from src.agent.data_manager import DataManager
 from src.agent.strategy_manager import StrategyManager
 from src.agent.daily_bars import utc_bar_date
-from src.agent.nse_paper_account import NsePaperAccount, order_size
+from src.agent.nse_paper_account import HOLDING_RULE_REASONS, NsePaperAccount, order_size
 from src.agent.broker_manager import BrokerManager
 from src.agent.order_execution_engine import OrderExecutionEngine
 from src.agent.realtime_risk_manager import RealTimeRiskManager
@@ -1259,11 +1259,11 @@ class TradingAgent:
                 proposed = (signals or {}).get('action', 'hold')
                 blocked = None
                 if proposed in ('buy', 'sell'):
-                    # Holding rules first, so a trade the book cannot take (a
-                    # second buy of a holding, a sell of nothing) never costs
-                    # an LLM call. Cash is checked once the size is known.
+                    # Holding rules first, so a trade the book cannot take (an
+                    # add the holding hasn't earned, a sell of nothing) never
+                    # costs an LLM call. Cash is checked once the size is known.
                     _, blocked = order_size(symbol, proposed, price, base_notional, queue, paper)
-                    if blocked not in ('already_held', 'no_position'):
+                    if blocked not in HOLDING_RULE_REASONS:
                         blocked = None
                 if blocked:
                     dec['skip_reason'] = blocked
@@ -1284,8 +1284,8 @@ class TradingAgent:
                     position_size = (validated.get('position_size')
                                      or signals.get('position_size') or 0.1)
                     notional = base_notional * min(max(position_size, 0.1), 1.0)
-                    # No adding to a holding, no selling what isn't held, a
-                    # sell closes the whole position, a buy fits the cash.
+                    # Adds only to proven winners, no selling what isn't held,
+                    # a sell closes the whole position, a buy fits the cash.
                     qty, reason = order_size(symbol, action, price, notional, queue, paper)
                     if reason:
                         dec['skip_reason'] = reason

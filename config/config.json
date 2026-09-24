@@ -290,7 +290,15 @@
   },
   "nse_paper_trading": {
     "_comment": "The agent's NSE paper account (src/agent/nse_paper_account.py). With nse_auto_paper_trade on (the default), NSE tickets fill as paper trades against this cash, net of the NSE costs below, under the backtest's rules: no adding to a holding, no short selling, sells close the whole position. Remove or set to 0 to go back to leaving tickets pending for the operator.",
-    "starting_capital_kes": 200000
+    "starting_capital_kes": 200000,
+    "add_to_winners": {
+      "_comment": "A buy signal on a holding adds to it only when selling the whole position now would already be profitable after costs, the price is at least min_gain_pct above the last entry, fewer than max_adds adds have been made, and the position stays within max_position_pct of the account at cost. Each add is add_size_pct of a new position's size. Set enabled to false to never add.",
+      "enabled": true,
+      "min_gain_pct": 0.05,
+      "max_adds": 2,
+      "add_size_pct": 0.5,
+      "max_position_pct": 0.4
+    }
   },
   "costs": {
     "_comment": "Per-side transaction costs by market. A single global rate cannot describe this portfolio: Alpaca is commission-free on US equities while an NSE round trip runs several percent. Set verified=true once you have confirmed a schedule with your broker.",
