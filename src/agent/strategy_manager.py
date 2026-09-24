@@ -213,7 +213,8 @@ class StrategyManager:
             if self.regime_detector is not None:
                 price = data.get('price') or data.get('close')
                 if price:
-                    self.regime_detector.update(data.get('symbol', 'UNKNOWN'), price)
+                    self.regime_detector.update(data.get('symbol', 'UNKNOWN'), price,
+                                                bar_date=data.get('bar_date'))
 
             strategy_signals = self.collect_strategy_signals(data)
 

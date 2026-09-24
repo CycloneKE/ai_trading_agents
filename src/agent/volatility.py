@@ -17,6 +17,7 @@ import logging
 from collections import deque
 from typing import Any, Dict, Optional
 
+from src.agent.daily_bars import REPLACE, SKIP, classify
 from src.agent.indicators import atr, atr_from_closes
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ class VolatilityTracker:
         self._high: Dict[str, deque] = {}
         self._low: Dict[str, deque] = {}
         self._have_hl: Dict[str, bool] = {}
+        self._bar_dates: Dict[str, str] = {}
 
     def _bufs(self, symbol: str):
         if symbol not in self._close:
@@ -51,8 +53,16 @@ class VolatilityTracker:
         return self._close[symbol], self._high[symbol], self._low[symbol]
 
     def update(self, symbol: str, close: float,
-               high: Optional[float] = None, low: Optional[float] = None) -> None:
-        """Append one bar. Ignores non-positive or unusable prices."""
+               high: Optional[float] = None, low: Optional[float] = None,
+               bar_date: Optional[str] = None) -> None:
+        """Add one observation. Ignores non-positive or unusable prices.
+
+        With bar_date, observations build daily bars (see daily_bars.py):
+        the forming bar's close is replaced and its range widened. Without,
+        every call is a bar. Fed once a minute, ATR measured minute-to-minute
+        volatility: about 0.06% for Bitcoin instead of about 2% a day, which
+        pinned every stop to the 2% floor.
+        """
         try:
             close = float(close)
         except (TypeError, ValueError):
@@ -74,12 +84,27 @@ class VolatilityTracker:
             if high < low or high <= 0 or low <= 0:
                 self._have_hl[symbol] = False
                 high = low = close
+        step = classify(self._bar_dates.get(symbol), bar_date,
+                        c[-1] if c else None, close)
+        if step == SKIP:
+            return
+        if step == REPLACE:
+            c[-1] = close
+            h[-1] = max(h[-1], high)
+            l[-1] = min(l[-1], low)
+            return
         c.append(close)
         h.append(high)
         l.append(low)
+        if bar_date is not None:
+            self._bar_dates[symbol] = bar_date
 
     def warm_start(self, symbol: str, closes, highs=None, lows=None) -> int:
-        """Seed from historical bars. Returns the number of bars accepted."""
+        """Replace the symbol's history with these bars. Returns the number
+        accepted. Replace, not append: a retried warm-start must not land
+        after live bars."""
+        for store in (self._close, self._high, self._low, self._have_hl):
+            store.pop(symbol, None)
         closes = list(closes or [])
         highs = list(highs or []) if highs is not None else None
         lows = list(lows or []) if lows is not None else None
@@ -91,6 +116,7 @@ class VolatilityTracker:
                         highs[i] if use_hl else None,
                         lows[i] if use_hl else None)
             n += 1
+        self._bar_dates.pop(symbol, None)
         return n
 
     def bars(self, symbol: str) -> int:

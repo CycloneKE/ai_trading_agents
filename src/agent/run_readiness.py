@@ -125,6 +125,50 @@ def check_market_data(cfg: Dict[str, Any], r: Readiness,
           f"trade those." if fallback else f"{len(sample)} symbols priced")
 
 
+def history_needed(cfg: Dict[str, Any]) -> int:
+    """Daily bars the enabled technical strategies need before they can signal."""
+    needs = [int(s.get('lookback_period', 50) or 50)
+             for s in (cfg.get('strategies') or {}).values()
+             if isinstance(s, dict) and s.get('enabled') and s.get('type', 'technical') == 'technical']
+    return max(needs) if needs else 50
+
+
+def check_history(cfg: Dict[str, Any], r: Readiness,
+                  history_depth: Optional[Dict[str, int]] = None) -> None:
+    """Can the strategies start with real daily history?
+
+    The live agent needs this many completed daily bars per symbol before it
+    can signal at all. The warm-start that supplied them had never run in
+    production, and this gate did not notice: its signal-path check feeds
+    daily bars from disk, which proves the strategies work on daily data but
+    says nothing about whether production would have any.
+    """
+    need = history_needed(cfg)
+    if history_depth is None:
+        r.add(WARN, 'daily history for warm-start', False,
+              f'not probed; run with --probe-data to confirm each symbol gets {need} daily bars')
+        return
+    dm = cfg.get('data_manager', {})
+    live = list(dm.get('symbols', []) or [])
+    nse = list(dm.get('nse_symbols', []) or [])
+    short_live = {s: history_depth.get(s, 0) for s in live if history_depth.get(s, 0) < need}
+    ready = len(live) - len(short_live)
+    if live and ready == 0:
+        r.add(BLOCK, 'daily history for warm-start', False,
+              f'no US/crypto symbol got {need} daily bars from the history source, so no '
+              f'strategy can signal for {need} trading days: {short_live}')
+    else:
+        r.add(WARN, 'daily history for warm-start', not short_live,
+              f'{ready}/{len(live)} US/crypto symbols have {need}+ daily bars'
+              + (f'; short: {short_live}' if short_live else ''))
+    short_nse = {s: history_depth.get(s, 0) for s in nse if history_depth.get(s, 0) < need}
+    if nse:
+        r.add(WARN, 'NSE real daily history', not short_nse,
+              f'{len(nse) - len(short_nse)}/{len(nse)} NSE symbols have {need}+ real daily bars'
+              + (f'; the rest cannot signal until real history accumulates '
+                 f'(about one bar per trading day): {short_nse}' if short_nse else ''))
+
+
 def check_broker(cfg: Dict[str, Any], r: Readiness, broker=None) -> None:
     """Paper mode, actually creatable, actually the configured one, connected.
 
@@ -318,11 +362,13 @@ def assess_readiness(cfg: Dict[str, Any], *, broker=None,
                      data_sample: Optional[Dict[str, Any]] = None,
                      data_dir: Optional[str] = None,
                      bars=None,
-                     check_api_import: bool = True) -> Readiness:
+                     check_api_import: bool = True,
+                     history_depth: Optional[Dict[str, int]] = None) -> Readiness:
     """Every check, in the order a reader would want them."""
     r = Readiness()
     check_strategies(cfg, r)
     check_signal_path(cfg, r, bars)
+    check_history(cfg, r, history_depth)
     if check_api_import:
         check_api(r)
     check_market_data(cfg, r, data_sample)

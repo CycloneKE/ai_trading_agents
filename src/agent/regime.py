@@ -17,6 +17,8 @@ import logging
 from collections import deque
 from typing import Any, Dict, Optional
 
+from src.agent.daily_bars import APPEND, REPLACE, classify
+
 logger = logging.getLogger(__name__)
 
 TRENDING_UP = 'trending_up'
@@ -46,22 +48,38 @@ class RegimeDetector:
         self.fast_period = max(2, int(fast_period))
         self.slow_period = max(self.fast_period + 1, int(slow_period))
         self._closes: Dict[str, deque] = {}
+        self._bar_dates: Dict[str, str] = {}
         self._maxlen = max(maxlen, self.slow_period + 1)
 
-    def update(self, symbol: str, price: float) -> None:
+    def update(self, symbol: str, price: float, bar_date: Optional[str] = None) -> None:
+        """Add a price. With bar_date, builds daily bars (see daily_bars.py);
+        without, every call is a bar. The 20/50-period averages were being
+        computed over 20/50 minutes of live quotes."""
         try:
             price = float(price)
         except (TypeError, ValueError):
             return
         if price <= 0:
             return
-        self._closes.setdefault(symbol, deque(maxlen=self._maxlen)).append(price)
+        buf = self._closes.setdefault(symbol, deque(maxlen=self._maxlen))
+        step = classify(self._bar_dates.get(symbol), bar_date,
+                        buf[-1] if buf else None, price)
+        if step == APPEND:
+            buf.append(price)
+            if bar_date is not None:
+                self._bar_dates[symbol] = bar_date
+        elif step == REPLACE:
+            buf[-1] = price
 
     def warm_start(self, symbol: str, closes) -> int:
+        """Replace the symbol's history with these closes. Replace, not
+        append: a retried warm-start must not land after live bars."""
+        self._closes.pop(symbol, None)
         n = 0
         for c in (closes or []):
             self.update(symbol, c)
             n += 1
+        self._bar_dates.pop(symbol, None)
         return n
 
     def bars(self, symbol: str) -> int:
