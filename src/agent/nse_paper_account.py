@@ -63,6 +63,9 @@ class NsePaperAccount:
         self.exit_rule = rule(EXIT_DEFAULTS, cfg.get('exits'))
         self.stop_rule = rule(STOP_DEFAULTS, cfg.get('stop_loss'))
         self.started_at = queue.paper_account_started_at() if self.enabled else None
+        if self.enabled and not queue.paper_equity_history():
+            # The equity curve starts where the account does.
+            queue.record_paper_equity(datetime.utcnow().date().isoformat(), self.starting_capital, 0.0)
 
     @property
     def enabled(self) -> bool:
@@ -194,6 +197,26 @@ class NsePaperAccount:
                f"trailing stop: {price:.2f} is {1 - price / high:.1%} below the high {high:.2f}")
         return reason, int(round(state.quantity)), why
 
+    def stop_levels(self, symbol: str, atr_pct: Optional[float] = None) -> Optional[Dict[str, float]]:
+        """Where a holding's stops sit now, for display. Updates nothing."""
+        state = self.states().get(symbol.upper())
+        if not state or not state.held or not self.stop_rule.get('enabled'):
+            return None
+        stop, trail = self.stop_distances(atr_pct)
+        avg = state.cost / state.quantity
+        high = self.queue.paper_high_peek(symbol.upper(), state.opened_at or '') or state.last_entry_price
+        return {'stop_loss_kes': round(avg * (1 - stop), 2),
+                'trailing_stop_kes': round(high * (1 - trail), 2),
+                'high_since_entry_kes': round(high, 2), 'stop_loss_pct': stop,
+                'trailing_stop_pct': trail}
+
+    def record_equity(self, prices: Dict[str, float]) -> Dict[str, Any]:
+        """Today's reading of the account's value, for the equity curve."""
+        s = self.summary(prices)
+        self.queue.record_paper_equity(datetime.utcnow().date().isoformat(),
+                                       s['cash_kes'], s['holdings_value_kes'])
+        return s
+
     def fill(self, ticket_id: int, side: str, price: float, quantity: int, order_journal=None):
         """Book an auto paper fill: slippage in the price, commission as fees."""
         px = self.fill_price(side, price)
@@ -204,11 +227,13 @@ class NsePaperAccount:
 
     # ----------------------------------------------------------- summary
 
-    def summary(self, prices: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+    def summary(self, prices: Optional[Dict[str, float]] = None,
+                atr_lookup=None) -> Dict[str, Any]:
         """Account figures for the API: cash, holdings at market, P&L, costs.
 
         A holding with no current price is valued at cost and flagged, rather
-        than dropped, so equity never silently loses a position.
+        than dropped, so equity never silently loses a position. With an
+        `atr_lookup` (symbol -> ATR fraction) each holding carries its stops.
         """
         ledger = self._ledger()
         prices = {k.upper(): v for k, v in (prices or {}).items()}
@@ -219,11 +244,19 @@ class NsePaperAccount:
             last = prices.get(sym)
             mv = p['quantity'] * last if last else p['cost_kes']
             value += mv
-            holdings.append({'symbol': sym, 'quantity': p['quantity'],
-                             'avg_cost_kes': p['avg_cost_kes'], 'last_price_kes': last,
-                             'market_value_kes': round(mv, 2),
-                             'unrealised_pnl_kes': round(mv - p['cost_kes'], 2),
-                             'entries': p['entries'], 'priced': bool(last)})
+            holding = {'symbol': sym, 'quantity': p['quantity'],
+                       'avg_cost_kes': p['avg_cost_kes'], 'last_price_kes': last,
+                       'cost_kes': p['cost_kes'], 'market_value_kes': round(mv, 2),
+                       'unrealised_pnl_kes': round(mv - p['cost_kes'], 2),
+                       'unrealised_pnl_pct': round((mv / p['cost_kes'] - 1) * 100, 2) if p['cost_kes'] else 0.0,
+                       'entries': p['entries'], 'priced': bool(last)}
+            if atr_lookup is not None:
+                try:
+                    atr = atr_lookup(sym)
+                except Exception:
+                    atr = None
+                holding['stops'] = self.stop_levels(sym, atr)
+            holdings.append(holding)
         equity = ledger['cash'] + value
         return {
             'enabled': self.enabled, 'started_at': self.started_at,

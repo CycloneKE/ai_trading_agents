@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { theme } from './DashboardStyles';
 
-const AdvancedAnalytics = ({ data }) => {
+const AdvancedAnalytics = ({ data, mobile }) => {
   const [timeRange, setTimeRange] = useState('7d');
   
   const rm = data.riskMetrics || {};
@@ -51,10 +51,10 @@ const AdvancedAnalytics = ({ data }) => {
   });
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '30px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: mobile ? '16px' : '30px' }}>
       {/* Control bar */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h3 style={{ fontSize: '20px', fontWeight: '800', margin: 0, color: '#fff' }}>Portfolio Risk & Strategy Analytics</h3>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+        <h3 style={{ fontSize: mobile ? '16px' : '20px', fontWeight: '800', margin: 0, color: '#fff' }}>Portfolio Risk & Strategy Analytics</h3>
         <div style={{ display: 'flex', gap: '8px' }}>
           {['1d', '7d', '30d'].map(range => (
             <button
@@ -78,7 +78,7 @@ const AdvancedAnalytics = ({ data }) => {
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', flexWrap: 'wrap' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: mobile ? 'minmax(0, 1fr)' : '1fr 1fr', gap: mobile ? '16px' : '24px' }}>
         {/* Risk Metrics */}
         <div style={{ ...theme.glass, padding: '24px' }}>
           <h4 style={{ fontSize: '15px', fontWeight: '800', marginBottom: '18px', color: '#fff', textTransform: 'uppercase' }}>

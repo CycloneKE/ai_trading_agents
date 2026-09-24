@@ -1,12 +1,14 @@
-import { X, Shield, Activity, Globe, Cpu, Flag, BookOpen } from 'lucide-react';
+import { X, Shield, Activity, Globe, Flag, BookOpen, Wallet, CandlestickChart } from 'lucide-react';
 import { theme, glassCard } from './DashboardStyles';
 
 const TABS = [
-  { icon: Activity, name: 'DASHBOARD', text: 'Consolidated equity, P&L, open positions, live news with AI sentiment scoring. Start here.' },
-  { icon: Flag, name: 'NSE KENYA', text: 'Nairobi Securities Exchange quotes, top movers, and sector performance.' },
-  { icon: Shield, name: 'RISK', text: 'How much the portfolio can lose and how close the agent is to its limits.' },
-  { icon: Globe, name: 'MARKET', text: 'Sector heatmap and broad market context the agent is reacting to.' },
-  { icon: Cpu, name: 'SYSTEM', text: 'Service health and the raw agent activity log - what the AI is doing and why.' },
+  { icon: Activity, name: 'OVERVIEW', text: 'Headline figures, the performance curve, what the agent is watching and its top positions. Start here.' },
+  { icon: Wallet, name: 'PORTFOLIO', text: 'Holdings, allocation by region and the trade history.' },
+  { icon: Flag, name: 'NSE KENYA', text: 'Market Watch (live NSE prices), the Paper Account (the agent\'s KES 200,000 practice account, its holdings, stops and results) and, for operators, Order Tickets.' },
+  { icon: BookOpen, name: 'RESEARCH', text: 'Upload broker research PDFs, approve or reject what they recommend, and manage the watchlist.' },
+  { icon: Globe, name: 'INSIGHTS', text: 'Performance analytics, news with sentiment scores and the sector heatmap.' },
+  { icon: Shield, name: 'RISK & SYSTEM', text: 'How close the agent is to its risk limits, service health and the raw activity log.' },
+  { icon: CandlestickChart, name: 'CHARTS', text: 'Tap any stock, or type a ticker in the search box, for its daily price chart with the agent\'s trades marked on it.' },
 ];
 
 const GLOSSARY = [
@@ -54,7 +56,7 @@ const HelpPanel = ({ onClose }) => (
       {TABS.map(({ icon: Icon, name, text }) => (
         <div key={name} style={{ display: 'flex', gap: '12px', marginBottom: '12px', fontSize: '13px' }}>
           <Icon size={16} color={theme.colors.primary} style={{ flexShrink: 0, marginTop: '2px' }} />
-          <div><strong>{name}</strong> — <span style={{ color: theme.colors.textSecondary }}>{text}</span></div>
+          <div><strong>{name}</strong>: <span style={{ color: theme.colors.textSecondary }}>{text}</span></div>
         </div>
       ))}
 
