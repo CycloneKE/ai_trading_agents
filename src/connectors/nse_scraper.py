@@ -5,8 +5,8 @@ stores them in Supabase and local CSV, and runs periodically
 as a background thread inside the trading agent.
 
 Public data sources used (no API key required):
-  1. NSE official website market reports
-  2. African-markets.com / afx.kwayisi.org (public price tables)
+  1. The NSE's own price ticker feed (the strip on nse.co.ke's home page)
+  2. afx.kwayisi.org (public price tables), for symbols the ticker lacks
   3. Synthetic generation from known fundamentals (seed/fallback)
 
 Usage:
@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 
 EAT = timezone(timedelta(hours=3))
 
+
+def _eat_now() -> datetime:
+    return datetime.now(EAT)
+
 # Fallback only, for the CLI entry point and any caller that passes no
 # symbols. The running agent passes data_manager.nse_symbols instead; see
 # NSEPeriodicScraper.__init__. Keep this list broad rather than in sync with
@@ -51,6 +55,13 @@ DEFAULT_SYMBOLS = [
 ]
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "nse_historical"
+
+# The source tags a bar carries when a live source published its price.
+# Everything else (synthetic seed data, 'csv' of unknown origin, 'none') is
+# not a market price. The API, the warm-start and the dashboard all judge
+# NSE prices by this one list. nse_website stays although that scraper is
+# gone: bars it wrote before the NSE site was rebuilt are still real.
+REAL_NSE_SOURCES = frozenset({"nse_ticker", "nse_website", "afx_kwayisi", "afx_history"})
 
 
 @dataclass
@@ -140,69 +151,163 @@ def _warn_if_unrecognised(source: str, url: str, rows: List[List[str]], symbols)
             f"({len(rows)} rows parsed); the page layout may have changed")
 
 
-def scrape_nse_website(symbols: List[str]) -> Dict[str, DailyBar]:
+# The NSE's own price ticker, the strip across the top of nse.co.ke. Its
+# script posts {"nopage": "true", "isinno": <account>} to this feed, where the
+# account is the data-account attribute on the ticker element of the home
+# page. The feed rejects any other value with "Invalid account", so the
+# account is read from the home page the way a browser gets it, never
+# hardcoded: if the NSE changes it, the next read picks up the new one.
+#
+# This replaced the scraper of www.nse.co.ke/market-statistics/*.html, which
+# have returned 404 since the site was rebuilt.
+NSE_HOME_URL = "https://www.nse.co.ke/"
+NSE_TICKER_URL = "https://nsenairobi.nse.co.ke/nseticker/api/v1/ticker"
+_BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+_ACCOUNT_RE = re.compile(r"data-account\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
+_ACCOUNT_TTL = 24 * 3600
+_ticker_account: Dict[str, Any] = {}
+
+# The NSE limits how far a share can move in one session (10% either way for
+# most equities). A price further than this from the previous close is a
+# mis-keyed or misread field, not a market move, and must not become a bar.
+MAX_SESSION_MOVE = 0.15
+
+
+def _nse_ticker_account(refresh: bool = False) -> Optional[str]:
+    """The account the NSE home page gives its ticker, cached for a day."""
+    cached = _ticker_account.get("value")
+    if cached and not refresh and time.time() - _ticker_account.get("at", 0) < _ACCOUNT_TTL:
+        return cached
+    try:
+        resp = requests.get(NSE_HOME_URL, headers={"User-Agent": _BROWSER_UA}, timeout=30)
+        if resp.status_code != 200:
+            logger.warning(f"NSE home page {NSE_HOME_URL} returned HTTP {resp.status_code}")
+            return cached
+        m = _ACCOUNT_RE.search(resp.text)
+        if not m:
+            logger.warning("NSE home page loaded but has no ticker data-account; "
+                           "the page layout may have changed")
+            return cached
+        _ticker_account.update(value=m.group(1).strip(), at=time.time())
+        return _ticker_account["value"]
+    except Exception as e:
+        logger.warning(f"NSE home page fetch error: {e}")
+        return cached
+
+
+def _post_ticker(account: str):
+    return requests.post(
+        NSE_TICKER_URL,
+        headers={"User-Agent": _BROWSER_UA, "Content-Type": "application/json",
+                 "Accept": "application/json", "Referer": NSE_HOME_URL,
+                 "Origin": NSE_HOME_URL.rstrip("/")},
+        data=json.dumps({"nopage": "true", "isinno": account}), timeout=20)
+
+
+def scrape_nse_ticker(symbols: List[str]) -> Dict[str, DailyBar]:
+    """Current prices from the NSE's own ticker feed, as DailyBars."""
+    account = _nse_ticker_account()
+    if not account:
+        return {}
+    try:
+        resp = _post_ticker(account)
+        if resp.status_code == 400 and "account" in resp.text.lower():
+            # The NSE changed the account; read the new one and ask again.
+            fresh = _nse_ticker_account(refresh=True)
+            if fresh and fresh != account:
+                resp = _post_ticker(fresh)
+        if resp.status_code != 200:
+            logger.warning(f"NSE ticker feed {NSE_TICKER_URL} returned HTTP "
+                           f"{resp.status_code}: {resp.text[:120]}")
+            return {}
+        payload = resp.json()
+    except Exception as e:
+        logger.warning(f"NSE ticker feed error: {e}")
+        return {}
+    return parse_ticker_reply(payload, symbols, _eat_now().date())
+
+
+# Longer than any NSE closure (Easter is four days) plus a weekend. A feed
+# date older than this is a stuck feed, and storing under it would write
+# today's prices into a past session's bar.
+MAX_FEED_AGE_DAYS = 7
+
+
+def _ticker_date(raw: Any, today) -> Any:
+    """The session date the feed reports (dd/mm/yyyy), never later than today."""
+    try:
+        d = datetime.strptime(str(raw).strip(), "%d/%m/%Y").date()
+        return min(d, today)
+    except ValueError:
+        return today
+
+
+def _plausible(item: Dict[str, Any], field: str, ref: float) -> Optional[float]:
+    """A price field, if positive and within a session's reach of ref."""
+    v = _parse_num(str(item.get(field)))
+    return v if v > 0 and abs(v / ref - 1) <= MAX_SESSION_MOVE else None
+
+
+def parse_ticker_reply(payload: Any, symbols: List[str], today) -> Dict[str, DailyBar]:
+    """Turn a ticker feed reply into one DailyBar per watched symbol.
+
+    The reply is {"message": [{"snapshot": [...]}, {"updated_at": {...}}]},
+    each snapshot row carrying issuer, price, prev_price, today_open/high/low
+    and volume. The feed's own open/high/low are not always consistent with
+    its price (an open above the high has been seen), so each is kept only
+    if it lies within a session's reach of the previous close, and the bar's
+    high and low are widened to contain its open and close.
     """
-    Scrape current prices from the NSE official equity stats page.
-    Returns a dict mapping symbol -> DailyBar for today.
-    """
+    msg = payload.get("message") if isinstance(payload, dict) else None
+    parts = [m for m in msg if isinstance(m, dict)] if isinstance(msg, list) else []
+    snapshot = next((p["snapshot"] for p in parts if isinstance(p.get("snapshot"), list)), None)
+    if snapshot is None:
+        logger.warning("NSE ticker feed answered without a price snapshot; "
+                       "the feed format may have changed")
+        return {}
+    updated = next((p["updated_at"] for p in parts if isinstance(p.get("updated_at"), dict)), {})
+    session = _ticker_date(updated.get("date"), today)
+    if session.weekday() >= 5:
+        # No NSE session on a weekend; a bar dated one would be a flat copy
+        # of Friday that the indicators would count as a trading day.
+        logger.info(f"NSE ticker feed dated {session} (weekend); nothing stored")
+        return {}
+    if (today - session).days > MAX_FEED_AGE_DAYS:
+        logger.warning(f"NSE ticker feed is dated {session}, {(today - session).days} days ago; "
+                       f"the feed may be stuck, nothing stored")
+        return {}
+
+    wanted = {s.upper() for s in symbols}
     results: Dict[str, DailyBar] = {}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html,application/xhtml+xml",
-    }
-    urls = [
-        "https://www.nse.co.ke/market-statistics/equity-statistics.html",
-        "https://www.nse.co.ke/listed-companies/list.html",
-    ]
-    today = datetime.now(EAT).strftime("%Y-%m-%d")
-    symbol_set = set(s.upper() for s in symbols)
-
-    for url in urls:
-        try:
-            resp = requests.get(url, headers=headers, timeout=20)
-            if resp.status_code != 200:
-                # Used to `continue` without a word, so a moved page or a
-                # block looked identical to "no data" in the logs.
-                logger.warning(f"NSE website {url} returned HTTP {resp.status_code}")
-                continue
-            parser = _NSETableParser()
-            parser.feed(resp.text)
-            _warn_if_unrecognised('NSE website', url, parser.rows, symbol_set)
-            for row in parser.rows:
-                if len(row) < 5:
-                    continue
-                # First cell is usually company name or ticker
-                ticker_cell = row[0].upper().strip()
-                matched_sym = None
-                for sym in symbol_set:
-                    if sym in ticker_cell:
-                        matched_sym = sym
-                        break
-                if not matched_sym:
-                    continue
-                try:
-                    close_val = _parse_num(row[-2] if len(row) >= 6 else row[4])
-                    if close_val <= 0:
-                        close_val = _parse_num(row[1])
-                    if close_val <= 0:
-                        continue
-                    open_val = _parse_num(row[1]) if len(row) >= 6 else close_val
-                    high_val = _parse_num(row[2]) if len(row) >= 6 else close_val
-                    low_val = _parse_num(row[3]) if len(row) >= 6 else close_val
-                    vol = int(_parse_num(row[-1])) if len(row) >= 6 else 0
-                    prev = _parse_num(row[-3]) if len(row) >= 7 else close_val
-                    chg = ((close_val - prev) / prev * 100) if prev > 0 else 0
-                    results[matched_sym] = DailyBar(
-                        date=today, symbol=matched_sym,
-                        open=round(open_val, 2), high=round(high_val, 2),
-                        low=round(low_val, 2), close=round(close_val, 2),
-                        volume=vol, change_pct=round(chg, 2), source="nse_website",
-                    )
-                except (ValueError, IndexError):
-                    continue
-        except Exception as e:
-            logger.warning(f"NSE website scrape error ({url}): {e}")
-
+    for item in snapshot:
+        if not isinstance(item, dict):
+            continue
+        sym = str(item.get("issuer", "")).strip().upper()
+        if sym not in wanted:
+            continue
+        price = _parse_num(str(item.get("price"))) or _parse_num(str(item.get("ltp")))
+        prev = _parse_num(str(item.get("prev_price")))
+        if price <= 0:
+            continue
+        if prev > 0 and abs(price / prev - 1) > MAX_SESSION_MOVE:
+            logger.warning(f"NSE ticker {sym} price {price} is {price / prev - 1:+.0%} from "
+                           f"the previous close {prev}; not stored")
+            continue
+        ref = prev if prev > 0 else price
+        open_ = _plausible(item, "today_open", ref) or ref
+        high = max(v for v in (_plausible(item, "today_high", ref), open_, price) if v)
+        low = min(v for v in (_plausible(item, "today_low", ref), open_, price) if v)
+        results[sym] = DailyBar(
+            date=session.isoformat(), symbol=sym,
+            open=round(open_, 2), high=round(high, 2), low=round(low, 2),
+            close=round(price, 2), volume=int(_parse_num(str(item.get("volume")))),
+            change_pct=round((price - prev) / prev * 100, 2) if prev > 0 else 0.0,
+            source="nse_ticker",
+        )
+    if wanted and snapshot and not results:
+        logger.warning(f"NSE ticker feed listed {len(snapshot)} rows but none of the "
+                       f"watched symbols; the feed format may have changed")
     return results
 
 
@@ -547,9 +652,9 @@ class NSEPeriodicScraper:
         logger.info("NSE scraper: starting cycle...")
         results: Dict[str, int] = {}
 
-        # 1. Try NSE official website
-        web_bars = scrape_nse_website(self.symbols)
-        logger.info(f"  NSE website: {len(web_bars)} symbols")
+        # 1. The NSE's own ticker feed
+        web_bars = scrape_nse_ticker(self.symbols)
+        logger.info(f"  NSE ticker: {len(web_bars)} symbols")
 
         # 2. Try AFX Kwayisi aggregator for symbols we didn't get
         missing = [s for s in self.symbols if s not in web_bars]
@@ -577,7 +682,11 @@ class NSEPeriodicScraper:
         self._last_missing = sorted(s for s, v in results.items() if v == 0)
         if scraped:
             self._last_real_success = time.time()
-        if scraped == 0:
+        if scraped == 0 and _eat_now().weekday() >= 5:
+            # The ticker stores nothing dated a weekend, so an empty weekend
+            # cycle is the calendar, not a failed source.
+            logger.info("NSE scraper cycle: weekend, no session to record")
+        elif scraped == 0:
             # Every live source failed. The connector will keep serving
             # whatever is newest on disk, which after first-run seeding is
             # synthetic. Say so at WARNING, not buried in an INFO count.

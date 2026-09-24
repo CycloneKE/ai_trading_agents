@@ -16,10 +16,9 @@ from functools import wraps
 from typing import Dict, Any, List
 from src.agent.sentiment_analyzer import FinancialSentimentAnalyzer
 from src.utils.paths import DATA_DIR
-
 # Sources the NSE scraper stamps on bars it actually fetched. Anything else
 # (synthetic seed data, or an unlabelled row) is not a real market price.
-REAL_NSE_SOURCES = frozenset({'nse_website', 'afx_kwayisi', 'afx_history'})
+from src.connectors.nse_scraper import REAL_NSE_SOURCES
 # NOTE: token_required is imported via the guarded try/except below, NOT here.
 # A top-level import defeats the fail-closed guard: auth.py raises RuntimeError
 # (not ImportError) when SECRET_KEY is unset, which would crash the whole agent

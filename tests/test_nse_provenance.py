@@ -104,11 +104,15 @@ def test_the_nse_path_still_evaluates_a_real_price():
 
 # ---------------------------------------------------------------- scraper
 
-def _scraper(monkeypatch, fetched):
-    monkeypatch.setattr(nse_scraper, 'scrape_nse_website', lambda syms: dict(fetched))
+THURSDAY = nse_scraper.datetime(2026, 9, 24, 11, 0, tzinfo=nse_scraper.EAT)
+
+
+def _scraper(monkeypatch, fetched, now=THURSDAY):
+    monkeypatch.setattr(nse_scraper, 'scrape_nse_ticker', lambda syms: dict(fetched))
     monkeypatch.setattr(nse_scraper, 'scrape_afx_kwayisi', lambda syms: {})
     monkeypatch.setattr(nse_scraper, 'save_bars_csv', lambda sym, bars: None)
     monkeypatch.setattr(nse_scraper, 'save_bars_db', lambda bars, db: None)
+    monkeypatch.setattr(nse_scraper, '_eat_now', lambda: now)
     return nse_scraper.NSEPeriodicScraper(symbols=['SCOM', 'EQTY', 'KCB'])
 
 
@@ -125,13 +129,24 @@ def test_status_reports_a_scraper_that_fetched_nothing(monkeypatch, caplog):
 
 
 def test_status_reports_partial_success(monkeypatch):
-    bar = nse_scraper.DailyBar('2026-09-23', 'SCOM', 28.0, 29.0, 27.5, 28.5, 1000, 0.5, 'nse_website')
+    bar = nse_scraper.DailyBar('2026-09-23', 'SCOM', 28.0, 29.0, 27.5, 28.5, 1000, 0.5, 'nse_ticker')
     s = _scraper(monkeypatch, {'SCOM': bar})
     s.run_once()
     st = s.get_status()
     assert st['last_cycle_real_prices'] == 1
     assert st['last_cycle_missing'] == ['EQTY', 'KCB']
     assert st['last_real_price_at'] is not None
+
+
+def test_an_empty_weekend_cycle_is_not_reported_as_a_failed_source(monkeypatch, caplog):
+    """The ticker stores nothing dated a weekend, so a Saturday cycle is
+    empty by design; warning that every source failed would be false."""
+    saturday = nse_scraper.datetime(2026, 9, 26, 11, 0, tzinfo=nse_scraper.EAT)
+    s = _scraper(monkeypatch, {}, now=saturday)
+    with caplog.at_level(logging.INFO):
+        s.run_once()
+    assert not any('NO real prices' in r.getMessage() for r in caplog.records)
+    assert any('weekend' in r.getMessage() for r in caplog.records)
 
 
 def test_status_before_the_first_cycle_says_so():
@@ -149,12 +164,13 @@ class _Page:
 def test_a_blocked_or_moved_source_is_logged_with_its_status(monkeypatch, caplog):
     """A 403 or 404 used to be skipped without a word, so the logs could not
     say why every NSE price was synthetic."""
+    monkeypatch.setattr(nse_scraper, '_ticker_account', {})
     monkeypatch.setattr(nse_scraper.requests, 'get', lambda url, **kw: _Page(404))
     with caplog.at_level(logging.WARNING):
-        assert nse_scraper.scrape_nse_website(['SCOM']) == {}
+        assert nse_scraper.scrape_nse_ticker(['SCOM']) == {}
         assert nse_scraper.scrape_afx_kwayisi(['SCOM']) == {}
     text = ' '.join(r.getMessage() for r in caplog.records)
-    assert 'HTTP 404' in text and 'NSE website' in text and 'AFX Kwayisi' in text
+    assert 'HTTP 404' in text and 'NSE home page' in text and 'AFX Kwayisi' in text
 
 
 def test_a_page_whose_layout_changed_is_logged(monkeypatch, caplog):

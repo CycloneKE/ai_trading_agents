@@ -319,7 +319,7 @@ class NSEConnector:
                     "prev_close_kes": price_kes,
                     "kes_usd_rate": kes_usd,
                     "timestamp": last.get('date', ''),
-                    # The bar's own origin: nse_website, afx_kwayisi,
+                    # The bar's own origin: nse_ticker, afx_kwayisi,
                     # afx_history, or synthetic. This used to be the
                     # constant "csv", which erased the one field that says
                     # whether the price is real.

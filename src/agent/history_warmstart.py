@@ -23,10 +23,9 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
+from src.connectors.nse_scraper import REAL_NSE_SOURCES
 
-# Rows a real source wrote. Mirrors REAL_NSE_SOURCES in src/api/api_server.py.
-REAL_NSE_SOURCES = frozenset({'nse_website', 'afx_kwayisi', 'afx_history'})
+logger = logging.getLogger(__name__)
 
 Row = Tuple[date, float, float, float]  # (date, high, low, close)
 History = Dict[str, Dict[str, List[float]]]  # symbol -> {'close','high','low'}

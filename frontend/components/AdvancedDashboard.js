@@ -806,8 +806,8 @@ const AdvancedDashboard = ({ onLogout }) => {
   };
 
   // Sources the scraper stamps on prices it actually fetched. Mirrors
-  // REAL_NSE_SOURCES in src/api/api_server.py.
-  const REAL_NSE_SOURCES = ['nse_website', 'afx_kwayisi', 'afx_history'];
+  // REAL_NSE_SOURCES in src/connectors/nse_scraper.py.
+  const REAL_NSE_SOURCES = ['nse_ticker', 'nse_website', 'afx_kwayisi', 'afx_history'];
   const NSE_SOURCE_NOTE = {
     synthetic: 'Generated seed data, not a market price. No live source has answered for this symbol yet.',
     none: 'No price available for this symbol.',
