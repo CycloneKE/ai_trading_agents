@@ -29,6 +29,10 @@ export default function App() {
     <>
       <Head>
         <title>AEGIS TRADER AI | Secure Terminal</title>
+        {/* Lay the page out at the phone's own width, using the full screen
+            on phones with rounded corners or a notch. */}
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+        <meta name="theme-color" content="#020617" />
         <meta name="description" content="Premium AI-driven trading terminal with real-time market intelligence and risk management." />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
@@ -50,6 +54,10 @@ export default function App() {
         }
         * {
           box-sizing: border-box;
+        }
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.4; }
         }
         ::-webkit-scrollbar {
           width: 8px;
