@@ -86,10 +86,25 @@ yfinance>=0.2.60
 # alpha-vantage, asyncio-nats-client and peewee. The connector made seven
 # calls, all of them plain REST endpoints, so the dependency bought nothing.
 
-# Heavier optional features (scikit-learn, torch, transformers) are genuinely
-# absent by choice. Each IS guarded at its import site and the system degrades
-# rather than failing: the DQN and supervised-learning strategies log a
-# warning and stand down, and no strategy of those types is enabled in
-# config/config.json. Adding them would put hundreds of megabytes into an
-# image that rebuilds on every deploy.
+# --- Optional features the dashboard offers --------------------------------
+# Guarded imports, so the agent starts without them, but then the feature is
+# silently off on the server. Both are small (about 40 MB together).
+pdfplumber>=0.11.0       # Research page: reading uploaded broker research PDFs
+                         # (src/utils/pdf_parser.py). Without it every upload
+                         # failed with "PDF extraction will be disabled".
+vaderSentiment>=3.3.2    # News sentiment (src/agent/sentiment_analyzer.py).
+                         # Without any backend every headline scored neutral,
+                         # and the sector specialists read neutral sentiment.
+
+# --- Deliberately absent -----------------------------------------------------
+# Each is guarded at its import site; the startup log names what is off.
+#   scikit-learn, joblib: only the DQN and supervised-learning strategies,
+#     neither enabled in config/config.json, and the AutoML optimizer, which
+#     nothing calls.
+#   cvxpy: the portfolio optimizer, which writes a daily report nothing reads.
+#   nltk: the NLP manager, which nothing calls; the sentiment analyzer works
+#     without it.
+#   torch, transformers (FinBERT): gigabytes of image and memory for a
+#     finance-tuned sentiment model; VADER above covers the dashboard.
+#   supabase: the journals live on the server's own disk.
 # See scripts/requirements-ml.txt and docs/COOLIFY_DEPLOYMENT.md.

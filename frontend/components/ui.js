@@ -66,6 +66,18 @@ export function pct(value, digits = 2) {
   return `${v > 0 ? '+' : ''}${v.toFixed(digits)}%`;
 }
 
+// Where the KES/USD rate came from, in a few words: "market, 24 Sep, 13:05",
+// "daily reference, ...", or that it is the fixed fallback.
+export function fxSourceNote(fx) {
+  if (!fx) return 'loading rate';
+  const at = fx.as_of ? new Date(fx.as_of) : null;
+  const when = at && !Number.isNaN(at.getTime())
+    ? at.toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+  if (fx.source === 'fixed') return 'fixed fallback, no live rate yet';
+  if (fx.source === 'exchangerate_api') return `daily reference${when ? `, ${when}` : ''}`;
+  return `${fx.live ? 'market' : 'last known'}${when ? `, ${when}` : ''}`;
+}
+
 export const gainColor = (v) => ((num(v) ?? 0) >= 0 ? theme.colors.primary : theme.colors.danger);
 
 // ------------------------------------------------------------- components

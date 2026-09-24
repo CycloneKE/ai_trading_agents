@@ -36,3 +36,14 @@ for _path in _SOURCE_ROOTS:
 # answers every protected route with 503. Which test module imports the API
 # first depends on collection order, so set a test secret before any does.
 os.environ.setdefault('SECRET_KEY', 'test-secret-key-for-the-test-suite-only')
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _offline_fx_rate(tmp_path_factory, monkeypatch):
+    """Tests never fetch the live KES/USD rate or write data/fx_rate.json."""
+    from src.connectors import fx_rate
+    monkeypatch.setattr(fx_rate, '_shared', fx_rate.FxRate(
+        tmp_path_factory.mktemp('fx') / 'fx_rate.json', sources=[], background=False))

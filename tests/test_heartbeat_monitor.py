@@ -6,8 +6,9 @@ from src.agent.heartbeat_monitor import HeartbeatMonitor
 
 
 class FakeOrder:
+    """Shaped like base_broker.OrderResponse, whose id is order_id."""
     def __init__(self, oid):
-        self.id = oid
+        self.order_id = oid
 
 
 class FakeBroker:
@@ -66,6 +67,7 @@ def test_watchdog_triggers_kill_switch_and_cancels_orders():
     audit = MagicMock()
 
     hb = HeartbeatMonitor(risk, broker_mgr, audit, timeout_seconds=0.05)
+    hb.ping()  # the trading loop is running
     # Don't start the daemon thread, call _check_timeout directly
     time.sleep(0.1)
     # Simulate one watchdog check
@@ -81,8 +83,38 @@ def test_watchdog_does_not_retrigger():
     risk = MagicMock()
     audit = MagicMock()
     hb = HeartbeatMonitor(risk, MagicMock(), audit, timeout_seconds=0.05)
+    hb.ping()
     time.sleep(0.1)
     hb._check_timeout()
     hb._check_timeout()
     # Should only trigger once
     assert risk.set_persistent_kill_switch.call_count == 1
+
+
+def test_a_slow_start_before_the_loop_runs_does_not_trip_the_switch():
+    """Start-up ran for minutes (an unreachable history source) before the
+    loop's first ping; the watchdog counted it and set the kill switch."""
+    risk = MagicMock()
+    broker = FakeBroker()
+    hb = HeartbeatMonitor(risk, FakeBrokerManager(broker), MagicMock(), timeout_seconds=0.05)
+    time.sleep(0.1)
+    hb._check_timeout()
+    assert hb._triggered is False and broker.cancelled == []
+    risk.set_persistent_kill_switch.assert_not_called()
+    assert hb.status()['armed'] is False
+
+
+def test_real_broker_orders_are_cancelled_by_their_order_id():
+    from datetime import datetime
+    from src.connectors.base_broker import OrderResponse
+    now = datetime.now()
+    order = OrderResponse(order_id='abc-1', client_order_id='c1', symbol='TSLA', quantity=1,
+                          filled_quantity=0, side='buy', order_type='market', status='new',
+                          created_at=now, updated_at=now)
+    broker = FakeBroker()
+    broker.get_orders = lambda: [order]
+    hb = HeartbeatMonitor(MagicMock(), FakeBrokerManager(broker), MagicMock(), timeout_seconds=0.05)
+    hb.ping()
+    time.sleep(0.1)
+    hb._check_timeout()
+    assert broker.cancelled == ['abc-1']

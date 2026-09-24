@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { TrendingUp, TrendingDown, Activity, Shield, Globe, Flag, Layers } from 'lucide-react';
 import { theme } from '../DashboardStyles';
 import {
-  apiGet, card, money, pct, gainColor, SectionHeader, HUDCard, HudRow, SubTabs, Empty, Note,
+  apiGet, card, money, pct, gainColor, fxSourceNote, SectionHeader, HUDCard, HudRow, SubTabs, Empty, Note,
   th, td, tableHeadRow,
 } from '../ui';
 import NsePaperAccount from './NsePaperAccount';
@@ -90,6 +90,7 @@ function MarketWatch({ nseData, holdings, mobile, onDrill }) {
     </th>
   );
   const session = nseSession(nseData);
+  const fx = nseData.fx;
   const gainer = nseData.movers?.gainers?.[0];
   const loser = nseData.movers?.losers?.[0];
 
@@ -97,7 +98,13 @@ function MarketWatch({ nseData, holdings, mobile, onDrill }) {
     <div style={{ display: 'grid', gap: mobile ? '16px' : '24px' }}>
       <HudRow mobile={mobile}>
         <HUDCard title="NSE session" value={session.label} subValue={session.detail || `${quotes.length} symbols`} tone={session.color} icon={Activity} color={session.color} />
-        <HUDCard title="KES per USD" value={(1 / (nseData.kes_usd_rate || 0.0077)).toFixed(2)} subValue="Central Bank rate" tone={theme.colors.textMuted} icon={Globe} color={theme.colors.secondary} />
+        <HUDCard title="KES per USD" icon={Globe} color={theme.colors.secondary}
+                 value={(fx?.kes_per_usd || 1 / (nseData.kes_usd_rate || 1 / 130)).toFixed(2)}
+                 subValue={fxSourceNote(fx)}
+                 tone={fx && (fx.live || fx.source === 'exchangerate_api') ? theme.colors.textMuted : theme.colors.warning}
+                 footer={fx?.attribution_url
+                   ? <a href={fx.attribution_url} target="_blank" rel="noopener noreferrer" style={{ color: theme.colors.textMuted }}>Rates by ExchangeRate-API</a>
+                   : null} />
         <HUDCard title="Top gainer" value={gainer?.symbol || '—'} subValue={gainer ? pct(gainer.change_pct) : null} icon={TrendingUp} color={theme.colors.primary}
                  onClick={gainer ? () => onDrill(gainer.symbol) : undefined} />
         <HUDCard title="Top loser" value={loser?.symbol || '—'} subValue={loser ? pct(loser.change_pct) : null} icon={TrendingDown} color={theme.colors.danger}

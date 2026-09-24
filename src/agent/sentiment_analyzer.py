@@ -298,12 +298,17 @@ class FinancialSentimentAnalyzer:
             # split: keyword matching on raw tokens is weaker than on lemmas
             # but still useful, and far better than the whole module refusing
             # to import and taking the REST API with it.
-            if NLTK_AVAILABLE and word_tokenize is not None:
+            # nltk installed without its data files raises LookupError on
+            # first use, which dropped the keyword score from every headline;
+            # fall back to plain words then too.
+            try:
+                if not (NLTK_AVAILABLE and word_tokenize is not None):
+                    raise LookupError('nltk not installed')
                 tokens = word_tokenize(text.lower())
-            else:
-                tokens = text.lower().split()
-            lemmatized_tokens = ([self.lemmatizer.lemmatize(t) for t in tokens]
-                                 if self.lemmatizer is not None else tokens)
+                lemmatized_tokens = ([self.lemmatizer.lemmatize(t) for t in tokens]
+                                     if self.lemmatizer is not None else tokens)
+            except LookupError:
+                lemmatized_tokens = re.findall(r"[a-z0-9']+", text.lower())
             
             # Count positive and negative keywords
             positive_count = sum(1 for token in lemmatized_tokens if token in self.positive_keywords)
