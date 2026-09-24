@@ -100,6 +100,21 @@ def probe_market_data(cfg, seconds=45):
                 pass
 
 
+def probe_history(cfg):
+    """Daily bars per symbol from the same sources the agent warm-starts from."""
+    try:
+        from src.agent.history_warmstart import fetch_daily_history, read_nse_history
+        from src.connectors.nse_connector import NSE_CSV_DIR
+    except Exception as e:
+        logger.warning(f'History probe unavailable: {e}')
+        return None
+    dm = cfg.get('data_manager', {})
+    depth = {s: len(h['close']) for s, h in fetch_daily_history(dm.get('symbols', []) or []).items()}
+    depth.update({s: len(h['close']) for s, h in
+                  read_nse_history(dm.get('nse_symbols', []) or [], NSE_CSV_DIR).items()})
+    return depth
+
+
 def probe_broker(cfg):
     """Connect the configured brokers and hand back the primary one."""
     try:
@@ -242,11 +257,13 @@ def main():
 
     bars = load_bars(args.csv_dir, cfg)
     sample = probe_market_data(cfg, args.probe_seconds) if args.probe_data else None
+    history = probe_history(cfg) if args.probe_data else None
     broker = probe_broker(cfg) if args.probe_broker else None
 
     readiness = assess_readiness(cfg, broker=broker, data_sample=sample,
                                  bars=bars,
-                                 check_api_import=not args.skip_api_check)
+                                 check_api_import=not args.skip_api_check,
+                                 history_depth=history)
 
     if args.json:
         print(json.dumps({

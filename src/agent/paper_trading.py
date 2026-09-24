@@ -175,6 +175,12 @@ class PaperTradingBroker(BaseBroker):
             logger.error(f"Error placing paper trading order: {str(e)}")
             return None
     
+    def get_order_by_client_order_id(self, client_order_id: str):
+        """The order carrying this client_order_id, or None. In-memory only,
+        like the rest of the simulator's order book."""
+        return next((o for o in self.orders.values()
+                     if getattr(o, 'client_order_id', None) == client_order_id), None)
+
     def cancel_order(self, order_id: str) -> bool:
         """
         Cancel a paper trading order.

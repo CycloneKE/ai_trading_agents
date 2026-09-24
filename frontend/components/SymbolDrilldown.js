@@ -21,6 +21,10 @@ const REASON_LABEL = {
   no_broker: 'No connected broker',
   no_price: 'No valid price',
   duplicate: 'Duplicate decision blocked',
+  already_held: 'Already holding it (no adding to positions)',
+  no_position: 'Sell signal, but nothing held (no short selling)',
+  order_pending: 'An earlier order is still working',
+  position_unknown: 'Could not confirm holdings; skipped for safety',
 };
 
 const reasonColor = (r) => {

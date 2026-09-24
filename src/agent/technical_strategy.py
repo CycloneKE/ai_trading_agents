@@ -7,6 +7,7 @@ except ImportError:  # pandas_ta's remaining PyPI releases need Python >= 3.12
 import logging
 from typing import Dict, Any, List, Optional
 from .base_strategy import BaseStrategy
+from .daily_bars import APPEND, REPLACE, classify
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,9 @@ class TechnicalStrategy(BaseStrategy):
         self.momentum_threshold = config.get('threshold', 0.02)
         self.mean_reversion_band = config.get('band', 0.02)
         self.historical_data = {}
+        # Date of the last bar per symbol, for live daily-bar building.
+        # See daily_bars.py; None means the next dated price appends.
+        self._bar_dates = {}
 
     def generate_signals(self, data: Dict[str, Any]) -> Dict[str, Any]:
         symbol = data.get('symbol', 'UNKNOWN')
@@ -31,16 +35,27 @@ class TechnicalStrategy(BaseStrategy):
         if not price:
             return {'action': 'hold', 'confidence': 0.0, 'position_size': 0.0}
 
-        if symbol not in self.historical_data:
-            self.historical_data[symbol] = []
-        
-        self.historical_data[symbol].append(price)
-        
-        if len(self.historical_data[symbol]) < self.lookback_period:
+        # One bar per trading day when the caller supplies a bar_date (the
+        # live loop does); one bar per call otherwise (backtests). The live
+        # loop used to add a bar every minute, so these daily-calibrated
+        # thresholds were measured over minutes and never fired.
+        hist = self.historical_data.setdefault(symbol, [])
+        bar_date = data.get('bar_date')
+        step = classify(self._bar_dates.get(symbol), bar_date,
+                        hist[-1] if hist else None, price)
+        if step == APPEND:
+            hist.append(price)
+            if bar_date is not None:
+                self._bar_dates[symbol] = bar_date
+        elif step == REPLACE:
+            hist[-1] = price
+        # SKIP: a frozen quote on a new date. Evaluate on the bars we have.
+
+        if len(hist) < self.lookback_period:
             return {'action': 'hold', 'confidence': 0.0, 'position_size': 0.0}
 
         # Keep history manageable
-        self.historical_data[symbol] = self.historical_data[symbol][-self.lookback_period:]
+        self.historical_data[symbol] = hist[-self.lookback_period:]
         
         df = pd.DataFrame(self.historical_data[symbol], columns=['close'])
 
@@ -136,6 +151,9 @@ class TechnicalStrategy(BaseStrategy):
         if not cleaned:
             return 0
         self.historical_data[symbol] = cleaned[-self.lookback_period:]
+        # Seeded closes end before today, so the first live price starts
+        # today's bar rather than overwriting the last historical close.
+        self._bar_dates.pop(symbol, None)
         return len(self.historical_data[symbol])
 
     def update_model(self, data: Dict[str, Any], feedback: Optional[Dict[str, Any]] = None):

@@ -53,6 +53,43 @@ _FRACTIONAL_SECONDS = re.compile(r'\.(\d+)')
 class AlpacaAPIError(RuntimeError):
     """A non-2xx response from Alpaca, carrying their error message."""
 
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+# Crypto pairs are 'BTC-USD' here (the yfinance form every other part of the
+# system uses) but 'BTC/USD' to Alpaca's order API, and positions come back
+# as 'BTCUSD'. Without translation every crypto order was rejected as an
+# unknown asset, and a held crypto position never matched its own symbol, so
+# the agent could not tell it already owned it.
+_CRYPTO_PAIR = re.compile(r'^([A-Z0-9]+)-(USDT|USDC|USD)$')
+_CRYPTO_QUOTES = ('USDT', 'USDC', 'USD')
+
+
+def is_crypto_symbol(symbol: Optional[str]) -> bool:
+    return bool(_CRYPTO_PAIR.match(symbol or ''))
+
+
+def to_alpaca_symbol(symbol: str) -> str:
+    """'BTC-USD' -> 'BTC/USD'. Stock tickers pass through unchanged."""
+    m = _CRYPTO_PAIR.match(symbol or '')
+    return f"{m.group(1)}/{m.group(2)}" if m else symbol
+
+
+def from_alpaca_symbol(symbol: Optional[str], asset_class: Optional[str] = None) -> Optional[str]:
+    """'BTC/USD', or 'BTCUSD' for a crypto asset, -> 'BTC-USD'. Stocks unchanged."""
+    if not symbol:
+        return symbol
+    if '/' in symbol:
+        base, quote = symbol.split('/', 1)
+        return f"{base}-{quote}"
+    if asset_class == 'crypto':
+        for quote in _CRYPTO_QUOTES:
+            if symbol.endswith(quote) and len(symbol) > len(quote):
+                return f"{symbol[:-len(quote)]}-{quote}"
+    return symbol
+
 
 def _parse_timestamp(value: Any) -> Optional[datetime]:
     """Parse Alpaca's RFC 3339 timestamps into aware datetimes.
@@ -137,7 +174,8 @@ class AlpacaBroker(BaseBroker):
             except ValueError:
                 pass
             raise AlpacaAPIError(
-                f"{method} /v2/{path.lstrip('/')} returned {response.status_code}: {detail}")
+                f"{method} /v2/{path.lstrip('/')} returned {response.status_code}: {detail}",
+                status_code=response.status_code)
         if response.status_code == 204 or not response.content:
             return None
         return response.json()
@@ -189,7 +227,7 @@ class AlpacaBroker(BaseBroker):
         return OrderResponse(
             order_id=o.get('id'),
             client_order_id=o.get('client_order_id'),
-            symbol=o.get('symbol'),
+            symbol=from_alpaca_symbol(o.get('symbol'), o.get('asset_class')),
             quantity=_as_float_or_zero(o.get('qty')),
             filled_quantity=_as_float_or_zero(o.get('filled_qty')),
             side=o.get('side'),
@@ -215,7 +253,7 @@ class AlpacaBroker(BaseBroker):
                 tif = "day"
 
             payload: Dict[str, Any] = {
-                'symbol': order.symbol,
+                'symbol': to_alpaca_symbol(order.symbol),
                 'qty': str(order.quantity),
                 'side': order.side,
                 'type': order.order_type,
@@ -224,6 +262,13 @@ class AlpacaBroker(BaseBroker):
                 # (requires a DAY limit order per their extended-hours rules)
                 'extended_hours': bool(order.extended_hours),
             }
+            if is_crypto_symbol(order.symbol):
+                # Crypto trades around the clock: Alpaca accepts only gtc or
+                # ioc for it and rejects the 'day' used for fractional
+                # stock orders. Extended hours does not apply.
+                if tif not in ('gtc', 'ioc'):
+                    payload['time_in_force'] = 'gtc'
+                payload.pop('extended_hours', None)
             if order.limit_price is not None:
                 payload['limit_price'] = str(order.limit_price)
             if order.stop_price is not None:
@@ -264,38 +309,70 @@ class AlpacaBroker(BaseBroker):
             logger.error(f"Error getting Alpaca account info: {str(e)}")
             return None
 
+    def fetch_positions(self) -> List[Position]:
+        """Current positions. Raises on failure.
+
+        The trading loop's position gate uses this rather than
+        get_positions(), because get_positions() returns [] on an API error
+        and "could not check" must never read as "holds nothing".
+        """
+        return [
+            Position(
+                symbol=from_alpaca_symbol(p.get('symbol'), p.get('asset_class')),
+                quantity=_as_float_or_zero(p.get('qty')),
+                avg_entry_price=_as_float_or_zero(p.get('avg_entry_price')),
+                current_price=_as_float_or_zero(p.get('current_price')),
+                market_value=_as_float_or_zero(p.get('market_value')),
+                unrealized_pl=_as_float_or_zero(p.get('unrealized_pl')),
+                unrealized_pl_percent=_as_float_or_zero(p.get('unrealized_plpc')),
+                cost_basis=_as_float_or_zero(p.get('cost_basis')),
+                broker_name=self.broker_name,
+            )
+            for p in (self._request('GET', 'positions') or [])
+        ]
+
     def get_positions(self) -> List[Position]:
-        """Get current Alpaca positions."""
+        """Get current Alpaca positions; [] on error (see fetch_positions)."""
         try:
-            return [
-                Position(
-                    symbol=p.get('symbol'),
-                    quantity=_as_float_or_zero(p.get('qty')),
-                    avg_entry_price=_as_float_or_zero(p.get('avg_entry_price')),
-                    current_price=_as_float_or_zero(p.get('current_price')),
-                    market_value=_as_float_or_zero(p.get('market_value')),
-                    unrealized_pl=_as_float_or_zero(p.get('unrealized_pl')),
-                    unrealized_pl_percent=_as_float_or_zero(p.get('unrealized_plpc')),
-                    cost_basis=_as_float_or_zero(p.get('cost_basis')),
-                    broker_name=self.broker_name,
-                )
-                for p in (self._request('GET', 'positions') or [])
-            ]
+            return self.fetch_positions()
         except Exception as e:
             logger.error(f"Error getting Alpaca positions: {str(e)}")
             return []
 
+    def fetch_open_orders(self, symbol: Optional[str] = None) -> List[OrderResponse]:
+        """Open orders, optionally for one symbol (our form). Raises on failure.
+
+        Filtered here rather than with Alpaca's `symbols` parameter, which
+        would need the slash form for crypto; the open-order list is short.
+        """
+        orders = [self._to_order_response(o)
+                  for o in (self._request('GET', 'orders',
+                                          params={'status': 'open', 'limit': 500}) or [])]
+        return [o for o in orders if symbol is None or o.symbol == symbol]
+
     def get_orders(self, symbol: Optional[str] = None) -> List[OrderResponse]:
-        """Get Alpaca open orders."""
+        """Get Alpaca open orders; [] on error (see fetch_open_orders)."""
         try:
-            params: Dict[str, Any] = {'status': 'open'}
-            if symbol:
-                params['symbols'] = symbol
-            return [self._to_order_response(o)
-                    for o in (self._request('GET', 'orders', params=params) or [])]
+            return self.fetch_open_orders(symbol)
         except Exception as e:
             logger.error(f"Error getting Alpaca orders: {str(e)}")
             return []
+
+    def get_order_by_client_order_id(self, client_order_id: str) -> Optional[OrderResponse]:
+        """The order carrying our client_order_id, or None if Alpaca has none.
+
+        Raises on any other failure. The order journal needs "not found" and
+        "could not ask" kept apart: the first means the order never reached
+        the broker, the second means nothing is known yet.
+        """
+        try:
+            o = self._request('GET', 'orders:by_client_order_id',
+                              params={'client_order_id': client_order_id})
+        except AlpacaAPIError as e:
+            if e.status_code == 404:
+                return None
+            raise
+        return self._to_order_response(o) if o else None
 
     def get_portfolio_history(self, period: str = '1D', timeframe: str = '1Min') -> Dict[str, Any]:
         """Get Alpaca portfolio history."""

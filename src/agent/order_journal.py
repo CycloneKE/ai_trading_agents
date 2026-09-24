@@ -32,6 +32,34 @@ logger = logging.getLogger(__name__)
 
 FINAL_STATUSES = {'filled', 'canceled', 'cancelled', 'rejected', 'expired', 'failed', 'aborted'}
 
+
+def _order_lookup(broker):
+    """The broker's client-order-id lookup, or None if it has none.
+
+    The returned callable yields the order, None when the broker has no
+    record of the id, and raises when the broker could not be asked. Prefers
+    the broker's own method: the REST Alpaca connector has no SDK `.api`,
+    and looking only for `.api` meant fills were never synced and startup
+    reconcile fell back to open orders, marking anything that had already
+    filled as "aborted, never reached broker".
+    """
+    fn = getattr(broker, 'get_order_by_client_order_id', None)
+    if callable(fn):
+        return fn
+    api = getattr(broker, 'api', None)
+    legacy = getattr(api, 'get_order_by_client_order_id', None) if api is not None else None
+    if not callable(legacy):
+        return None
+
+    def _legacy(coid):
+        try:
+            return legacy(coid)
+        except Exception as e:
+            if getattr(e, 'status_code', None) == 404:
+                return None
+            raise
+    return _legacy
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS orders (
     client_order_id TEXT PRIMARY KEY,
@@ -191,20 +219,22 @@ class OrderJournal:
         Returns the number of rows that reached a final status.
         """
         updated = 0
-        api = getattr(broker, 'api', None)
+        lookup = _order_lookup(broker)
+        if lookup is None:
+            return 0
         with self._lock:
             cur = self._conn.execute(
                 "SELECT client_order_id FROM orders WHERE status = 'submitted'")
             submitted = [r[0] for r in cur.fetchall()]
         for coid in submitted:
             try:
-                if api is not None and hasattr(api, 'get_order_by_client_order_id'):
-                    o = api.get_order_by_client_order_id(coid)
-                else:
-                    continue
+                o = lookup(coid)
+                if o is None:
+                    continue  # unknown to the broker: reconcile decides, not this
                 status = str(getattr(o, 'status', ''))
                 if status in FINAL_STATUSES:
-                    qty = float(getattr(o, 'filled_qty', 0) or 0)
+                    qty = float(getattr(o, 'filled_qty', 0) or
+                                getattr(o, 'filled_quantity', 0) or 0)
                     avg_raw = getattr(o, 'filled_avg_price', None)
                     self.mark_final(coid, status, qty,
                                     float(avg_raw) if avg_raw else None)
@@ -232,20 +262,25 @@ class OrderJournal:
         Uses Alpaca's lookup-by-client-order-id when available; otherwise
         falls back to matching the broker's open orders.
         """
-        summary = {'checked': 0, 'resolved': 0, 'still_open': 0, 'aborted': 0}
+        summary = {'checked': 0, 'resolved': 0, 'still_open': 0, 'aborted': 0,
+                   'unverified': 0}
         open_orders = None  # lazy fallback
+        lookup = _order_lookup(broker)
 
         for row in self.unresolved():
             summary['checked'] += 1
             coid = row['client_order_id']
             broker_order = None
 
-            api = getattr(broker, 'api', None)
-            if api is not None and hasattr(api, 'get_order_by_client_order_id'):
+            if lookup is not None:
                 try:
-                    broker_order = api.get_order_by_client_order_id(coid)
-                except Exception:
-                    broker_order = None  # broker has no record of this id
+                    broker_order = lookup(coid)  # None: the broker has no record
+                except Exception as e:
+                    # Could not ask. Nothing is known, so leave the row as it
+                    # is; marking it aborted could erase a real fill.
+                    summary['unverified'] += 1
+                    logger.warning(f"Reconcile: could not look up {coid}; left unresolved: {e}")
+                    continue
             else:
                 if open_orders is None:
                     try:

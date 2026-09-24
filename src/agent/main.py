@@ -44,6 +44,7 @@ from src.agent.realtime_data_feed import RealTimeDataFeed
 from src.utils.monitoring import get_monitoring_service
 from src.agent.data_manager import DataManager
 from src.agent.strategy_manager import StrategyManager
+from src.agent.daily_bars import utc_bar_date
 from src.agent.broker_manager import BrokerManager
 from src.agent.order_execution_engine import OrderExecutionEngine
 from src.agent.realtime_risk_manager import RealTimeRiskManager
@@ -351,6 +352,91 @@ class TradingAgent:
             logger.error(f"Failed to initialize components: {str(e)}")
             raise
     
+    def _position_gate(self, broker, symbol: str, action: str):
+        """The backtest's position rules, applied before any order.
+
+        Returns (allowed, skip_reason, held_quantity). Fails closed: if the
+        broker cannot say what is held or pending, no order is placed,
+        because an unknown position is exactly how a held symbol gets
+        bought again. Brokers exposing strict fetch_positions /
+        fetch_open_orders (which raise on failure) are preferred over the
+        lenient getters, which return [] on error.
+        """
+        try:
+            fetch_pos = getattr(broker, 'fetch_positions', None)
+            positions = fetch_pos() if callable(fetch_pos) else (broker.get_positions() or [])
+            fetch_open = getattr(broker, 'fetch_open_orders', None)
+            pending = fetch_open(symbol) if callable(fetch_open) else (broker.get_orders(symbol) or [])
+        except Exception as e:
+            logger.warning(f"Cannot confirm holdings for {symbol}; not trading it this cycle: {e}")
+            return False, 'position_unknown', 0.0
+        held = sum(float(getattr(p, 'quantity', 0) or 0)
+                   for p in positions if getattr(p, 'symbol', None) == symbol)
+        if any(getattr(o, 'symbol', None) == symbol for o in pending):
+            return False, 'order_pending', held
+        if action == 'buy' and held > 0:
+            return False, 'already_held', held
+        if action == 'sell' and held <= 0:
+            return False, 'no_position', held
+        return True, None, held
+
+    def _history_needed(self) -> int:
+        """Daily bars a symbol needs before every strategy can signal."""
+        sm = self.components.get('strategy_manager')
+        need = [int(getattr(s, 'lookback_period', 0) or 0)
+                for s in (getattr(sm, 'strategies', {}) or {}).values()]
+        return max(need + [1])
+
+    def _warm_start_history(self) -> None:
+        """Seed strategies, regime detector and ATR from real daily bars.
+
+        US and crypto from yfinance (the live feed's own source); NSE from
+        the scraper's CSVs, real rows only, after pulling the ~2 weeks of
+        real history afx publishes. Symbols left short of history are logged
+        at ERROR, because they cannot signal, and retried hourly.
+        """
+        from src.agent.history_warmstart import fetch_daily_history, read_nse_history
+        self._last_history_attempt = time.time()
+        sm = self.components.get('strategy_manager')
+        if sm is None:
+            return
+        dm_cfg = self.config.get('data_manager', {})
+        need = self._history_needed()
+        live = [s for s in dm_cfg.get('symbols', []) if s not in self._history_seeded]
+        nse = [s for s in dm_cfg.get('nse_symbols', []) if s not in self._history_seeded]
+
+        histories = {}
+        if live:
+            histories.update(fetch_daily_history(live))
+        if nse:
+            try:
+                from src.connectors.nse_scraper import backfill_afx_history
+                backfill_afx_history(nse)
+            except Exception as e:
+                logger.warning(f"NSE real-history backfill failed: {e}")
+            from src.connectors.nse_connector import NSE_CSV_DIR
+            histories.update(read_nse_history(nse, NSE_CSV_DIR))
+
+        if histories:
+            sm.warm_start({s: h['close'] for s, h in histories.items()})
+            if getattr(self, 'volatility', None):
+                for s, h in histories.items():
+                    try:
+                        self.volatility.warm_start(s, h['close'], h['high'], h['low'])
+                    except Exception as e:
+                        logger.debug(f"ATR warm-start failed for {s}: {e}")
+
+        depth = {s: len(h['close']) for s, h in histories.items()}
+        self._history_seeded |= {s for s, n in depth.items() if n >= need}
+        short = {s: depth.get(s, 0) for s in live + nse if s not in self._history_seeded}
+        if short:
+            logger.error(
+                f"History warm-start: {len(short)} symbol(s) have fewer than {need} real "
+                f"daily bars and cannot signal yet: {short}. Retrying hourly.")
+        elif live or nse:
+            logger.info(f"History warm-start: {len(live) + len(nse)} symbols seeded "
+                        f"with at least {need} daily bars")
+
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals by performing a full graceful shutdown."""
         logger.info(f"Received signal {signum}, initiating graceful shutdown...")
@@ -466,83 +552,12 @@ class TradingAgent:
             logger.error(f"Decision journal init failed: {e}")
             self.decision_journal = None
 
-        # Warm-start strategy price buffers from historical daily bars so the
-        # agent can signal from the first cycle instead of being blind for
-        # lookback_period minutes after every restart.
-        try:
-            symbols = self.config.get('data_manager', {}).get('symbols', [])
-            primary = broker_manager.get_broker()
-            api = getattr(primary, 'api', None) if primary else None
-            if api is not None and symbols:
-                from datetime import timedelta
-                # feed='iex' + explicit start are required on the free data
-                # plan; the default SIP feed silently returns zero bars.
-                bars_start = (datetime.now() - timedelta(days=120)).strftime('%Y-%m-%d')
-                bars_by_symbol = {}
-                for sym in symbols:
-                    try:
-                        bars = api.get_bars(sym, '1Day', limit=60,
-                                            feed='iex', start=bars_start)
-                        closes = [float(b.c) for b in bars]
-                        if closes:
-                            bars_by_symbol[sym] = closes
-                        # Seed the ATR tracker from the same bars, with
-                        # high/low where the vendor supplies them. Without
-                        # this every symbol starts on the fixed fallback stop
-                        # for its first `atr_length` cycles after a restart.
-                        try:
-                            highs = [float(getattr(b, 'h', b.c)) for b in bars]
-                            lows = [float(getattr(b, 'l', b.c)) for b in bars]
-                            if closes and getattr(self, 'volatility', None):
-                                self.volatility.warm_start(sym, closes, highs, lows)
-                        except Exception as e:
-                            logger.debug(f"ATR warm-start failed for {sym}: {e}")
-                    except Exception as e:
-                        logger.debug(f"No warm-start bars for {sym}: {e}")
-                if bars_by_symbol:
-                    self.components['strategy_manager'].warm_start(bars_by_symbol)
-        except Exception as e:
-            logger.warning(f"History warm-start failed (non-fatal): {e}")
-
-        # Warm-start NSE symbols too, from the local historical CSVs the NSE
-        # scraper seeds — otherwise NSE strategies are blind for lookback_period
-        # scrape cycles (many days at a 30-min cadence).
-        try:
-            import csv as _csv
-            from pathlib import Path as _Path
-            nse_symbols = self.config.get('data_manager', {}).get('nse_symbols', [])
-            hist_dir = _Path(__file__).resolve().parent.parent.parent / 'data' / 'nse_historical'
-            nse_bars = {}
-            for sym in nse_symbols:
-                csv_path = hist_dir / f"{sym}.csv"
-                if not csv_path.exists():
-                    continue
-                try:
-                    with open(csv_path, 'r', newline='', encoding='utf-8') as f:
-                        rows = [r for r in _csv.DictReader(f)
-                                if r.get('close') and float(r['close']) > 0]
-                    closes = [float(r['close']) for r in rows]
-                    if closes:
-                        nse_bars[sym] = closes[-60:]
-                        # Seed the ATR tracker too. The scraped CSVs may or may
-                        # not carry high/low; pass them only when every row has
-                        # both, since a partial series would be treated as
-                        # close-only anyway.
-                        highs = [float(r['high']) for r in rows] \
-                            if all(r.get('high') for r in rows) else None
-                        lows = [float(r['low']) for r in rows] \
-                            if all(r.get('low') for r in rows) else None
-                        if getattr(self, 'volatility', None):
-                            self.volatility.warm_start(
-                                sym, closes[-60:],
-                                highs[-60:] if highs else None,
-                                lows[-60:] if lows else None)
-                except Exception as e:
-                    logger.debug(f"No NSE warm-start bars for {sym}: {e}")
-            if nse_bars:
-                self.components['strategy_manager'].warm_start(nse_bars)
-        except Exception as e:
-            logger.warning(f"NSE history warm-start failed (non-fatal): {e}")
+        # Warm-start every indicator from real daily history so the agent can
+        # signal from the first cycle instead of after fifty trading days.
+        # Retried hourly from the trading loop for any symbol still missing.
+        self._history_seeded = set()
+        self._last_history_attempt = 0.0
+        self._warm_start_history()
 
         # LLM weight allocator: proposes ensemble weight tilts from realized
         # attribution on a slow cadence; hard guardrails clamp every proposal
@@ -821,10 +836,17 @@ class TradingAgent:
                     cycle = int(time.time() // loop_interval)
                     self._cycle_decisions = {}
 
+                    # Live quotes build one bar per trading day (daily_bars.py).
+                    # Every minute's quote used to become a bar of its own, so
+                    # daily-calibrated strategies measured minutes and never fired.
+                    live_bar_date = utc_bar_date()
+
                     for symbol in symbols:
                         try:
                             # Extract symbol-specific data
                             symbol_data = self._extract_symbol_data(market_data, symbol)
+                            if isinstance(symbol_data, dict):
+                                symbol_data['bar_date'] = live_bar_date
 
                             price = (symbol_data or {}).get('price') or (symbol_data or {}).get('close')
 
@@ -836,7 +858,8 @@ class TradingAgent:
                                 self.volatility.update(
                                     symbol, price,
                                     (symbol_data or {}).get('high'),
-                                    (symbol_data or {}).get('low'))
+                                    (symbol_data or {}).get('low'),
+                                    bar_date=live_bar_date)
 
                             self._cycle_decisions[symbol] = {
                                 'symbol': symbol, 'cycle': cycle, 'action': 'hold',
@@ -1083,6 +1106,18 @@ class TradingAgent:
                         except Exception as e:
                             logger.error(f"Error in self-assessment cycle: {e}")
                 
+                # Retry the history warm-start hourly for any symbol still
+                # without enough daily bars. A vendor blip at boot would
+                # otherwise leave those symbols unable to signal for weeks.
+                try:
+                    configured = (set(self.config.get('data_manager', {}).get('symbols', []))
+                                  | set(self.config.get('data_manager', {}).get('nse_symbols', [])))
+                    if (configured - getattr(self, '_history_seeded', set())
+                            and time.time() - getattr(self, '_last_history_attempt', 0) > 3600):
+                        self._warm_start_history()
+                except Exception as e:
+                    logger.error(f"History warm-start retry failed: {e}")
+
                 # NSE Kenya decision pass — separate cadence from the US loop
                 # (NSE prices only refresh on the ~30-min scrape). Internally
                 # rate-limited and guarded by market hours + price freshness.
@@ -1188,6 +1223,10 @@ class TradingAgent:
                     'open': float(quote.get('open_kes') or price),
                     'volume': quote.get('volume', 0),
                     'source': quote.get('source', 'nse'), 'market': 'nse',
+                    # Intraday re-scrapes update today's bar instead of each
+                    # becoming a bar (daily_bars.py). The CSV warm-start is
+                    # already daily.
+                    'bar_date': utc_bar_date(),
                 }
                 signals = strategy_manager.generate_signals(symbol_data)
 
@@ -1432,6 +1471,18 @@ class TradingAgent:
                             _note(symbol, 'no_broker')
                             continue
 
+                        # Trade the way the backtest that justified this did:
+                        # never add to a held position, never open a short,
+                        # never stack an order behind one still working. The
+                        # loop re-decides every minute and the idempotency key
+                        # changes every minute, so without this a buy signal
+                        # that holds all day places a fresh full-size buy
+                        # every cycle: 390 a session per stock.
+                        allowed, why, held_qty = self._position_gate(broker, symbol, action)
+                        if not allowed:
+                            _note(symbol, why)
+                            continue
+
                         # Calculate quantity (Max 2% of portfolio per trade for safety).
                         # Skip the cycle if account info is unavailable rather
                         # than sizing off a phantom $100k — on a small live
@@ -1539,35 +1590,34 @@ class TradingAgent:
                         sizing_cfg = self.config.get('trading', {})
                         cycle = int(time.time() // self.config.get('trading_loop_interval', 60))
 
-                        # Alpaca rejects fractional orders that open/extend a
-                        # short position (fractional trading only supports
-                        # going long or closing an existing long). A sell with
-                        # no existing long to close is a short — force whole
-                        # shares for it regardless of the fractional config.
-                        existing_qty = 0.0
+                        # Long-only (see _position_gate): a sell always closes
+                        # a held long, so the short-sale whole-share rule that
+                        # lived here no longer applies. A sell exits the whole
+                        # position in one order, exactly the held quantity,
+                        # as the backtest does.
+                        allow_fractional = sizing_cfg.get('allow_fractional', True)
                         if action == 'sell':
-                            try:
-                                existing_qty = next(
-                                    (p.quantity for p in (broker.get_positions() or [])
-                                     if p.symbol == symbol), 0.0)
-                            except Exception as e:
-                                logger.debug(f"Position lookup failed for {symbol}: {e}")
-                        is_short = action == 'sell' and existing_qty <= 0
-                        allow_fractional = sizing_cfg.get('allow_fractional', True) and not is_short
+                            executions = [(signal_data.get('strategy', 'ensemble'), held_qty * price)]
 
                         for strategy_name, target_value in executions:
-                            # Dollar-notional sizing with fractional shares,
-                            # so small accounts get properly sized positions
-                            # instead of rounding to zero.
-                            sized = size_order(
-                                target_value, price,
-                                min_notional=sizing_cfg.get('min_notional', 5.0),
-                                allow_fractional=allow_fractional,
-                            )
-                            if not sized:
-                                _note(symbol, 'min_notional')
-                                continue
-                            quantity = sized.quantity
+                            if action == 'sell':
+                                # Exactly what is held: recomputing it from a
+                                # dollar value would drift by float rounding
+                                # and the broker rejects selling more than held.
+                                quantity, order_tif = held_qty, 'day'
+                            else:
+                                # Dollar-notional sizing with fractional shares,
+                                # so small accounts get properly sized positions
+                                # instead of rounding to zero.
+                                sized = size_order(
+                                    target_value, price,
+                                    min_notional=sizing_cfg.get('min_notional', 5.0),
+                                    allow_fractional=allow_fractional,
+                                )
+                                if not sized:
+                                    _note(symbol, 'min_notional')
+                                    continue
+                                quantity, order_tif = sized.quantity, sized.time_in_force
 
                             # Idempotency: one deterministic id per decision
                             # (strategy, symbol, side, loop cycle). The journal
@@ -1590,7 +1640,7 @@ class TradingAgent:
                                 # fractional orders must be DAY (broker rule);
                                 # whole-share keeps DAY too - the loop
                                 # re-decides every cycle, GTC adds nothing.
-                                time_in_force=sized.time_in_force,
+                                time_in_force=order_tif,
                                 client_order_id=client_order_id
                             )
 
