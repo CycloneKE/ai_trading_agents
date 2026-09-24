@@ -49,6 +49,7 @@ from src.agent.daily_bars import utc_bar_date
 from src.agent.nse_paper_account import (HOLDING_RULE_REASONS, NsePaperAccount,
                                          execute_stop, order_size)
 from src.agent.strategy_attribution import credit_weights
+from src.connectors.nse_scraper import REAL_NSE_SOURCES
 from src.agent.position_rules import (LIVE_ADD_DEFAULTS, LIVE_EXIT_DEFAULTS, plan_add,
                                       plan_exit, rule, state_from_journal)
 from src.agent.cost_model import classify, costs_for
@@ -1216,6 +1217,7 @@ class TradingAgent:
         base_notional = nse_cfg.get('trade_notional_kes', 50000)
         cycle = int(now // interval)
         nse_symbols = self.config.get('data_manager', {}).get('nse_symbols', [])
+        real_prices = {}  # this cycle's real quotes, for the equity snapshot
 
         for symbol in nse_symbols:
             try:
@@ -1225,6 +1227,8 @@ class TradingAgent:
                 price = float(quote['price_kes'])
                 if price <= 0:
                     continue
+                if quote.get('source') in REAL_NSE_SOURCES:
+                    real_prices[symbol] = price
 
                 # Never evaluate on synthetic seed prices. The scraper seeds
                 # 730 days of generated history on first run and overlays
@@ -1392,6 +1396,16 @@ class TradingAgent:
                         logger.debug(f"NSE decision record error: {e}")
             except Exception as e:
                 logger.error(f"Error evaluating NSE symbol {symbol}: {e}")
+
+        # Today's reading of the paper account's value, for its equity curve.
+        # Skipped when a holding has no real quote this cycle: a gap in the
+        # curve is honest, a holding valued at cost is not.
+        if auto_paper:
+            try:
+                if all(s in real_prices for s in paper.positions()):
+                    paper.record_equity(real_prices)
+            except Exception as e:
+                logger.debug(f"NSE paper equity snapshot failed: {e}")
 
     def _run_sleeve_cycle(self):
         """Monthly dividend-sleeve accumulation pass. Pulls current NSE

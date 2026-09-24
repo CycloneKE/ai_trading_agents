@@ -60,6 +60,16 @@ CREATE TABLE IF NOT EXISTS nse_paper_highs (
     opened_at   TEXT NOT NULL,
     high_kes    REAL NOT NULL
 );
+
+-- The paper account's value each trading day (its latest reading that
+-- day), for the dashboard's equity curve.
+CREATE TABLE IF NOT EXISTS nse_paper_equity (
+    day         TEXT PRIMARY KEY,
+    cash_kes    REAL NOT NULL,
+    holdings_kes REAL NOT NULL,
+    equity_kes  REAL NOT NULL,
+    updated_at  TEXT NOT NULL
+);
 """
 
 
@@ -238,7 +248,8 @@ class NseOrderQueue:
         `since` (an ISO timestamp) keeps only fills at or after it, which is
         how a paper account ignores fills from before it opened.
         """
-        query = ("SELECT symbol, side, fill_quantity, fill_price, fees_kes, fill_at"
+        query = ("SELECT symbol, side, fill_quantity, fill_price, fees_kes, fill_at, id,"
+                 " strategy, rationale"
                  " FROM nse_order_tickets WHERE status = 'filled' AND fill_quantity > 0")
         params: List[Any] = []
         if book is not None:
@@ -251,7 +262,8 @@ class NseOrderQueue:
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
         return [{'symbol': r[0], 'side': r[1], 'quantity': int(r[2]), 'price': float(r[3]),
-                 'fees_kes': float(r[4] or 0.0), 'fill_at': r[5]} for r in rows]
+                 'fees_kes': float(r[4] or 0.0), 'fill_at': r[5], 'id': r[6],
+                 'strategy': r[7], 'rationale': r[8]} for r in rows]
 
     def paper_account_started_at(self) -> str:
         """When the NSE paper account opened, recording now on first call."""
@@ -281,6 +293,37 @@ class NseOrderQueue:
                 " high_kes = excluded.high_kes", (symbol, opened_at, float(high)))
             self._conn.commit()
             return high
+
+    def paper_high_peek(self, symbol: str, opened_at: str) -> Optional[float]:
+        """The stored high for this position, without updating it."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT opened_at, high_kes FROM nse_paper_highs WHERE symbol = ?",
+                (symbol,)).fetchone()
+        return float(row[1]) if row and row[0] == opened_at else None
+
+    def record_paper_equity(self, day: str, cash: float, holdings: float) -> None:
+        """Today's account value; a later reading the same day replaces it."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO nse_paper_equity (day, cash_kes, holdings_kes, equity_kes, updated_at)"
+                " VALUES (?, ?, ?, ?, ?) ON CONFLICT(day) DO UPDATE SET"
+                " cash_kes = excluded.cash_kes, holdings_kes = excluded.holdings_kes,"
+                " equity_kes = excluded.equity_kes, updated_at = excluded.updated_at",
+                (day, round(cash, 2), round(holdings, 2), round(cash + holdings, 2),
+                 datetime.utcnow().isoformat()))
+            self._conn.commit()
+
+    def paper_equity_history(self, since_day: Optional[str] = None) -> List[Dict[str, Any]]:
+        query = "SELECT day, cash_kes, holdings_kes, equity_kes FROM nse_paper_equity"
+        params: List[Any] = []
+        if since_day:
+            query += " WHERE day >= ?"
+            params.append(since_day)
+        with self._lock:
+            rows = self._conn.execute(query + " ORDER BY day", params).fetchall()
+        return [{'day': r[0], 'cash_kes': r[1], 'holdings_kes': r[2], 'equity_kes': r[3]}
+                for r in rows]
 
     def positions(self, book: Optional[str] = None,
                   since: Optional[str] = None) -> Dict[str, Dict[str, Any]]:

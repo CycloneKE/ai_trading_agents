@@ -194,10 +194,11 @@ class TradingAPI:
             self._response_cache[key] = {'value': value, 'at': now}
         return value
 
-    def _nse_paper_summary(self) -> Optional[Dict[str, Any]]:
-        """The NSE paper account, holdings valued at the latest quotes.
+    def _nse_paper_summary(self, with_stops: bool = False) -> Optional[Dict[str, Any]]:
+        """The NSE paper account, holdings valued at the latest real quotes.
 
-        None when the agent has no paper account (older configs).
+        None when the agent has no paper account (older configs). With
+        `with_stops`, each holding carries where its stops sit.
         """
         paper = self.trading_agent.components.get('nse_paper_account')
         if paper is None:
@@ -212,7 +213,19 @@ class TradingAPI:
                     prices[symbol] = float(quote['price_kes'])
             except Exception as e:
                 logger.debug(f"NSE paper valuation: no quote for {symbol}: {e}")
-        return paper.summary(prices)
+        atr_lookup = None
+        if with_stops:
+            tracker = getattr(self.trading_agent, 'volatility', None)
+            atr_lookup = (lambda s: tracker.atr_pct(s)) if tracker is not None else (lambda s: None)
+        return paper.summary(prices, atr_lookup)
+
+    def _tracked_symbols(self) -> set:
+        """Every symbol the agent trades, for validating per-symbol requests."""
+        out = set()
+        for cfg in (self.config, getattr(self.trading_agent, 'config', {}) or {}):
+            dm = (cfg or {}).get('data_manager', {}) or {}
+            out |= {s.upper() for s in (dm.get('symbols', []) or []) + (dm.get('nse_symbols', []) or [])}
+        return out
 
     def _setup_routes(self):
         """Setup API routes with authentication and rate limiting."""
@@ -1320,6 +1333,72 @@ class TradingAPI:
                 },
                 'paper_account': self._nse_paper_summary(),
             }), 200
+
+        @self.app.route('/api/nse/paper', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_nse_paper():
+            """The agent's NSE paper account: figures, holdings with their
+            stops, fills since it opened, and its daily equity curve."""
+            paper = self.trading_agent.components.get('nse_paper_account')
+            queue = self.trading_agent.components.get('nse_order_queue')
+            if paper is None or queue is None or not paper.enabled:
+                return jsonify({'enabled': False}), 200
+            try:
+                fills = queue.fills(book='trading', since=paper.started_at)
+                return jsonify({
+                    'enabled': True,
+                    'account': self._nse_paper_summary(with_stops=True),
+                    'fills': list(reversed(fills))[:100],
+                    'equity_curve': queue.paper_equity_history(),
+                    'rules': {'add_to_winners': paper.add_rule, 'exits': paper.exit_rule,
+                              'stop_loss': paper.stop_rule},
+                }), 200
+            except Exception as e:
+                logger.error(f"Error building NSE paper view: {e}")
+                return jsonify({'error': 'Failed to build NSE paper view'}), 500
+
+        @self.app.route('/api/chart/<symbol>', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_chart(symbol):
+            """Real daily bars for a traded symbol, with the agent's fills
+            marked on them (chart_data.py)."""
+            from src.agent import chart_data
+            from src.agent.cost_model import classify
+            symbol = (symbol or '').upper()
+            if symbol not in self._tracked_symbols():
+                return jsonify({'error': f'Unknown or untracked symbol: {symbol}'}), 404
+            try:
+                days = max(20, min(int(request.args.get('days', 250)), 750))
+            except ValueError:
+                days = 250
+            market = classify(symbol, getattr(self.trading_agent, 'config', None) or self.config)
+
+            def produce():
+                if market == 'nse':
+                    from src.connectors.nse_connector import NSE_CSV_DIR
+                    bars = chart_data.nse_bars(symbol, NSE_CSV_DIR, days)
+                    queue = self.trading_agent.components.get('nse_order_queue')
+                    paper = self.trading_agent.components.get('nse_paper_account')
+                    since = paper.started_at if paper is not None and paper.enabled else None
+                    fills = [{'time': f['fill_at'], 'side': f['side'], 'quantity': f['quantity'],
+                              'price': f['price'], 'strategy': f.get('strategy')}
+                             for f in (queue.fills(book='trading', since=since) if queue else [])
+                             if f['symbol'] == symbol]
+                else:
+                    bars = chart_data.yfinance_bars(symbol)[-days:]
+                    fills = chart_data.journal_fills(getattr(self.trading_agent, 'order_journal', None), symbol)
+                return {'symbol': symbol, 'market': market,
+                        'currency': 'KES' if market == 'nse' else 'USD',
+                        'bars': bars, 'markers': chart_data.markers(fills),
+                        'tradingview_symbol': chart_data.tradingview_symbol(symbol, market)}
+
+            try:
+                return jsonify(self._cached(f'chart:{symbol}:{days}', 300, produce)), 200
+            except Exception as e:
+                logger.error(f"Error building chart for {symbol}: {e}")
+                return jsonify({'error': 'Failed to build chart'}), 500
 
         @self.app.route('/api/operator/nse-tickets/<int:ticket_id>/place', methods=['POST'])
         @require_rate_limit

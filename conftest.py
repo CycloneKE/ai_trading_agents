@@ -31,3 +31,8 @@ _SOURCE_ROOTS = [
 for _path in _SOURCE_ROOTS:
     if os.path.isdir(_path) and _path not in sys.path:
         sys.path.insert(0, _path)
+
+# The API refuses to load its login module without a JWT secret and then
+# answers every protected route with 503. Which test module imports the API
+# first depends on collection order, so set a test secret before any does.
+os.environ.setdefault('SECRET_KEY', 'test-secret-key-for-the-test-suite-only')

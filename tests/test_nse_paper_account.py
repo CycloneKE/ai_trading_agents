@@ -276,6 +276,15 @@ def test_a_buy_signal_that_persists_buys_once(queue):
     assert agent.decision_journal.records[0]['executed'] is True
 
 
+def test_each_cycle_records_the_days_account_value(queue):
+    agent = _agent(queue, ['buy'], [36.2])
+    _run(agent, 1)
+    (today,) = queue.paper_equity_history()
+    held = agent.components['nse_paper_account'].positions()['SCOM']['quantity']
+    assert today['holdings_kes'] == pytest.approx(held * 36.2, abs=0.01)
+    assert today['equity_kes'] < 200000  # the buy's costs, marked at the decision price
+
+
 def test_the_loop_adds_to_a_winner_and_a_sell_closes_it_all(queue):
     agent = _agent(queue, ['buy', 'buy', 'sell'], [36.2, 40.0, 41.0])
     _run(agent, 3)
