@@ -329,6 +329,17 @@
       "trailing_stop_pct": 0.10
     }
   },
+  "strategy_tuning": {
+    "_comment": "Re-tunes the momentum threshold, mean-reversion band and RSI levels (src/agent/strategy_tuner.py). Every interval_days, and at most daily for a strategy losing over at least min_closed_trades closed trades (win rate under poor_win_rate or a negative mean return), the current settings and each setting one step either side are run over up to two years of real daily history per symbol with at least min_bars bars, net of costs. A change is adopted only if it beats the current settings on the held-out latest holdout_pct by min_improvement, is no worse in-sample, and made min_trades trades in each. Adopted settings persist in data/strategy_params.json. enabled false freezes them.",
+    "enabled": true,
+    "interval_days": 7,
+    "holdout_pct": 0.3,
+    "min_improvement": 0.005,
+    "min_trades": 5,
+    "min_bars": 120,
+    "min_closed_trades": 10,
+    "poor_win_rate": 0.4
+  },
   "costs": {
     "_comment": "Per-side transaction costs by market. A single global rate cannot describe this portfolio: Alpaca is commission-free on US equities while an NSE round trip runs several percent. Set verified=true once you have confirmed a schedule with your broker.",
     "us_equity": {

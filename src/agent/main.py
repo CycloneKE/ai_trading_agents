@@ -575,6 +575,21 @@ class TradingAgent:
         self._last_history_attempt = 0.0
         self._warm_start_history()
 
+        # Strategy settings re-tune from results, weekly or sooner for a
+        # strategy that is losing, adopting only changes that beat the
+        # current settings on held-out history (strategy_tuner.py). Runs in
+        # a background thread; saved settings are applied here at startup.
+        try:
+            from src.agent.strategy_tuner import StrategyTuner, market_history
+            from src.utils.paths import DATA_DIR
+            self.strategy_tuner = StrategyTuner(
+                self.components.get('strategy_manager'), self.config,
+                history_source=lambda: market_history(self.config),
+                params_path=DATA_DIR / 'strategy_params.json')
+        except Exception as e:
+            logger.error(f"Strategy tuner init failed: {e}")
+            self.strategy_tuner = None
+
         # LLM weight allocator: proposes ensemble weight tilts from realized
         # attribution on a slow cadence; hard guardrails clamp every proposal
         # and it is a no-op without an LLM API key.
@@ -731,6 +746,11 @@ class TradingAgent:
                         self.llm_allocator.maybe_rebalance()
                     except Exception as e:
                         logger.error(f"LLM allocator error: {e}")
+                if getattr(self, 'strategy_tuner', None) and not self.trading_halted:
+                    try:
+                        self.strategy_tuner.maybe_tune()
+                    except Exception as e:
+                        logger.error(f"Strategy tuner error: {e}")
 
                 # Pull fill results for submitted orders into the journal so
                 # attribution and duplicate-close checks see current state.

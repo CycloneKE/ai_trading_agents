@@ -31,9 +31,9 @@ Row = Tuple[date, float, float, float]  # (date, high, low, close)
 History = Dict[str, Dict[str, List[float]]]  # symbol -> {'close','high','low'}
 
 
-def _yfinance_daily(symbol: str) -> List[Row]:
+def _yfinance_daily(symbol: str, period: str = '6mo') -> List[Row]:
     import yfinance as yf
-    df = yf.Ticker(symbol).history(period='6mo', interval='1d', auto_adjust=True)
+    df = yf.Ticker(symbol).history(period=period, interval='1d', auto_adjust=True)
     if df is None or df.empty:
         return []
     return [(idx.date(), float(r['High']), float(r['Low']), float(r['Close']))
