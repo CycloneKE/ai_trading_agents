@@ -61,7 +61,9 @@ DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "nse_histori
 # not a market price. The API, the warm-start and the dashboard all judge
 # NSE prices by this one list. nse_website stays although that scraper is
 # gone: bars it wrote before the NSE site was rebuilt are still real.
-REAL_NSE_SOURCES = frozenset({"nse_ticker", "nse_website", "afx_kwayisi", "afx_history"})
+# nse_pricelist is the checked OCR backfill (src/connectors/nse_pricelist.py).
+REAL_NSE_SOURCES = frozenset({"nse_ticker", "nse_pricelist", "nse_website",
+                              "afx_kwayisi", "afx_history"})
 
 
 @dataclass
