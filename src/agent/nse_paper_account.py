@@ -13,51 +13,45 @@ every result:
 - about 3.4% of round-trip cost (see cost_model.py) was never charged;
 - there was no cash, so it could buy without limit.
 
-This account holds KES `nse_paper_trading.starting_capital_kes` and follows
-these rules: sell only what is held and all of it, never short, never spend
-more cash than there is, and add to a holding only once it has proved
-profitable (`add_to_winners`, below). Each fill pays slippage (in the price)
-and commission (in `fees_kes`). Its state is derived from the filled tickets
-in the 'trading' book since the account opened, so there is one record of
-what happened and nothing to keep in step with it.
+This account holds KES `nse_paper_trading.starting_capital_kes`. It never
+shorts and never spends more cash than it has; it adds to a holding only
+once the holding has proved profitable, and a weaker sell signal trims a
+position rather than closing it (both in position_rules.py, shared with the
+US book). A stop-loss below the cost basis and a trailing stop below the
+high since entry close a position whatever the signals say (`stop_loss`).
+Each fill pays slippage (in the price) and commission (in `fees_kes`).
 
-Adding to winners. The backtest never added to a position, and adding to one
-every cycle a signal persisted was the bug above. But adding to a position
-that is working is a sound, long-established practice, as long as the add
-is earned and bounded. A buy signal on a holding becomes an add only when:
-
-- selling the whole position now would be profitable after the sale's own
-  costs, so the trade has already paid for its round trip;
-- the price is at least `min_gain_pct` above the last entry, so each add
-  needs the move to continue and adds cannot bunch at one price;
-- fewer than `max_adds` adds have been made to this position;
-- the position stays within `max_position_pct` of the account at cost.
-
-An add is `add_size_pct` of a new position's size. A sell still closes the
-whole position, adds included.
+Its state is replayed from the filled tickets in the 'trading' book since
+the account opened, so there is one record of what happened and nothing to
+keep in step with it.
 """
 import logging
+from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
 from src.agent.cost_model import market_costs
+from src.agent.position_rules import (
+    ADD_DEFAULTS, EXIT_DEFAULTS, HOLDING_RULE_REASONS, PositionState,
+    plan_add, plan_exit, replay, rule, stop_triggered)
 
 logger = logging.getLogger(__name__)
 
 BOOK = 'trading'
 RESOLVED_BY = 'auto_paper_trader'
 
-# Reasons a trade is refused by the holding rules alone, whatever its size:
-# checked before the LLM, so a trade the book cannot take costs no call.
-HOLDING_RULE_REASONS = frozenset({'already_held', 'no_position', 'add_not_profitable',
-                                  'max_adds', 'position_cap'})
+__all__ = ['NsePaperAccount', 'order_size', 'execute_stop', 'HOLDING_RULE_REASONS', 'BOOK']
 
-ADD_DEFAULTS = {'enabled': True, 'min_gain_pct': 0.05, 'max_adds': 2,
-                'add_size_pct': 0.5, 'max_position_pct': 0.4}
+# NSE stops sit wider than the US ones. A round trip costs about 3.4%, and
+# a daily-bar position stopped out by an ordinary day's noise pays that for
+# nothing. Where the stock's ATR is known the stop scales with it, but never
+# tighter than these.
+STOP_DEFAULTS = {'enabled': True, 'stop_loss_pct': 0.08, 'trailing_stop_pct': 0.10}
 
 
 class NsePaperAccount:
     def __init__(self, queue, config: Dict[str, Any]):
         self.queue = queue
+        self.config = config
         cfg = config.get('nse_paper_trading') or {}
         self.starting_capital = float(cfg.get('starting_capital_kes') or 0.0)
         costs = market_costs('nse', config)
@@ -65,8 +59,9 @@ class NsePaperAccount:
         self.min_commission = float(costs.get('min_commission') or 0.0)
         self.slippage_pct = float(costs.get('slippage_pct') or 0.0)
         self.costs_verified = bool(costs.get('verified'))
-        add = {k: v for k, v in (cfg.get('add_to_winners') or {}).items() if not k.startswith('_')}
-        self.add_rule = {**ADD_DEFAULTS, **add}
+        self.add_rule = rule(ADD_DEFAULTS, cfg.get('add_to_winners'))
+        self.exit_rule = rule(EXIT_DEFAULTS, cfg.get('exits'))
+        self.stop_rule = rule(STOP_DEFAULTS, cfg.get('stop_loss'))
         self.started_at = queue.paper_account_started_at() if self.enabled else None
 
     @property
@@ -88,63 +83,71 @@ class NsePaperAccount:
     def _fills(self):
         return self.queue.fills(book=BOOK, since=self.started_at)
 
+    def states(self) -> Dict[str, PositionState]:
+        return replay({'symbol': f['symbol'], 'side': f['side'], 'quantity': f['quantity'],
+                       'price': f['price'], 'fees': f['fees_kes'], 'time': f['fill_at']}
+                      for f in self._fills())
+
+    def _ledger(self) -> Dict[str, Any]:
+        """Cash, fees paid, realised P&L and positions, from the fills."""
+        cash, fees = self.starting_capital, 0.0
+        for f in self._fills():
+            notional = f['quantity'] * f['price']
+            fees += f['fees_kes']
+            cash += -(notional + f['fees_kes']) if f['side'] == 'buy' else notional - f['fees_kes']
+        states = self.states()
+        positions = {
+            s: {'quantity': int(round(p.quantity)), 'cost_kes': round(p.cost, 2),
+                'avg_cost_kes': round(p.cost / p.quantity, 4) if p.held else 0.0,
+                'entries': p.entries, 'last_entry_kes': p.last_entry_price}
+            for s, p in states.items()}
+        return {'cash': round(cash, 2), 'fees': round(fees, 2), 'states': states,
+                'realised': round(sum(p.realised for p in states.values()), 2),
+                'positions': positions}
+
     def positions(self) -> Dict[str, Dict[str, Any]]:
-        """Held symbols: quantity and average cost per share including fees."""
+        """Held symbols: quantity and cost basis including fees."""
         return {s: p for s, p in self._ledger()['positions'].items() if p['quantity'] > 0}
 
     def cash(self) -> float:
         return self._ledger()['cash']
 
-    def _ledger(self) -> Dict[str, Any]:
-        """Replay the account's fills: cash, holdings at cost, realised P&L."""
-        cash, realised, fees = self.starting_capital, 0.0, 0.0
-        book: Dict[str, Dict[str, float]] = {}
-        for f in self._fills():
-            p = book.setdefault(f['symbol'], {'quantity': 0, 'cost': 0.0, 'entries': 0,
-                                              'last_entry': 0.0})
-            notional = f['quantity'] * f['price']
-            fees += f['fees_kes']
-            if f['side'] == 'buy':
-                cash -= notional + f['fees_kes']
-                if p['quantity'] <= 0:
-                    p['entries'] = 0  # a new position, not an add to a closed one
-                p['quantity'] += f['quantity']
-                p['cost'] += notional + f['fees_kes']
-                p['entries'] += 1
-                p['last_entry'] = f['price']
-            else:
-                cash += notional - f['fees_kes']
-                qty = min(f['quantity'], p['quantity'])
-                basis = p['cost'] * qty / p['quantity'] if p['quantity'] > 0 else 0.0
-                realised += notional - f['fees_kes'] - basis
-                p['quantity'] -= f['quantity']
-                p['cost'] -= basis
-        positions = {
-            s: {'quantity': p['quantity'], 'cost_kes': round(p['cost'], 2),
-                'avg_cost_kes': round(p['cost'] / p['quantity'], 4) if p['quantity'] > 0 else 0.0,
-                'entries': p['entries'], 'last_entry_kes': p['last_entry']}
-            for s, p in book.items()}
-        return {'cash': round(cash, 2), 'realised': round(realised, 2),
-                'fees': round(fees, 2), 'positions': positions}
+    @staticmethod
+    def _account_at_cost(ledger: Dict[str, Any]) -> float:
+        return ledger['cash'] + sum(p['cost_kes'] for p in ledger['positions'].values()
+                                    if p['quantity'] > 0)
 
     # ------------------------------------------------------------- rules
 
-    def plan(self, symbol: str, side: str, price: float,
-             target_notional: float) -> Tuple[int, Optional[str]]:
+    def plan(self, symbol: str, side: str, price: float, target_notional: float,
+             confidence: float = 1.0) -> Tuple[int, Optional[str]]:
         """Quantity to trade under the account's rules, or 0 and why not.
 
         Reasons match the US book's (see TradingAgent._position_gate) so the
         dashboard reads them the same way.
         """
         ledger = self._ledger()
-        pos = ledger['positions'].get(symbol.upper()) or {}
-        held = pos.get('quantity', 0)
+        state = ledger['states'].get(symbol.upper()) or PositionState()
+        account = self._account_at_cost(ledger)
         if side == 'sell':
-            return (held, None) if held > 0 else (0, 'no_position')
-        cash = ledger['cash']
-        if held <= 0:
-            return self._buyable(price, float(target_notional), cash, target_notional)
-        return self._plan_add(pos, price, float(target_notional), ledger)
+            qty, reason = plan_exit(state, confidence, price, account,
+                                    datetime.utcnow().date().isoformat(), self.exit_rule)
+            if reason:
+                return 0, reason
+            held = int(round(state.quantity))
+            shares = int(qty) if int(qty) >= 1 else held  # a trim under one share closes it
+            return min(shares, held), None
+        if not state.held:
+            return self._buyable(price, float(target_notional), ledger['cash'], target_notional)
+        value, reason = plan_add(state, price, self.slippage_pct + self.commission_pct,
+                                 account, float(target_notional), self.add_rule)
+        if reason:
+            return 0, reason
+        qty, reason = self._buyable(price, value, ledger['cash'], value)
+        wanted = float(target_notional) * self.add_rule['add_size_pct']
+        if reason == 'min_notional' and value < wanted:
+            reason = 'position_cap'  # the cap, not the order, left too little room
+        return qty, reason
 
     def _buyable(self, price: float, budget: float, cash: float,
                  wanted: float) -> Tuple[int, Optional[str]]:
@@ -158,25 +161,38 @@ class NsePaperAccount:
             return 0, 'insufficient_cash' if cash < wanted else 'min_notional'
         return qty, None
 
-    def _plan_add(self, pos: Dict[str, Any], price: float, target_notional: float,
-                  ledger: Dict[str, Any]) -> Tuple[int, Optional[str]]:
-        """An add to a held position, if it has earned one (see module doc)."""
-        rule = self.add_rule
-        if not rule['enabled']:
-            return 0, 'already_held'
-        if pos['entries'] - 1 >= int(rule['max_adds']):
-            return 0, 'max_adds'
-        exit_px = self.fill_price('sell', price)
-        exit_value = pos['quantity'] * exit_px - self.fees(pos['quantity'] * exit_px)
-        if exit_value <= pos['cost_kes'] or price < pos['last_entry_kes'] * (1 + rule['min_gain_pct']):
-            return 0, 'add_not_profitable'
-        at_cost = ledger['cash'] + sum(p['cost_kes'] for p in ledger['positions'].values()
-                                       if p['quantity'] > 0)
-        room = rule['max_position_pct'] * at_cost - pos['cost_kes']
-        budget = min(target_notional * rule['add_size_pct'], room)
-        if budget < self.fill_price('buy', price) * (1 + self.commission_pct):
-            return 0, 'position_cap' if room < target_notional * rule['add_size_pct'] else 'min_notional'
-        return self._buyable(price, budget, ledger['cash'], budget)
+    def stop_distances(self, atr_pct: Optional[float]) -> Tuple[float, float]:
+        """(stop_loss_pct, trailing_stop_pct): ATR-scaled, never under the floors."""
+        stop, trail = float(self.stop_rule['stop_loss_pct']), float(self.stop_rule['trailing_stop_pct'])
+        if atr_pct:
+            from src.agent.volatility import stop_distances
+            d = stop_distances(self.config, atr_pct)
+            stop, trail = max(stop, d['stop_loss_pct']), max(trail, d['trailing_stop_pct'])
+        return stop, trail
+
+    def stop_check(self, symbol: str, price: float,
+                   atr_pct: Optional[float] = None) -> Optional[Tuple[str, int, str]]:
+        """(reason, quantity, explanation) when a stop has been hit, else None.
+
+        The high since entry is kept in the database, so a restart does not
+        forget how far a position had run.
+        """
+        if not self.stop_rule.get('enabled'):
+            return None
+        state = self.states().get(symbol.upper())
+        if not state or not state.held:
+            return None
+        high = self.queue.paper_high(symbol.upper(), state.opened_at or '',
+                                     max(price, state.last_entry_price))
+        stop, trail = self.stop_distances(atr_pct)
+        avg = state.cost / state.quantity
+        reason = stop_triggered(price, avg, high, stop, trail)
+        if not reason:
+            return None
+        why = (f"stop-loss: {price:.2f} is {1 - price / avg:.1%} below the cost {avg:.2f}"
+               if reason == 'stop_loss' else
+               f"trailing stop: {price:.2f} is {1 - price / high:.1%} below the high {high:.2f}")
+        return reason, int(round(state.quantity)), why
 
     def fill(self, ticket_id: int, side: str, price: float, quantity: int, order_journal=None):
         """Book an auto paper fill: slippage in the price, commission as fees."""
@@ -207,7 +223,7 @@ class NsePaperAccount:
                              'avg_cost_kes': p['avg_cost_kes'], 'last_price_kes': last,
                              'market_value_kes': round(mv, 2),
                              'unrealised_pnl_kes': round(mv - p['cost_kes'], 2),
-                             'priced': bool(last)})
+                             'entries': p['entries'], 'priced': bool(last)})
         equity = ledger['cash'] + value
         return {
             'enabled': self.enabled, 'started_at': self.started_at,
@@ -221,20 +237,37 @@ class NsePaperAccount:
 
 
 def order_size(symbol: str, action: str, price: float, notional: float,
-               queue, paper: Optional[NsePaperAccount]) -> Tuple[int, Optional[str]]:
+               queue, paper: Optional[NsePaperAccount],
+               confidence: float = 1.0) -> Tuple[int, Optional[str]]:
     """Quantity for an NSE ticket, or 0 and a skip reason.
 
     With the paper account on, its rules and cash decide. Without it (the
-    manual AIB-AXYS workflow) the same holding rules apply to the recorded
-    trading-book fills, since the NSE does not let a retail account short
-    and the backtest never added to a position; cash is then the operator's.
+    manual AIB-AXYS workflow) the recorded trading-book fills decide: no
+    shorting, a sell closes the position, and no adding, since there is no
+    cost record there to prove a holding profitable; cash is the operator's.
     """
     if paper is not None and paper.enabled:
-        return paper.plan(symbol, action, price, notional)
+        return paper.plan(symbol, action, price, notional, confidence)
     held = (queue.positions(book=BOOK).get(symbol.upper()) or {}).get('quantity', 0)
     if action == 'sell':
         return (held, None) if held > 0 else (0, 'no_position')
     if held > 0:
-        return 0, 'already_held'  # no cost record here to prove a holding profitable
+        return 0, 'already_held'
     qty = int(notional / price) if price > 0 else 0
     return (qty, None) if qty >= 1 else (0, 'min_notional')
+
+
+def execute_stop(paper: NsePaperAccount, queue, symbol: str, price: float, reason: str,
+                 quantity: int, why: str, order_journal=None) -> Optional[Dict[str, Any]]:
+    """Sell a stopped-out paper position in full. Returns the fill, or None.
+
+    Journaled as `reason` ('stop_loss' / 'trailing_stop') with that as its
+    credit, so attribution closes the position against the strategies that
+    bought it rather than opening a book for the stop.
+    """
+    ticket = queue.create_ticket(symbol, 'sell', quantity, suggested_limit_price=round(price, 2),
+                                 rationale=why, strategy=reason, strategy_weights={reason: 1.0})
+    if not ticket:
+        return None
+    ok, fill = paper.fill(ticket, 'sell', price, quantity, order_journal=order_journal)
+    return fill if ok else None

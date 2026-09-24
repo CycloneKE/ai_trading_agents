@@ -53,6 +53,7 @@ class FillingBroker:
         return [o for o in self.pending if symbol is None or o.symbol == symbol]
 
     def place_order(self, order):
+        order.fill_price = self.price
         self.orders.append(order)
         qty = float(order.quantity)
         if order.side == 'buy':
@@ -89,13 +90,21 @@ def agent_for(tmp_path, monkeypatch):
         )
         agent._position_gate = types.MethodType(TradingAgent._position_gate, agent)
 
-        def cycle(action, symbol='SPY'):
+        def cycle(action, symbol='SPY', confidence=0.9, per_strategy=None):
             clock['t'] += 60           # a new loop cycle: a new idempotency key
             agent._cycle_decisions = {symbol: {'symbol': symbol}}
+            placed = len(broker.orders)
             TradingAgent._execute_trades(agent, {symbol: {
-                'action': action, 'confidence': 0.9, 'position_size': 0.05,
-                'price': broker.price, 'strategy': 'ensemble'}}, {})
+                'action': action, 'confidence': confidence, 'position_size': 0.05,
+                'price': broker.price, 'strategy': 'ensemble',
+                'per_strategy': per_strategy or {}}}, {})
+            # The live loop syncs fills into the journal before deciding
+            # (order_journal.sync_fills); do the same for this broker.
+            for o in broker.orders[placed:]:
+                journal.mark_final(o.client_order_id, 'filled', filled_quantity=float(o.quantity),
+                                   filled_avg_price=o.fill_price)
             return agent._cycle_decisions[symbol]
+        cycle.journal = journal
         return cycle
     return build
 
@@ -106,7 +115,8 @@ def test_a_buy_signal_held_for_five_cycles_buys_once(agent_for):
     reasons = [cycle('buy').get('skip_reason') for _ in range(5)]
     buys = [o for o in broker.orders if o.side == 'buy']
     assert len(buys) == 1, f'expected exactly one buy, got {len(buys)}'
-    assert reasons[1:] == ['already_held'] * 4
+    # A US holding may be added to, but only once it has proved profitable.
+    assert reasons[1:] == ['add_not_profitable'] * 4
 
 
 def test_a_sell_signal_exits_the_whole_position_once(agent_for):
@@ -149,3 +159,52 @@ def test_buy_then_exit_then_buy_again(agent_for):
     cycle = agent_for(broker)
     cycle('buy'); cycle('buy'); cycle('sell'); cycle('sell'); cycle('buy')
     assert [o.side for o in broker.orders] == ['buy', 'sell', 'buy']
+
+
+# ------------------------------------------------ adds, trims and credit
+
+def test_a_profitable_holding_is_added_to_once_it_has_run(agent_for):
+    broker = FillingBroker(price=500.0)
+    cycle = agent_for(broker)
+    cycle('buy')
+    first = float(broker.orders[0].quantity)
+    broker.price = 520.0                     # +4%: not enough yet
+    assert cycle('buy').get('skip_reason') == 'add_not_profitable'
+    broker.price = 530.0                     # +6% above the entry
+    assert cycle('buy').get('executed') is True
+    add = float(broker.orders[1].quantity)
+    assert broker.orders[1].side == 'buy' and add < first
+    # The next add needs another 5% above the add's own price.
+    broker.price = 540.0
+    assert cycle('buy').get('skip_reason') == 'add_not_profitable'
+
+
+def test_a_weak_sell_trims_once_a_day_and_a_strong_one_closes(agent_for):
+    broker = FillingBroker(price=500.0, held=8.0)
+    cycle = agent_for(broker)
+    cycle('sell', confidence=0.6)
+    assert [o.side for o in broker.orders] == ['sell']
+    assert float(broker.orders[0].quantity) == 4.0 and broker.held['SPY'] == 4.0
+    assert cycle('sell', confidence=0.6).get('skip_reason') == 'trimmed_today'
+    cycle('sell', confidence=0.9)
+    assert broker.held['SPY'] == 0 and float(broker.orders[1].quantity) == 4.0
+
+
+def test_crypto_holdings_are_not_added_to(agent_for):
+    broker = FillingBroker(price=60000.0)
+    broker.held['BTC-USD'] = 0.5
+    cycle = agent_for(broker)
+    broker.price = 70000.0
+    assert cycle('buy', symbol='BTC-USD').get('skip_reason') == 'already_held'
+    assert broker.orders == []
+
+
+def test_a_blended_order_credits_the_strategies_that_voted_for_it(agent_for):
+    import json
+    broker = FillingBroker(price=500.0)
+    cycle = agent_for(broker)
+    cycle('buy', per_strategy={'momentum': {'action': 'buy', 'confidence': 0.6},
+                               'rsi_strategy': {'action': 'buy', 'confidence': 0.2},
+                               'mean_reversion': {'action': 'sell', 'confidence': 0.7}})
+    (row,) = cycle.journal.filled_orders()
+    assert json.loads(row['strategy_weights']) == {'momentum': 0.75, 'rsi_strategy': 0.25}

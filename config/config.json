@@ -206,6 +206,22 @@
     "commission": 0.001,
     "slippage": 0.0005,
     "risk_per_trade": 0.005,
+    "add_to_winners": {
+      "_comment": "US/crypto book (src/agent/position_rules.py). A buy signal on a holding in one of `markets` adds to it only when selling it all now would already be profitable after costs, the price is at least min_gain_pct above the last entry, fewer than max_adds adds have been made, and the position stays within max_position_pct of equity. Entries are capped at risk_limits.max_position_size, so this cap sits a little above it. Add \"crypto\" to markets to let crypto add too.",
+      "enabled": true,
+      "markets": ["us_equity"],
+      "min_gain_pct": 0.05,
+      "max_adds": 2,
+      "add_size_pct": 0.5,
+      "max_position_pct": 0.08
+    },
+    "exits": {
+      "_comment": "All markets in the US/crypto book. A sell signal at or above full_exit_confidence closes the position; a weaker one sells trim_fraction of it, at most once a day, unless what would remain is under min_remaining_pct of equity. Stops always close in full.",
+      "partial_exits": true,
+      "full_exit_confidence": 0.75,
+      "trim_fraction": 0.5,
+      "min_remaining_pct": 0.01
+    },
     "_risk_per_trade_note": "THE authority for position size. Fraction of equity lost if a position's stop is hit. Notional = equity * risk_per_trade * cash_policy multiplier / (risk_limits.stop_loss_atr_mult * ATR%), then capped at risk_limits.max_position_size. At 0.5% risk with 2.5x ATR stops the 5% cap binds below about 4% ATR, so quiet instruments sit at the cap and volatile ones are sized down. Both the live loop and the backtest use this same formula (src/agent/position_sizing.volatility_scaled_value)."
   },
   "trading_loop_interval": 60,
@@ -298,6 +314,19 @@
       "max_adds": 2,
       "add_size_pct": 0.5,
       "max_position_pct": 0.4
+    },
+    "exits": {
+      "_comment": "A sell signal at or above full_exit_confidence closes the position; a weaker one sells trim_fraction of it, at most once a day, unless what would remain is under min_remaining_pct of the account, which closes it instead. partial_exits false always closes.",
+      "partial_exits": true,
+      "full_exit_confidence": 0.75,
+      "trim_fraction": 0.5,
+      "min_remaining_pct": 0.02
+    },
+    "stop_loss": {
+      "_comment": "Checked every NSE evaluation before any signal: a position is sold in full when the price is stop_loss_pct below its cost (fees included) or trailing_stop_pct below the highest price since it opened. Where the stock's ATR is known the stops scale to risk_limits' ATR multiples, but never tighter than these: a round trip costs about 3.4%, and a stop tripped by an ordinary day's noise pays that for nothing.",
+      "enabled": true,
+      "stop_loss_pct": 0.08,
+      "trailing_stop_pct": 0.10
     }
   },
   "costs": {

@@ -29,6 +29,7 @@ const REASON_LABEL = {
   add_not_profitable: 'Holding not yet profitable enough to add to',
   max_adds: 'Already added to this holding the maximum times',
   position_cap: 'Holding is at its size limit',
+  trimmed_today: 'Already trimmed this position today',
 };
 
 const reasonColor = (r) => {

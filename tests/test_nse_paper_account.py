@@ -216,11 +216,16 @@ def test_an_older_database_gains_the_fees_column(tmp_path):
 # ---------------------------------------------------- the real decision loop
 
 class _Strategies:
+    """Each step: an action, or (action, confidence), or (action, confidence, votes)."""
+
     def __init__(self, actions):
         self.actions = list(actions)
 
     def generate_signals(self, data):
-        return {'action': self.actions.pop(0), 'confidence': 0.8, 'position_size': 1.0}
+        step = self.actions.pop(0)
+        action, conf, votes = (step, 0.8, None) if isinstance(step, str) else (tuple(step) + (None,))[:3]
+        return {'action': action, 'confidence': conf, 'position_size': 1.0,
+                'per_strategy': votes or {}}
 
 
 class _LLM:
@@ -240,7 +245,7 @@ class _Recorder:
         self.records.append(dec)
 
 
-def _agent(queue, actions, prices, capital=200000, llm=None):
+def _agent(queue, actions, prices, capital=200000, llm=None, journal=None):
     prices = list(prices)
     nse = SimpleNamespace(is_market_open=lambda: True,
                           get_quote=lambda s: {'symbol': s, 'price_kes': prices.pop(0),
@@ -250,7 +255,7 @@ def _agent(queue, actions, prices, capital=200000, llm=None):
         components={'nse_order_queue': queue, 'nse_paper_account': NsePaperAccount(queue, config),
                     'data_manager': SimpleNamespace(connectors={'nse': nse}),
                     'strategy_manager': _Strategies(actions), 'llm_orchestrator': llm},
-        config=config, decision_journal=_Recorder(), order_journal=None,
+        config=config, decision_journal=_Recorder(), order_journal=journal,
         _nse_last_price={}, trading_halted=False, _last_nse_eval=0.0)
 
 
@@ -310,3 +315,77 @@ def test_without_a_paper_account_tickets_wait_for_the_operator(queue):
     assert queue.fills() == []
     (ticket,) = queue.get_pending()
     assert (ticket['symbol'], ticket['side']) == ('SCOM', 'buy')
+
+
+# ----------------------------------------------------------------- stops
+
+def test_a_position_that_falls_below_its_stop_loss_is_sold(queue):
+    paper = NsePaperAccount(queue, _config())
+    qty, _ = _buy(paper, queue)          # cost about 36.93 a share with fees
+    assert paper.stop_check('SCOM', 34.2) is None
+    reason, n, why = paper.stop_check('SCOM', 33.9)
+    assert (reason, n) == ('stop_loss', qty) and 'below the cost' in why
+
+
+def test_a_trailing_stop_follows_the_high(queue):
+    paper = NsePaperAccount(queue, _config())
+    _buy(paper, queue)
+    assert paper.stop_check('SCOM', 42.0) is None     # sets the high
+    assert paper.stop_check('SCOM', 38.0) is None     # 9.5% off the high
+    assert paper.stop_check('SCOM', 37.7)[0] == 'trailing_stop'
+
+
+def test_the_high_survives_a_restart(queue):
+    _buy(NsePaperAccount(queue, _config()), queue)
+    NsePaperAccount(queue, _config()).stop_check('SCOM', 42.0)
+    assert NsePaperAccount(queue, _config()).stop_check('SCOM', 37.7)[0] == 'trailing_stop'
+
+
+def test_nse_stops_scale_with_volatility_but_never_tighten_below_the_floor(queue):
+    config = _config()
+    config['risk_limits'] = {'stop_loss_atr_mult': 2.5, 'trailing_stop_atr_mult': 3.0}
+    paper = NsePaperAccount(queue, config)
+    assert paper.stop_distances(None) == (0.08, 0.10)
+    assert paper.stop_distances(0.01) == (0.08, 0.10)          # 2.5% / 3% ATR stops: too tight
+    assert paper.stop_distances(0.05) == pytest.approx((0.125, 0.15))
+
+
+def test_the_loop_sells_a_stopped_position_without_asking_the_llm(queue):
+    llm = _LLM()
+    agent = _agent(queue, ['buy', 'hold'], [36.2, 33.5], llm=llm)
+    _run(agent, 2)
+    buy, sell = queue.fills(book='trading')
+    assert sell['side'] == 'sell' and sell['quantity'] == buy['quantity']
+    assert llm.calls == 1   # the entry only
+    stop = agent.decision_journal.records[-1]
+    assert stop['executed'] is True and 'stop_loss' in stop['per_strategy']
+
+
+# ------------------------------------------------------------ partial exits
+
+def test_the_loop_trims_on_a_weak_sell_once_a_day_and_closes_on_a_strong_one(queue):
+    agent = _agent(queue, ['buy', ('sell', 0.6), ('sell', 0.6), ('sell', 0.9)],
+                   [36.2, 36.4, 36.5, 36.6])
+    _run(agent, 4)
+    buy, trim, close = queue.fills(book='trading')
+    assert trim['side'] == 'sell' and trim['quantity'] == buy['quantity'] // 2
+    assert close['quantity'] == buy['quantity'] - trim['quantity']
+    assert agent.decision_journal.records[2]['skip_reason'] == 'trimmed_today'
+    assert agent.components['nse_paper_account'].positions() == {}
+
+
+# ------------------------------------------------ credit for the strategies
+
+def test_nse_trades_credit_the_strategies_that_voted_for_them(queue, tmp_path):
+    from src.agent.order_journal import OrderJournal
+    from src.agent.strategy_attribution import compute_attribution
+    journal = OrderJournal(db_path=str(tmp_path / 'orders.db'))
+    votes = {'momentum': {'action': 'buy', 'confidence': 0.9},
+             'rsi_strategy': {'action': 'buy', 'confidence': 0.3}}
+    agent = _agent(queue, [('buy', 0.8, votes), 'hold'], [36.2, 33.5], journal=journal)
+    _run(agent, 2)   # a buy, then a stop-loss exit
+    out = compute_attribution(journal.filled_orders())
+    assert set(out) == {'momentum', 'rsi_strategy'}      # nothing for 'stop_loss' or 'nse_manual'
+    assert out['momentum']['closed_trades'] == 1 and out['momentum']['realized_pnl'] < 0
+    assert out['momentum']['realized_pnl'] == pytest.approx(3 * out['rsi_strategy']['realized_pnl'], rel=0.01)
+    assert out['momentum']['trade_returns'][0] < -0.05

@@ -37,9 +37,10 @@ SKIP_REASONS = {
     'order_pending',      # an earlier order for the symbol is still working
     'position_unknown',   # holdings could not be read; skipped to be safe
     'insufficient_cash',  # NSE paper account lacks the cash for one share
-    'add_not_profitable', # NSE holding not yet proved profitable enough to add to
-    'max_adds',           # NSE holding already added to the maximum times
-    'position_cap',       # NSE holding at its maximum share of the account
+    'add_not_profitable', # holding not yet proved profitable enough to add to
+    'max_adds',           # holding already added to the maximum times
+    'position_cap',       # holding at its maximum share of the account
+    'trimmed_today',      # weak sell signal, position already trimmed today
 }
 
 _SCHEMA = """

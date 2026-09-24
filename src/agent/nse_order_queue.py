@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS nse_order_tickets (
     operator_notes        TEXT,
     resolved_by           TEXT,
     book                  TEXT DEFAULT 'trading', -- 'trading' | 'long_term'
-    fees_kes              REAL DEFAULT 0          -- commission charged on the fill
+    fees_kes              REAL DEFAULT 0,         -- commission charged on the fill
+    strategy              TEXT,                   -- what decided it: 'ensemble', 'stop_loss', ...
+    strategy_weights      TEXT                    -- JSON {strategy: share of the credit}
 );
 CREATE INDEX IF NOT EXISTS idx_nse_tickets_status ON nse_order_tickets(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_nse_tickets_symbol ON nse_order_tickets(symbol);
@@ -50,6 +52,13 @@ CREATE INDEX IF NOT EXISTS idx_nse_tickets_symbol ON nse_order_tickets(symbol);
 CREATE TABLE IF NOT EXISTS nse_paper_account (
     id          INTEGER PRIMARY KEY CHECK (id = 1),
     started_at  TEXT NOT NULL
+);
+
+-- Highest price seen since each paper position opened, for trailing stops.
+CREATE TABLE IF NOT EXISTS nse_paper_highs (
+    symbol      TEXT PRIMARY KEY,
+    opened_at   TEXT NOT NULL,
+    high_kes    REAL NOT NULL
 );
 """
 
@@ -75,15 +84,18 @@ class NseOrderQueue:
             self._conn.execute(
                 "ALTER TABLE nse_order_tickets ADD COLUMN book TEXT DEFAULT 'trading'")
             self._conn.commit()
-        if 'fees_kes' not in cols:
-            self._conn.execute(
-                "ALTER TABLE nse_order_tickets ADD COLUMN fees_kes REAL DEFAULT 0")
-            self._conn.commit()
+        for col, ddl in (('fees_kes', 'REAL DEFAULT 0'), ('strategy', 'TEXT'),
+                         ('strategy_weights', 'TEXT')):
+            if col not in cols:
+                self._conn.execute(f"ALTER TABLE nse_order_tickets ADD COLUMN {col} {ddl}")
+                self._conn.commit()
 
     def create_ticket(self, symbol: str, side: str, quantity: int,
                       suggested_limit_price: Optional[float] = None,
                       rationale: str = '', ensemble_confidence: Optional[float] = None,
-                      llm_reasoning: str = '', book: str = 'trading') -> Optional[int]:
+                      llm_reasoning: str = '', book: str = 'trading',
+                      strategy: Optional[str] = None,
+                      strategy_weights: Optional[Dict[str, float]] = None) -> Optional[int]:
         """Create a pending order ticket. Returns the ticket id, or None if an
         identical pending ticket (same symbol+side+book) already exists — the
         agent re-proposes the same trade every scrape/cycle while the signal
@@ -103,9 +115,11 @@ class NseOrderQueue:
             cur = self._conn.execute(
                 "INSERT INTO nse_order_tickets (created_at, symbol, side, quantity,"
                 " suggested_limit_price, rationale, ensemble_confidence, llm_reasoning,"
-                " status, book) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                " status, book, strategy, strategy_weights)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
                 (datetime.utcnow().isoformat(), symbol, side, int(quantity),
-                 suggested_limit_price, rationale, ensemble_confidence, llm_reasoning, book))
+                 suggested_limit_price, rationale, ensemble_confidence, llm_reasoning, book,
+                 strategy, json.dumps(strategy_weights) if strategy_weights else None))
             self._conn.commit()
             return cur.lastrowid
 
@@ -172,7 +186,9 @@ class NseOrderQueue:
                 coid = f"nse-{t['symbol']}-{t['side']}-{ticket_id}"
                 owns = order_journal.record_intent(
                     coid, t['symbol'], t['side'], int(fill_quantity),
-                    order_type='limit', strategy='nse_manual',
+                    order_type='limit', strategy=t.get('strategy') or 'nse_manual',
+                    strategy_weights=(json.loads(t['strategy_weights'])
+                                      if t.get('strategy_weights') else None),
                     limit_price=float(fill_price))
                 if owns:
                     order_journal.mark_final(coid, 'filled',
@@ -249,6 +265,22 @@ class NseOrderQueue:
                 "INSERT INTO nse_paper_account (id, started_at) VALUES (1, ?)", (started,))
             self._conn.commit()
             return started
+
+    def paper_high(self, symbol: str, opened_at: str, price: float) -> float:
+        """The highest price since the position opened at `opened_at`,
+        including `price`. A different opened_at is a new position, so the
+        mark starts again from `price`."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT opened_at, high_kes FROM nse_paper_highs WHERE symbol = ?",
+                (symbol,)).fetchone()
+            high = max(row[1], price) if row and row[0] == opened_at else price
+            self._conn.execute(
+                "INSERT INTO nse_paper_highs (symbol, opened_at, high_kes) VALUES (?, ?, ?)"
+                " ON CONFLICT(symbol) DO UPDATE SET opened_at = excluded.opened_at,"
+                " high_kes = excluded.high_kes", (symbol, opened_at, float(high)))
+            self._conn.commit()
+            return high
 
     def positions(self, book: Optional[str] = None,
                   since: Optional[str] = None) -> Dict[str, Dict[str, Any]]:

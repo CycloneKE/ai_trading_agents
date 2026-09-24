@@ -276,18 +276,22 @@ class StrategyManager:
             for name, stats in attribution.items():
                 if name not in self.strategy_performance:
                     continue  # e.g. manual/killswitch tags: not ensemble strategies
-                pnls = stats.get('trade_pnls') or []
+                # Per-trade returns, not P&L amounts: a strategy trades NSE
+                # stocks in KES and US stocks in USD, and a Sharpe ratio over
+                # raw amounts would let the KES trades swamp the USD ones.
+                # Older attribution without returns falls back to P&L.
+                series = stats.get('trade_returns') or stats.get('trade_pnls') or []
                 sharpe = 0.0
                 max_dd = 0.0
-                if len(pnls) >= 2:
-                    arr = np.array(pnls, dtype=float)
+                if len(series) >= 2:
+                    arr = np.array(series, dtype=float)
                     std = arr.std()
                     sharpe = float(arr.mean() / std * np.sqrt(len(arr))) if std > 0 else 0.0
                     curve = arr.cumsum()
                     peak = np.maximum.accumulate(curve)
                     max_dd = float((peak - curve).max())
                 self.strategy_performance[name].update({
-                    'returns': pnls[-100:],
+                    'returns': series[-100:],
                     'win_rate': stats.get('win_rate', 0.0),
                     'total_return': stats.get('realized_pnl', 0.0),
                     'sharpe_ratio': round(sharpe, 4),
