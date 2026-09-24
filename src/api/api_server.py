@@ -219,6 +219,20 @@ class TradingAPI:
             atr_lookup = (lambda s: tracker.atr_pct(s)) if tracker is not None else (lambda s: None)
         return paper.summary(prices, atr_lookup)
 
+    def _fx_snapshot(self, nse=None) -> Optional[Dict[str, Any]]:
+        """The KES/USD rate with its source and time, or None.
+
+        A rate problem must never blank the page that asked for it.
+        """
+        try:
+            if nse is not None and hasattr(nse, 'get_fx'):
+                return nse.get_fx()
+            from src.connectors.fx_rate import shared_fx
+            return shared_fx().snapshot()
+        except Exception as e:
+            logger.debug(f"KES/USD rate unavailable: {e}")
+            return None
+
     def _tracked_symbols(self) -> set:
         """Every symbol the agent trades, for validating per-symbol requests."""
         out = set()
@@ -545,15 +559,18 @@ class TradingAPI:
                                 'flag': '🇰🇪'
                             })
 
-                # Region allocation summary
+                # Region allocation summary, KES converted at the market rate
+                # (src/connectors/fx_rate.py; it was a fixed 130).
+                fx = self._fx_snapshot(nse_connector)
+                kes_per_usd = (fx or {}).get('kes_per_usd') or 130.0
                 region_summary = {'US': 0.0, 'Crypto': 0.0, 'Kenya/Africa': 0.0}
                 for pos in all_positions:
-                    # Convert KES to approximate USD for allocation pie chart (1 USD ~ 130 KES)
-                    val_usd = pos['market_value'] if pos['currency'] == 'USD' else pos['market_value'] / 130.0
+                    val_usd = pos['market_value'] if pos['currency'] == 'USD' else pos['market_value'] / kes_per_usd
                     reg = pos['region']
                     region_summary[reg] = region_summary.get(reg, 0.0) + val_usd
 
                 return jsonify({
+                    'fx': fx,
                     'account': {
                         'cash': round(cash_usd, 2),
                         'equity': round(equity_usd, 2),
@@ -1189,6 +1206,9 @@ class TradingAPI:
                         'status': nse.get_status(),
                         'scraper': scraper_status,
                         'kes_usd_rate': nse.get_kes_usd_rate(),
+                        # The rate's source and time, so the dashboard can say
+                        # whether it is a live market rate or a fallback.
+                        'fx': self._fx_snapshot(nse),
                         'market_open': nse.is_market_open(),
                         # The backend's own phase: closed / preopen / open.
                         # The dashboard used to recompute this from the

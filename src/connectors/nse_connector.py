@@ -83,8 +83,8 @@ NSE_SECTORS = {
     "Media":       ["NMG"],
 }
 
-# KES/USD fallback (updated periodically; 1 KES in USD)
-_DEFAULT_KES_USD = 1 / 130.0
+# KES/USD comes from src/connectors/fx_rate.py: the market rate, refreshed
+# every five minutes. It used to be this module's constant, 1/130.
 
 
 class NSEConnector:
@@ -96,17 +96,15 @@ class NSEConnector:
     the database is unavailable.
     """
 
-    def __init__(self, config: Dict[str, Any], database_manager=None):
+    def __init__(self, config: Dict[str, Any], database_manager=None, fx=None):
         self.config = config
         self.db = database_manager
+        self._fx = fx  # an FxRate; the process-wide one when None
 
         # In-memory latest-quote cache: symbol -> dict
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._cache_ts: Dict[str, float] = {}
         self._cache_ttl = config.get("cache_ttl", 1800)  # 30 min
-
-        # KES/USD
-        self._kes_usd_rate: float = _DEFAULT_KES_USD
 
         # Gazetted NSE closure dates (ISO 'YYYY-MM-DD'), config-overridable.
         # The default covers Kenya's fixed-date public holidays for the
@@ -130,7 +128,7 @@ class NSEConnector:
             "connector": "nse_kenya",
             "database": bool(self.db),
             "cached_symbols": len(self._cache),
-            "kes_usd_rate": self._kes_usd_rate,
+            "kes_usd_rate": self.get_kes_usd_rate(),
             "market_open": self.is_market_open(),
             "market_phase": self.market_phase(),
             "timestamp": datetime.now(EAT_OFFSET).isoformat(),
@@ -211,8 +209,19 @@ class NSEConnector:
             })
         return perf
 
+    def fx(self):
+        if self._fx is None:
+            from src.connectors.fx_rate import shared_fx
+            self._fx = shared_fx()
+        return self._fx
+
     def get_kes_usd_rate(self) -> float:
-        return self._kes_usd_rate
+        """US dollars per shilling, at the latest market rate."""
+        return self.fx().usd_per_kes()
+
+    def get_fx(self) -> Dict[str, Any]:
+        """The rate with its source and time, for the dashboard."""
+        return self.fx().snapshot()
 
     def refresh_cache(self):
         """Force-refresh the in-memory cache from DB/CSV."""
@@ -267,7 +276,7 @@ class NSEConnector:
 
     def _row_to_quote(self, row: Dict[str, Any]) -> Dict[str, Any]:
         price_kes = float(row.get('close_price') or row.get('close', 0))
-        kes_usd = self._kes_usd_rate
+        kes_usd = self.get_kes_usd_rate()
         return {
             "symbol": row.get('symbol', ''),
             "market": "NSE",
@@ -304,7 +313,7 @@ class NSEConnector:
                     return None
                 last = reader[-1]  # most recent bar
                 price_kes = float(last.get('close', 0))
-                kes_usd = self._kes_usd_rate
+                kes_usd = self.get_kes_usd_rate()
                 return {
                     "symbol": symbol,
                     "market": "NSE",
@@ -346,7 +355,7 @@ class NSEConnector:
             "symbol": symbol, "market": "NSE", "currency": "KES",
             "price_kes": 0, "price_usd": 0, "open_kes": 0, "high_kes": 0,
             "low_kes": 0, "volume": 0, "change_pct": 0, "prev_close_kes": 0,
-            "kes_usd_rate": self._kes_usd_rate,
+            "kes_usd_rate": self.get_kes_usd_rate(),
             "timestamp": datetime.now(EAT_OFFSET).isoformat(),
             "source": "none", "tier": "tier1" if symbol in NSE_TIER1_SYMBOLS else "tier2",
             "sector": self._get_sector(symbol), "_stale": True,
