@@ -182,3 +182,19 @@ def test_a_us_chart_uses_the_live_feeds_bars_and_the_journal(queue, monkeypatch)
 def test_an_untracked_symbol_has_no_chart(queue):
     client, h = _client(queue, None)
     assert client.get('/api/chart/ZZZZ', headers=h).status_code == 404
+
+
+# ------------------------------------------------------------- drill-down
+
+def test_the_drilldown_prices_an_nse_stock_from_the_nse_feed(queue):
+    """KCB on the US feed is a different company; the drill-down asked it anyway."""
+    us_feed = SimpleNamespace(get_real_time_data=lambda s: {'price': 999.0})
+    agent = SimpleNamespace(
+        components={'nse_order_queue': queue, 'nse_paper_account': None,
+                    'data_manager': SimpleNamespace(connectors={'nse': _NSE({'KCB': 41.5}),
+                                                                'real_data': us_feed})},
+        config=CONFIG, order_journal=None, volatility=None, decision_journal=None)
+    client = TradingAPI(agent, {}).app.test_client()
+    h = {'Authorization': f"Bearer {create_token('tester', 'operator')}"}
+    assert client.get('/api/symbol/KCB', headers=h).get_json()['current_price'] == 41.5
+    assert client.get('/api/symbol/AAPL', headers=h).get_json()['current_price'] == 999.0

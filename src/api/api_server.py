@@ -390,6 +390,7 @@ class TradingAPI:
                 return jsonify({'error': f'Unknown or untracked symbol: {symbol}'}), 404
 
             def produce():
+                from src.agent.cost_model import classify
                 from src.agent.symbol_drilldown import build_payload
                 dj = getattr(self.trading_agent, 'decision_journal', None)
                 oj = getattr(self.trading_agent, 'order_journal', None)
@@ -398,7 +399,15 @@ class TradingAPI:
 
                 def price_lookup(sym):
                     dm = self.trading_agent.components.get('data_manager')
-                    real = dm.connectors.get('real_data') if dm else None
+                    connectors = getattr(dm, 'connectors', None) or {}
+                    # An NSE ticker such as KCB can name a different company
+                    # on the US feed, so NSE symbols are priced by the NSE
+                    # connector, and only from a real source.
+                    if classify(sym, getattr(self.trading_agent, 'config', None) or self.config) == 'nse':
+                        nse = connectors.get('nse')
+                        q = (nse.get_quote(sym) if nse else None) or {}
+                        return float(q['price_kes']) if q.get('price_kes') and q.get('source') in REAL_NSE_SOURCES else None
+                    real = connectors.get('real_data')
                     if real:
                         q = real.get_real_time_data(sym)
                         return (q or {}).get('price')
