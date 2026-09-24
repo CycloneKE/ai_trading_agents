@@ -126,6 +126,20 @@ class _NSETableParser(HTMLParser):
             self.cell_data += data
 
 
+
+def _warn_if_unrecognised(source: str, url: str, rows: List[List[str]], symbols) -> None:
+    """Say so when a page loads but none of its rows name a watched symbol.
+
+    That is what a changed page layout looks like from here: HTTP 200, no
+    error, and nothing extracted. Without this it was indistinguishable
+    from the source simply having no prices.
+    """
+    if not any(row and any(s in row[0].upper() for s in symbols) for row in rows):
+        logger.warning(
+            f"{source} {url} loaded but no table row names a watched symbol "
+            f"({len(rows)} rows parsed); the page layout may have changed")
+
+
 def scrape_nse_website(symbols: List[str]) -> Dict[str, DailyBar]:
     """
     Scrape current prices from the NSE official equity stats page.
@@ -147,9 +161,13 @@ def scrape_nse_website(symbols: List[str]) -> Dict[str, DailyBar]:
         try:
             resp = requests.get(url, headers=headers, timeout=20)
             if resp.status_code != 200:
+                # Used to `continue` without a word, so a moved page or a
+                # block looked identical to "no data" in the logs.
+                logger.warning(f"NSE website {url} returned HTTP {resp.status_code}")
                 continue
             parser = _NSETableParser()
             parser.feed(resp.text)
+            _warn_if_unrecognised('NSE website', url, parser.rows, symbol_set)
             for row in parser.rows:
                 if len(row) < 5:
                     continue
@@ -200,11 +218,13 @@ def scrape_afx_kwayisi(symbols: List[str]) -> Dict[str, DailyBar]:
     try:
         resp = requests.get("https://afx.kwayisi.org/nse/", headers=headers, timeout=20)
         if resp.status_code != 200:
+            logger.warning(f"AFX Kwayisi https://afx.kwayisi.org/nse/ returned HTTP {resp.status_code}")
             return results
         parser = _NSETableParser()
         parser.feed(resp.text)
 
         symbol_set = set(s.upper() for s in symbols)
+        _warn_if_unrecognised('AFX Kwayisi', 'https://afx.kwayisi.org/nse/', parser.rows, symbol_set)
         for row in parser.rows:
             if len(row) < 4:
                 continue
@@ -371,6 +391,7 @@ def backfill_afx_history(symbols: List[str]) -> Dict[str, int]:
             resp = requests.get(f"https://afx.kwayisi.org/nse/{sym.lower()}.html",
                                 headers=headers, timeout=20)
             if resp.status_code != 200:
+                logger.warning(f"AFX history page for {sym} returned HTTP {resp.status_code}")
                 continue
             parser = _NSETableParser()
             parser.feed(resp.text)

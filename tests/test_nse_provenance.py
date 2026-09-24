@@ -137,3 +137,39 @@ def test_status_reports_partial_success(monkeypatch):
 def test_status_before_the_first_cycle_says_so():
     st = nse_scraper.NSEPeriodicScraper(symbols=['SCOM']).get_status()
     assert st['last_cycle_real_prices'] is None
+
+
+# ------------------------------------------ why a live source produced nothing
+
+class _Page:
+    def __init__(self, status, text=''):
+        self.status_code, self.text = status, text
+
+
+def test_a_blocked_or_moved_source_is_logged_with_its_status(monkeypatch, caplog):
+    """A 403 or 404 used to be skipped without a word, so the logs could not
+    say why every NSE price was synthetic."""
+    monkeypatch.setattr(nse_scraper.requests, 'get', lambda url, **kw: _Page(404))
+    with caplog.at_level(logging.WARNING):
+        assert nse_scraper.scrape_nse_website(['SCOM']) == {}
+        assert nse_scraper.scrape_afx_kwayisi(['SCOM']) == {}
+    text = ' '.join(r.getMessage() for r in caplog.records)
+    assert 'HTTP 404' in text and 'NSE website' in text and 'AFX Kwayisi' in text
+
+
+def test_a_page_whose_layout_changed_is_logged(monkeypatch, caplog):
+    html = '<table><tr><td>Totally</td><td>different</td><td>layout</td><td>1</td><td>2</td></tr></table>'
+    monkeypatch.setattr(nse_scraper.requests, 'get', lambda url, **kw: _Page(200, html))
+    with caplog.at_level(logging.WARNING):
+        assert nse_scraper.scrape_afx_kwayisi(['SCOM']) == {}
+    assert any('layout may have changed' in r.getMessage() for r in caplog.records)
+
+
+def test_a_recognised_page_is_not_flagged(monkeypatch, caplog):
+    html = ('<table><tr><td>SCOM</td><td>Safaricom Plc</td><td>2,785,507</td>'
+            '<td>28.20</td><td>+0.15</td></tr></table>')
+    monkeypatch.setattr(nse_scraper.requests, 'get', lambda url, **kw: _Page(200, html))
+    with caplog.at_level(logging.WARNING):
+        got = nse_scraper.scrape_afx_kwayisi(['SCOM'])
+    assert got['SCOM'].close == 28.2 and got['SCOM'].source == 'afx_kwayisi'
+    assert not any('layout may have changed' in r.getMessage() for r in caplog.records)
