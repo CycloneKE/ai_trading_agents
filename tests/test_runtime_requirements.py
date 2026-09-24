@@ -225,3 +225,19 @@ def test_optional_heavy_packages_stay_out_of_the_runtime_image():
             f'{heavy} was added to the runtime image. It is guarded at its '
             f'import site and the system runs without it; adding it makes '
             f'every deploy multi-gigabyte.')
+
+
+# Features the dashboard offers whose library is imported behind a guard, so
+# its absence never stops the agent: the feature just goes quietly dead on
+# the server, as both of these did.
+DASHBOARD_FEATURES = {
+    'pdfplumber': 'the Research page cannot read uploaded broker PDFs',
+    'vadersentiment': 'every news headline scores neutral',
+}
+
+
+@pytest.mark.parametrize('package', sorted(DASHBOARD_FEATURES))
+def test_dashboard_feature_libraries_are_in_the_runtime_image(package):
+    assert package in _declared(), (
+        f'{package} is missing from scripts/requirements-runtime.txt, so on '
+        f'the server {DASHBOARD_FEATURES[package]}.')
