@@ -408,9 +408,10 @@ class TradingAgent:
         """Seed strategies, regime detector and ATR from real daily bars.
 
         US and crypto from yfinance (the live feed's own source); NSE from
-        the scraper's CSVs, real rows only, after pulling the ~2 weeks of
-        real history afx publishes. Symbols left short of history are logged
-        at ERROR, because they cannot signal, and retried hourly.
+        the scraper's CSVs, real rows only, topped up from the ~2 weeks of
+        real history afx publishes for any symbol still short. Symbols left
+        short of history are logged at ERROR, because they cannot signal,
+        and retried hourly.
         """
         from src.agent.history_warmstart import fetch_daily_history, read_nse_history
         self._last_history_attempt = time.time()
@@ -426,13 +427,21 @@ class TradingAgent:
         if live:
             histories.update(fetch_daily_history(live))
         if nse:
-            try:
-                from src.connectors.nse_scraper import backfill_afx_history
-                backfill_afx_history(nse)
-            except Exception as e:
-                logger.warning(f"NSE real-history backfill failed: {e}")
             from src.connectors.nse_connector import NSE_CSV_DIR
-            histories.update(read_nse_history(nse, NSE_CSV_DIR))
+            nse_history = read_nse_history(nse, NSE_CSV_DIR)
+            # afx only tops up a symbol that is short. Asking it for every
+            # symbol on every start, when the stored NSE history already
+            # covers them, held the loop for minutes whenever afx was
+            # unreachable and tripped the heartbeat watchdog.
+            short_nse = [s for s in nse if len(nse_history.get(s, {}).get('close', [])) < need]
+            if short_nse:
+                try:
+                    from src.connectors.nse_scraper import backfill_afx_history
+                    if backfill_afx_history(short_nse):
+                        nse_history.update(read_nse_history(short_nse, NSE_CSV_DIR))
+                except Exception as e:
+                    logger.warning(f"NSE real-history backfill failed: {e}")
+            histories.update(nse_history)
 
         if histories:
             sm.warm_start({s: h['close'] for s, h in histories.items()})

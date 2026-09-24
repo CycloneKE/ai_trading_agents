@@ -493,10 +493,14 @@ def backfill_afx_history(symbols: List[str]) -> Dict[str, int]:
     date, so re-runs and overlaps are harmless."""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     added: Dict[str, int] = {}
-    for sym in symbols:
+    symbols = list(symbols)
+    for i, sym in enumerate(symbols):
         try:
+            # A short connect timeout: afx resolves to several addresses and
+            # each is tried in turn, so 20 seconds each cost 80 per symbol
+            # when the site was unreachable from the server.
             resp = requests.get(f"https://afx.kwayisi.org/nse/{sym.lower()}.html",
-                                headers=headers, timeout=20)
+                                headers=headers, timeout=(5, 20))
             if resp.status_code != 200:
                 logger.warning(f"AFX history page for {sym} returned HTTP {resp.status_code}")
                 continue
@@ -526,6 +530,11 @@ def backfill_afx_history(symbols: List[str]) -> Dict[str, int]:
                 save_bars_csv(sym, bars)
                 added[sym] = len(bars)
                 logger.info(f"  {sym}: backfilled {len(bars)} historical bars")
+        except (requests.ConnectionError, requests.Timeout) as e:
+            # The site, not the symbol: the rest would fail the same way.
+            logger.warning(f"afx.kwayisi.org unreachable ({e.__class__.__name__}); "
+                           f"skipping its history backfill for {len(symbols) - i} symbol(s)")
+            break
         except Exception as e:
             logger.warning(f"Backfill failed for {sym}: {e}")
     return added

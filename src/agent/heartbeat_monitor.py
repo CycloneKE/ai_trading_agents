@@ -13,10 +13,16 @@ class HeartbeatMonitor:
         self._timeout = timeout_seconds
         self.last_ping = time.time()
         self._triggered = False
+        # Armed by the trading loop's first ping. Start-up (broker connects,
+        # order reconcile, the history warm-start) runs before the loop and
+        # can outlast the timeout without the loop being stuck; timing it
+        # tripped the kill switch on a normal start.
+        self._armed = False
         self._daemon_thread = None
 
     def ping(self):
         self.last_ping = time.time()
+        self._armed = True
 
     def elapsed(self) -> float:
         return time.time() - self.last_ping
@@ -30,7 +36,8 @@ class HeartbeatMonitor:
             'last_ping': self.last_ping,
             'elapsed_seconds': round(self.elapsed(), 1),
             'timeout_seconds': self._timeout,
-            'triggered': self._triggered
+            'triggered': self._triggered,
+            'armed': self._armed,
         }
 
     def start_watchdog(self):
@@ -38,7 +45,7 @@ class HeartbeatMonitor:
         self._daemon_thread.start()
 
     def _check_timeout(self):
-        if self.elapsed() > self._timeout and not self._triggered:
+        if self._armed and self.elapsed() > self._timeout and not self._triggered:
             self._triggered = True
             logger.critical("HEARTBEAT_TIMEOUT: Agent loop unresponsive for >{}s".format(self._timeout))
             if hasattr(self.risk_manager, 'set_persistent_kill_switch'):
@@ -50,10 +57,14 @@ class HeartbeatMonitor:
                     if hasattr(broker, 'get_orders'):
                         orders = broker.get_orders()
                         for order in orders:
+                            # Brokers return OrderResponse, whose id is
+                            # order_id; reading `.id` raised before any
+                            # order was cancelled.
+                            oid = getattr(order, 'order_id', None) or getattr(order, 'id', None)
                             try:
-                                broker.cancel_order(order.id)
+                                broker.cancel_order(oid)
                             except Exception as e:
-                                logger.error(f"Failed to cancel order {order.id}: {e}")
+                                logger.error(f"Failed to cancel order {oid}: {e}")
             except Exception as e:
                 logger.error(f"Failed to cancel orders during heartbeat timeout: {e}")
 

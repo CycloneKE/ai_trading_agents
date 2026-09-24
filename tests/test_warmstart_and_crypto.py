@@ -100,6 +100,54 @@ def test_agent_warm_start_seeds_what_it_can_and_logs_the_rest(monkeypatch, tmp_p
                for r in caplog.records)
 
 
+def test_warm_start_asks_afx_only_for_nse_symbols_short_of_history(monkeypatch, tmp_path):
+    """afx was asked for every NSE symbol on every start. Unreachable from
+    the server, it held start-up for twelve minutes and the heartbeat
+    watchdog set the kill switch."""
+    from src.agent.main import TradingAgent
+    from src.agent.strategy_manager import StrategyManager
+    from src.agent.volatility import VolatilityTracker
+    from src.utils.config_validator import load_config
+    import src.connectors.nse_scraper as scraper
+    import src.connectors.nse_connector as nse_conn
+
+    start = date(2026, 6, 1)
+    _write(tmp_path, 'SCOM', [{'date': (start + __import__('datetime').timedelta(days=i)).isoformat(),
+                               'close': 25 + i * 0.01, 'high': '', 'low': '', 'source': 'nse_pricelist'}
+                              for i in range(70)])
+    _write(tmp_path, 'KCB', [{'date': f'2026-09-0{d}', 'close': 40.0, 'high': '', 'low': '',
+                              'source': 'nse_ticker'} for d in range(1, 6)])
+    cfg = load_config('config/config.json')
+    cfg['data_manager']['symbols'] = []
+    cfg['data_manager']['nse_symbols'] = ['SCOM', 'KCB']
+    asked = []
+    monkeypatch.setattr(scraper, 'backfill_afx_history', lambda syms: asked.append(list(syms)) or {})
+    monkeypatch.setattr(nse_conn, 'NSE_CSV_DIR', tmp_path)
+
+    agent = SimpleNamespace(config=cfg, components={'strategy_manager': StrategyManager(cfg)},
+                            volatility=VolatilityTracker(length=14),
+                            _history_seeded=set(), _last_history_attempt=0.0)
+    agent._history_needed = types.MethodType(TradingAgent._history_needed, agent)
+    TradingAgent._warm_start_history(agent)
+    assert asked == [['KCB']]
+    assert agent._history_seeded == {'SCOM'}
+
+
+def test_afx_backfill_stops_at_the_first_sign_the_site_is_unreachable(monkeypatch):
+    """Each symbol cost about 80 seconds of connection timeouts."""
+    import requests
+    import src.connectors.nse_scraper as scraper
+    calls = []
+
+    def unreachable(url, **kwargs):
+        calls.append(url)
+        raise requests.ConnectionError('Network is unreachable')
+
+    monkeypatch.setattr(scraper.requests, 'get', unreachable)
+    assert scraper.backfill_afx_history(['SCOM', 'EQTY', 'KCB']) == {}
+    assert len(calls) == 1
+
+
 # --------------------------------------------------------- Alpaca crypto format
 
 def test_symbol_translation_both_ways():
