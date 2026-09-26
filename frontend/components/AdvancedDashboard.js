@@ -3,7 +3,7 @@
 // to a bar along the bottom of the screen and every page drops to one column.
 import { useState, useEffect, useCallback } from 'react';
 import {
-  LayoutDashboard, Wallet, Flag, FileText, ChartLine, Shield, LogOut, AlertTriangle, Search,
+  LayoutDashboard, Wallet, Flag, FileText, ChartLine, Shield, LogOut, Search, Bell,
 } from 'lucide-react';
 import MarketClock from './MarketClock';
 import HelpPanel from './HelpPanel';
@@ -15,8 +15,9 @@ import ResearchView from './views/ResearchView';
 import NseSection from './views/NseSection';
 import InsightsSection from './views/InsightsSection';
 import SystemSection from './views/SystemSection';
+import NotificationsView, { notificationItems } from './views/NotificationsView';
 import { theme } from './DashboardStyles';
-import { card, useIsMobile } from './ui';
+import { useIsMobile } from './ui';
 import { getApiBase } from '../utils/apiBase';
 
 const SECTIONS = [
@@ -29,11 +30,17 @@ const SECTIONS = [
 ];
 const DEFAULT_SUB = { nse: 'watch', insights: 'analytics', system: 'risk' };
 
+// Pages reached from the header rather than the navigation bar.
+const HEADER_PAGES = ['notifications'];
+
+// The dashboard's own source fingerprint, set at build time (next.config.js).
+const BUILT_FROM = process.env.NEXT_PUBLIC_SOURCE_HASH || '';
+
 // The page lives in the address (#nse/paper), so a reload keeps it and the
 // phone's back button steps back through the pages visited.
 function readRoute() {
   const [section, sub] = (typeof window !== 'undefined' ? window.location.hash.slice(1) : '').split('/');
-  if (!SECTIONS.some((s) => s.id === section)) return { section: 'overview', sub: undefined };
+  if (!SECTIONS.some((s) => s.id === section) && !HEADER_PAGES.includes(section)) return { section: 'overview', sub: undefined };
   return { section, sub: sub || DEFAULT_SUB[section] };
 }
 
@@ -86,6 +93,7 @@ const AdvancedDashboard = ({ onLogout }) => {
   const [drilldownSymbol, setDrilldownSymbol] = useState(null);
   const [drilldownSector, setDrilldownSector] = useState(null);
   const [anomalies, setAnomalies] = useState([]);
+  const [pendingApprovals, setPendingApprovals] = useState(0);
   const [heartbeat, setHeartbeat] = useState({ healthy: true, elapsed_seconds: 0, triggered: false });
   const [searchOpen, setSearchOpen] = useState(false);
 
@@ -128,6 +136,31 @@ const AdvancedDashboard = ({ onLogout }) => {
     const id = setInterval(load, 30000);
     return () => { alive = false; clearInterval(id); };
   }, [isOperator]);
+
+  // Research ratings waiting for the operator's decision, for the bell.
+  useEffect(() => {
+    if (!isOperator) { setPendingApprovals(0); return undefined; }
+    let alive = true;
+    const load = async () => {
+      try {
+        const token = localStorage.getItem('trading_token');
+        const res = await fetch(`${getApiBase()}/api/operator/escalations`, { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok) return;
+        const json = await res.json();
+        if (alive) setPendingApprovals((json.escalations || []).length);
+      } catch (e) { /* transient */ }
+    };
+    load();
+    const id = setInterval(load, 60000);
+    return () => { alive = false; clearInterval(id); };
+  }, [isOperator]);
+
+  // Built from different code than the server: an old copy of the page, or
+  // only one of the two images rebuilt.
+  const serverBuilt = data.status.dashboard_source;
+  const staleDashboard = !!(serverBuilt && BUILT_FROM && serverBuilt !== BUILT_FROM);
+  const notices = notificationItems({ anomalies, pendingApprovals, status: data.status, staleDashboard });
+  const needsYou = notices.filter((n) => n.attention).length;
 
   // Heartbeat monitor polling
   useEffect(() => {
@@ -247,6 +280,7 @@ const AdvancedDashboard = ({ onLogout }) => {
       case 'nse': return <NseSection active sub={sub} onSub={onSub} nseData={nseData} isOperator={isOperator} mobile={mobile} onDrill={drill} />;
       case 'insights': return <InsightsSection sub={sub} onSub={onSub} data={data} mobile={mobile} onSector={setDrilldownSector} />;
       case 'system': return <SystemSection sub={sub} onSub={onSub} data={data} mobile={mobile} />;
+      case 'notifications': return <NotificationsView items={notices} isOperator={isOperator} mobile={mobile} onDrill={drill} onGo={(id) => go(id)} />;
       default: return <OverviewView data={data} isConnected={isConnected} onDrill={drill} mobile={mobile} />;
     }
   };
@@ -281,6 +315,22 @@ const AdvancedDashboard = ({ onLogout }) => {
       padding: '0 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '11px', fontWeight: 800, letterSpacing: '0.5px',
     }}>
       {isHalted ? 'RESUME' : 'HALT'}
+    </button>
+  );
+
+  const bell = (
+    <button onClick={() => go('notifications')} aria-label={`Notifications: ${needsYou} need your attention`}
+            title={needsYou ? `${needsYou} notification${needsYou > 1 ? 's' : ''} need your attention` : 'Notifications'}
+            style={{ ...iconButton, position: 'relative',
+                     borderColor: section === 'notifications' ? theme.colors.primary : theme.colors.border }}>
+      <Bell size={16} color={needsYou ? theme.colors.warning : theme.colors.textSecondary} />
+      {needsYou > 0 && (
+        <span style={{
+          position: 'absolute', top: '-6px', right: '-6px', minWidth: '18px', height: '18px', borderRadius: '9px',
+          background: theme.colors.danger, color: '#fff', fontSize: '10px', fontWeight: 800,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 4px',
+        }}>{needsYou > 99 ? '99+' : needsYou}</span>
+      )}
     </button>
   );
 
@@ -321,6 +371,7 @@ const AdvancedDashboard = ({ onLogout }) => {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
               {brand}
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                {bell}
                 <button onClick={() => setSearchOpen((o) => !o)} aria-label="Find a symbol" style={iconButton}><Search size={16} /></button>
                 <button onClick={() => setShowHelp(true)} aria-label="Getting started guide" style={iconButton}>?</button>
                 <button onClick={onLogout} aria-label="Log out" style={iconButton}><LogOut size={16} /></button>
@@ -356,6 +407,7 @@ const AdvancedDashboard = ({ onLogout }) => {
               <Heartbeat heartbeat={heartbeat} />
               <MarketClock />
               {searchBox}
+              {bell}
               {haltButton}
               <button onClick={() => setShowHelp(true)} title="Getting started guide" style={iconButton}>?</button>
               <button onClick={onLogout} style={{ ...iconButton, fontSize: '11px' }}><LogOut size={14} /> EXIT</button>
@@ -373,30 +425,6 @@ const AdvancedDashboard = ({ onLogout }) => {
               Since {new Date(data.status.halted_at.endsWith('Z') ? data.status.halted_at : `${data.status.halted_at}Z`).toLocaleString()}.
             </span>
           )}
-        </div>
-      )}
-
-      {isOperator && anomalies.length > 0 && (
-        <div style={{ padding: mobile ? '12px 12px 0' : '16px 40px 0' }}>
-          <div style={card(mobile, { padding: '14px 18px', borderLeft: `3px solid ${theme.colors.warning}` })}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
-              <AlertTriangle size={16} color={theme.colors.warning} />
-              <span style={{ fontSize: '12px', fontWeight: 800, textTransform: 'uppercase', color: theme.colors.textSecondary }}>
-                {anomalies.length} thing{anomalies.length > 1 ? 's' : ''} worth a look
-              </span>
-            </div>
-            {anomalies.slice(0, 5).map((a, i) => {
-              const c = a.severity === 'high' ? theme.colors.danger : a.severity === 'medium' ? theme.colors.warning : theme.colors.textMuted;
-              return (
-                <div key={i} onClick={() => a.symbol && setDrilldownSymbol(a.symbol)}
-                     style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '6px 0', fontSize: '13px', cursor: a.symbol ? 'pointer' : 'default' }}>
-                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: c, flexShrink: 0 }} />
-                  <span style={{ color: theme.colors.text }}>{a.message}</span>
-                  {a.symbol && <span style={{ color: theme.colors.textMuted, fontSize: '10px' }}>↗</span>}
-                </div>
-              );
-            })}
-          </div>
         </div>
       )}
 

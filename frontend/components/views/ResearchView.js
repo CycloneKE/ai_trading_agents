@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { Upload, Clock, AlertTriangle, Layers, FileText, CheckCircle, XCircle } from 'lucide-react';
 import { theme } from '../DashboardStyles';
 import { getApiBase } from '../../utils/apiBase';
-import { card, SectionHeader } from '../ui';
+import { card, SectionHeader, localTime } from '../ui';
 
 const DOC_LABEL = {
   market_pulse: 'Market Pulse',
@@ -229,7 +229,7 @@ const ResearchView = ({ active, onChanged, onDrill, mobile }) => {
                           <div style={{ marginTop: '4px', color: theme.colors.textMuted }}>No record of what was done (uploaded before this was kept; upload it again to see).</div>
                         )}
                       </td>
-                      <td style={{ padding: '10px 8px 10px 0', color: theme.colors.textMuted, whiteSpace: 'nowrap' }}>{new Date(u.uploaded_at).toLocaleString()}</td>
+                      <td style={{ padding: '10px 8px 10px 0', color: theme.colors.textMuted, whiteSpace: 'nowrap' }}>{localTime(u.uploaded_at)}</td>
                       <td style={{ padding: '10px 0', color: u.status === 'completed' ? theme.colors.primary : theme.colors.danger }}>{u.status.toUpperCase()}</td>
                     </tr>
                   ))

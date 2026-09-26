@@ -78,6 +78,15 @@ export function fxSourceNote(fx) {
   return `${fx.live ? 'market' : 'last known'}${when ? `, ${when}` : ''}`;
 }
 
+// The server stores times in UTC without saying so ("2026-09-26T19:41:00");
+// read such a time as UTC so it shows in the viewer's own time zone.
+export function localTime(ts) {
+  if (!ts) return '';
+  const iso = typeof ts === 'string' && !/(Z|[+-]\d\d:?\d\d)$/.test(ts) ? `${ts}Z` : ts;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? String(ts) : d.toLocaleString();
+}
+
 export const gainColor = (v) => ((num(v) ?? 0) >= 0 ? theme.colors.primary : theme.colors.danger);
 
 // ------------------------------------------------------------- components

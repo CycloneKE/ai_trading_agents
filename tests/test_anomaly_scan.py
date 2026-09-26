@@ -23,7 +23,28 @@ def test_blocked_intent_flags_repeated_blocks():
     assert len(out) == 1
     assert out[0]['type'] == 'blocked_intent'
     assert out[0]['detail']['count'] == 6
-    assert 'min_notional' in out[0]['message']
+    assert out[0]['detail']['reasons'] == {'min_notional': 6}
+    assert out[0]['attention'] and 'minimum order size' in out[0]['message']
+    assert out[0]['hint']
+
+
+def test_signals_held_back_by_the_agents_own_rules_are_information_not_problems():
+    decisions = ([dec('NVDA', action='buy', skip='add_not_profitable') for _ in range(58)]
+                 + [dec('XLF', action='sell', skip='no_position') for _ in range(35)])
+    out = {a['symbol']: a for a in A.detect_blocked_intent(decisions, threshold=5)}
+    nvda, xlf = out['NVDA'], out['XLF']
+    assert nvda['type'] == 'held_back' and nvda['severity'] == 'info' and not nvda['attention']
+    assert nvda['message'].startswith('NVDA: buy signal on 58 checks, held back on purpose')
+    assert '5% above the last purchase' in nvda['message']
+    assert 'never bets on a fall' in xlf['message'] and 'sell signal' in xlf['message']
+    assert 'tried' not in nvda['message'] and 'blocked' not in nvda['message']
+
+
+def test_a_real_block_among_rule_holds_still_needs_a_look():
+    decisions = ([dec('TSLA', action='buy', skip='bias_downgrade') for _ in range(20)]
+                 + [dec('TSLA', action='buy', skip='insufficient_cash') for _ in range(6)])
+    [a] = A.detect_blocked_intent(decisions, threshold=5)
+    assert a['type'] == 'blocked_intent' and a['attention'] and 'paper cash' in a['message']
 
 
 def test_blocked_intent_ignores_normal_holds():
