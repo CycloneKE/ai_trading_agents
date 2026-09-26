@@ -14,7 +14,7 @@
 -r requirements-test.txt
 
 # Auth stack: tests/test_roles.py, tests/test_portfolio_api.py
-PyJWT>=2.8.0
+PyJWT>=2.14.0
 bcrypt>=4.0.0
 
 # Imported transitively: paper_trading -> real_price_feed
@@ -24,8 +24,8 @@ yfinance>=0.2.60
 pdfplumber>=0.11.0
 
 # Used by supervised_learning and the portfolio optimiser
-scikit-learn>=1.5.0
-scipy>=1.9.0
+scikit-learn>=1.9.1
+scipy>=1.18.1
 
 # Technical indicators. Only releases requiring Python >= 3.12 remain on PyPI,
 # which is why the matrix below no longer includes 3.9/3.10. Without this the

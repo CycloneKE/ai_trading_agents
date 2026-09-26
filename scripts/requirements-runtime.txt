@@ -14,8 +14,8 @@
 # tests/test_runtime_requirements.py enforces it.
 
 # --- Core web and process layer -------------------------------------------
-flask>=2.3.0
-flask-cors>=4.0.0
+flask>=3.1.3
+flask-cors>=6.0.5
 waitress>=3.0.0          # Production WSGI server. Without it api_server falls
                          # back to the Flask development server, which prints
                          # its own warning not to use it in production.
@@ -23,25 +23,25 @@ waitress>=3.0.0          # Production WSGI server. Without it api_server falls
 # --- Authentication -------------------------------------------------------
 # Both are imported unguarded by src/api/auth.py. Missing either one locks the
 # entire API down: AUTH_AVAILABLE goes False and protected routes return 503.
-PyJWT>=2.8.0
+PyJWT>=2.14.0
 bcrypt>=4.0.0
 
 # --- Configuration and transport ------------------------------------------
-python-dotenv>=0.21.0
-requests>=2.32.4
-websocket-client>=1.3.0
-aiohttp>=3.8.0
+python-dotenv>=1.2.3
+requests>=2.34.2
+websocket-client>=1.9.2
+aiohttp>=3.14.3
 cryptography>=3.4.8
 
 # --- State and metrics ----------------------------------------------------
-redis>=4.5.3
-psycopg2-binary>=2.9.0
-prometheus-client>=0.12.0
-psutil>=5.9.0            # System metrics only. The monitoring service and the
+redis>=8.1.0
+psycopg2-binary>=2.9.13
+prometheus-client>=0.26.0
+psutil>=7.2.2            # System metrics only. The monitoring service and the
                          # /health endpoint run without it.
 
 # --- Numeric ---------------------------------------------------------------
-numpy>=1.22.0
+numpy>=2.5.3
 pandas>=1.3.0
 
 # Also required, not optional. src/agent/risk_calculator.py imports
@@ -50,7 +50,7 @@ pandas>=1.3.0
 # so the process cannot start without it. Found by the import-graph walk in
 # tests/test_runtime_requirements.py immediately after the yfinance fix: it
 # would have been the next crash loop.
-scipy>=1.9.0
+scipy>=1.18.1
 
 # --- Market data -----------------------------------------------------------
 # Required, not optional, despite what this file used to claim.
