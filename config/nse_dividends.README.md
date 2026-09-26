@@ -47,3 +47,28 @@ The `SCOM` figures above (yield, DPS, EPS) are real values fetched from
 afx.kwayisi.org on 2026-07-11 as a worked example of the expected shape —
 `years_consecutive_paid` and `eps_trend` still need your own research before
 you'd actually rely on them for a real accumulation decision.
+
+## Dividend events (`nse_dividend_events.json`)
+
+The NSE paper account is paid the dividends listed here, so its returns
+include income, not only price moves. Add each company announcement:
+
+```json
+{
+  "events": [
+    {"symbol": "SCOM", "dividend_kes": 0.85, "book_closure": "2026-07-31",
+     "payment_date": "2026-08-29"}
+  ]
+}
+```
+
+- `dividend_kes`: gross dividend per share, as announced.
+- `ex_date`: the first day a buyer is no longer entitled, if the notice gives
+  it. Otherwise give `book_closure` and the account takes the ex-date as three
+  trading days earlier, since NSE trades settle T+3.
+- `payment_date`: the day the cash arrives; the account credits it then.
+
+Shares held the day before the ex-date qualify. The account deducts 5%
+withholding tax (the final rate for resident individuals on NSE-listed
+dividends) and shows gross, tax and net on the Paper Account page. The rate
+is `nse_paper_trading.dividend_withholding_pct` in `config.json`.

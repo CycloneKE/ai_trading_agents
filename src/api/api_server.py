@@ -716,7 +716,7 @@ class TradingAPI:
                 flatten = bool(data.get('flatten', False))
                 result = self.trading_agent.halt_trading(
                     flatten=flatten,
-                    reason=f"API request (flatten={flatten})")
+                    reason='halted from the dashboard' + (' and positions closed' if flatten else ''))
                 logger.warning(f"Kill switch engaged via API: {result}")
                 return jsonify(result)
             except Exception as e:
@@ -1381,7 +1381,11 @@ class TradingAPI:
                     'fills': list(reversed(fills))[:100],
                     'equity_curve': queue.paper_equity_history(),
                     'rules': {'add_to_winners': paper.add_rule, 'exits': paper.exit_rule,
-                              'stop_loss': paper.stop_rule},
+                              'stop_loss': paper.stop_rule,
+                              'limits': paper.limits,
+                              'costs': {k: paper.costs.get(k) for k in (
+                                  'commission_pct', 'breakdown', 'slippage_pct',
+                                  'annual_fee_kes', 'verified', 'source')}},
                 }), 200
             except Exception as e:
                 logger.error(f"Error building NSE paper view: {e}")

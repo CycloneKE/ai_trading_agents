@@ -64,6 +64,8 @@ class RealTimeRiskManager:
         
         # Emergency controls & Persistent Kill Switch
         self.emergency_stop = False
+        self.kill_switch_reason: Optional[str] = None
+        self.kill_switch_at: Optional[str] = None
         self.risk_alerts = []
         self._init_persistent_risk_state()
         
@@ -89,10 +91,14 @@ class RealTimeRiskManager:
             self._risk_db_conn.execute("CREATE TABLE IF NOT EXISTS risk_state (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
             self._risk_db_conn.commit()
             
-            cur = self._risk_db_conn.execute("SELECT value FROM risk_state WHERE key='kill_switch_active'")
+            cur = self._risk_db_conn.execute("SELECT value, updated_at FROM risk_state WHERE key='kill_switch_active'")
             row = cur.fetchone()
             if row and row[0] == 'true':
                 self.emergency_stop = True
+                self.kill_switch_at = row[1]
+                reason = self._risk_db_conn.execute(
+                    "SELECT value FROM risk_state WHERE key='kill_switch_reason'").fetchone()
+                self.kill_switch_reason = reason[0] if reason and reason[0] else None
                 logger.warning("Persistent Kill Switch active: emergency stop restored from DB")
         except Exception as e:
             logger.error(f"Failed to initialize persistent risk state DB: {e}")
@@ -100,11 +106,15 @@ class RealTimeRiskManager:
     def set_persistent_kill_switch(self, active: bool, reason: str = ""):
         """Set kill switch state in memory and persist to DB."""
         self.emergency_stop = active
+        now = datetime.utcnow().isoformat()
+        self.kill_switch_reason = reason if active else None
+        self.kill_switch_at = now if active else None
         try:
             if hasattr(self, '_risk_db_conn') and self._risk_db_conn:
-                now = datetime.utcnow().isoformat()
                 val = 'true' if active else 'false'
                 self._risk_db_conn.execute("INSERT OR REPLACE INTO risk_state (key, value, updated_at) VALUES ('kill_switch_active', ?, ?)", (val, now))
+                # Why it was engaged, so a restart can say so.
+                self._risk_db_conn.execute("INSERT OR REPLACE INTO risk_state (key, value, updated_at) VALUES ('kill_switch_reason', ?, ?)", (reason if active else '', now))
                 self._risk_db_conn.commit()
                 logger.warning(f"Persistent Kill Switch set to {val}: {reason}")
         except Exception as e:

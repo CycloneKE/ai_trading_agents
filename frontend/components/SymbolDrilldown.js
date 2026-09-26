@@ -28,6 +28,9 @@ const REASON_LABEL = {
   max_adds: 'Already added to this holding the maximum times',
   position_cap: 'Holding is at its size limit',
   trimmed_today: 'Already trimmed this position today',
+  min_holding: 'Held for less than the minimum holding period',
+  turnover_budget: "This week's allowance of new NSE positions is used",
+  liquidity_cap: 'Too little trading volume for the order',
 };
 
 const MARKET_LABEL = { nse: 'NSE KENYA', us_equity: 'US STOCK', crypto: 'CRYPTO' };

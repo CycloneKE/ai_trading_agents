@@ -125,6 +125,8 @@ class TradingAgent:
         self.running = False
         self.start_time = time.time()  # for /api/system-health uptime
         self.trading_halted = False  # kill switch: blocks all NEW orders when True
+        self.halt_reason = None
+        self.halted_at = None
         self.components = {}
         self.order_journal = None  # initialized in start() after brokers connect
         self.decision_journal = None
@@ -212,6 +214,7 @@ class TradingAgent:
                 self.config.get('risk_management', {}),
                 self.database
             )
+            self._restore_halt()
             
             # Performance Analytics
             self.performance_analytics = PerformanceAnalytics(
@@ -353,7 +356,8 @@ class TradingAgent:
                     risk_manager=self.risk_manager,
                     broker_manager=self.components.get('broker_manager'),
                     audit_journal=self.components.get('audit_journal'),
-                    timeout_seconds=self.config.get('heartbeat_timeout_seconds', 180)
+                    timeout_seconds=self.config.get('heartbeat_timeout_seconds', 180),
+                    on_trigger=lambda reason: self.halt_trading(reason=reason),
                 )
                 self.heartbeat_monitor.start_watchdog()
                 logger.info("Dead-Man's Switch heartbeat monitor activated (timeout=%ds)", self.config.get('heartbeat_timeout_seconds', 180))
@@ -1328,12 +1332,15 @@ class TradingAgent:
                 validated = signals
                 proposed = (signals or {}).get('action', 'hold')
                 blocked = None
+                adv = TradingAgent._nse_adv(symbol, (paper.limits if auto_paper else {}).get('adv_days', 20)) \
+                    if proposed in ('buy', 'sell') else None
                 if proposed in ('buy', 'sell'):
                     # Holding rules first, so a trade the book cannot take (an
                     # add the holding hasn't earned, a sell of nothing) never
                     # costs an LLM call. Cash is checked once the size is known.
                     _, blocked = order_size(symbol, proposed, price, base_notional, queue, paper,
-                                            confidence=float(signals.get('confidence') or 0.0))
+                                            confidence=float(signals.get('confidence') or 0.0),
+                                            adv=adv)
                     if blocked not in HOLDING_RULE_REASONS:
                         blocked = None
                 if blocked:
@@ -1359,7 +1366,7 @@ class TradingAgent:
                     # a weaker sell trims and a strong one closes, a buy fits
                     # the cash (position_rules.py).
                     qty, reason = order_size(symbol, action, price, notional, queue, paper,
-                                             confidence=float(confidence or 0.0))
+                                             confidence=float(confidence or 0.0), adv=adv)
                     if reason:
                         dec['skip_reason'] = reason
                     else:
@@ -1415,6 +1422,19 @@ class TradingAgent:
                     paper.record_equity(real_prices)
             except Exception as e:
                 logger.debug(f"NSE paper equity snapshot failed: {e}")
+
+    @staticmethod
+    def _nse_adv(symbol: str, days: int = 20) -> Optional[float]:
+        """Average daily volume in shares over the last `days` real NSE bars,
+        or None with fewer than five days of volume (no cap is applied then)."""
+        try:
+            from src.agent.chart_data import nse_bars
+            from src.connectors.nse_connector import NSE_CSV_DIR
+            vols = [b['volume'] for b in nse_bars(symbol, NSE_CSV_DIR, int(days)) if b.get('volume')]
+            return sum(vols) / len(vols) if len(vols) >= 5 else None
+        except Exception as e:
+            logger.debug(f"No NSE volume for {symbol}: {e}")
+            return None
 
     def _run_sleeve_cycle(self):
         """Monthly dividend-sleeve accumulation pass. Pulls current NSE
@@ -1850,6 +1870,16 @@ class TradingAgent:
         market orders when no price is available), so it works premarket too.
         """
         self.trading_halted = True
+        self.halt_reason = reason
+        self.halted_at = datetime.utcnow().isoformat()
+        # Kept in the database, so a restart stays halted until an operator
+        # resumes: a halt that a redeploy quietly undid would not be a halt.
+        rm = getattr(self, 'risk_manager', None)
+        if rm is not None and hasattr(rm, 'set_persistent_kill_switch'):
+            try:
+                rm.set_persistent_kill_switch(True, reason)
+            except Exception as e:
+                logger.error(f"Could not persist the kill switch: {e}")
         logger.warning(f"KILL SWITCH ENGAGED ({reason}); flatten={flatten}")
         result = {'halted': True, 'canceled_orders': 0, 'close_orders': 0, 'errors': []}
         if not flatten:
@@ -1919,10 +1949,34 @@ class TradingAgent:
         return result
 
     def resume_trading(self) -> Dict[str, Any]:
-        """Release the kill switch; the loop resumes submitting orders."""
+        """Release the kill switch, in memory and in the database, and re-arm
+        the heartbeat watchdog; the loop resumes submitting orders."""
         self.trading_halted = False
+        self.halt_reason = None
+        self.halted_at = None
+        rm = getattr(self, 'risk_manager', None)
+        if rm is not None and hasattr(rm, 'set_persistent_kill_switch'):
+            try:
+                rm.set_persistent_kill_switch(False, 'resumed by an operator')
+            except Exception as e:
+                logger.error(f"Could not clear the stored kill switch: {e}")
+        hb = getattr(self, 'heartbeat_monitor', None)
+        if hb is not None and hasattr(hb, 'reset'):
+            hb.reset()
         logger.warning("Kill switch released; trading resumed")
         return {'halted': False}
+
+    def _restore_halt(self) -> None:
+        """Start halted if the kill switch was engaged before the restart."""
+        rm = getattr(self, 'risk_manager', None)
+        if rm is None or not getattr(rm, 'emergency_stop', False):
+            return
+        self.trading_halted = True
+        self.halt_reason = getattr(rm, 'kill_switch_reason', None) or \
+            'engaged before the last restart (reason not recorded)'
+        self.halted_at = getattr(rm, 'kill_switch_at', None)
+        logger.warning(f"Trading is HALTED ({self.halt_reason}, since {self.halted_at}). "
+                       f"Nothing new will be ordered until an operator presses Resume.")
 
     PDT_EQUITY_THRESHOLD = 25_000
     PDT_MAX_DAY_TRADES = 3
@@ -2206,6 +2260,8 @@ class TradingAgent:
             status = {
                 'running': self.running,
                 'trading_halted': getattr(self, 'trading_halted', False),
+                'halt_reason': getattr(self, 'halt_reason', None),
+                'halted_at': getattr(self, 'halted_at', None),
                 'timestamp': datetime.now().isoformat(),
                 'components': {}
             }

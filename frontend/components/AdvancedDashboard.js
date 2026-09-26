@@ -366,7 +366,13 @@ const AdvancedDashboard = ({ onLogout }) => {
 
       {isHalted && (
         <div style={{ backgroundColor: theme.colors.warning, color: '#000', textAlign: 'center', padding: '8px 12px', fontSize: mobile ? '12px' : '13px', fontWeight: 800, letterSpacing: '0.5px' }}>
-          ⚠ TRADING HALTED: the agent is not submitting new orders. Protective stop-losses remain active.
+          ⚠ TRADING HALTED{data.status.halt_reason ? ` (${data.status.halt_reason})` : ''}: the agent is not submitting new orders.
+          Protective stop-losses remain active.{isOperator ? ' Press RESUME to trade again.' : ''}
+          {data.status.halted_at && (
+            <span style={{ fontWeight: 600, marginLeft: '6px' }}>
+              Since {new Date(data.status.halted_at.endsWith('Z') ? data.status.halted_at : `${data.status.halted_at}Z`).toLocaleString()}.
+            </span>
+          )}
         </div>
       )}
 

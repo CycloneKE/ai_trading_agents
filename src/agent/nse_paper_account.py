@@ -25,9 +25,11 @@ Its state is replayed from the filled tickets in the 'trading' book since
 the account opened, so there is one record of what happened and nothing to
 keep in step with it.
 """
+import json
 import logging
-from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.agent.cost_model import market_costs
 from src.agent.position_rules import (
@@ -41,11 +43,63 @@ RESOLVED_BY = 'auto_paper_trader'
 
 __all__ = ['NsePaperAccount', 'order_size', 'execute_stop', 'HOLDING_RULE_REASONS', 'BOOK']
 
-# NSE stops sit wider than the US ones. A round trip costs about 3.4%, and
+# NSE stops sit wider than the US ones. A round trip costs about 3.9%, and
 # a daily-bar position stopped out by an ordinary day's noise pays that for
 # nothing. Where the stock's ATR is known the stop scales with it, but never
 # tighter than these.
 STOP_DEFAULTS = {'enabled': True, 'stop_loss_pct': 0.08, 'trailing_stop_pct': 0.10}
+
+# How often and how big the account may trade. At about 3.9% a round trip,
+# frequent NSE trading loses to costs; a paper fill for more shares than the
+# market trades in a day could never happen; and sale proceeds are not cash
+# until CDSC settles them three trading days later. Stops ignore the first
+# three: they sell whenever they trigger.
+# Kenyan withholding tax on dividends from NSE-listed companies for a
+# resident individual: final, deducted at source (KRA).
+DIVIDEND_WHT_DEFAULT = 0.05
+DIVIDEND_EVENTS_DEFAULT = 'config/nse_dividend_events.json'
+
+LIMIT_DEFAULTS = {'max_adv_fraction': 0.10, 'adv_days': 20, 'min_holding_days': 30,
+                  'max_new_positions_per_week': 2, 'settlement_days': 3}
+
+
+def _parse(ts: Optional[str]) -> datetime:
+    """An ISO timestamp as a naive UTC datetime; the epoch when missing."""
+    if not ts:
+        return datetime(1970, 1, 1)
+    dt = datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+    return dt.replace(tzinfo=None) if dt.tzinfo is None else \
+        dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def subtract_trading_days(day: datetime, n: int) -> datetime:
+    """`day` moved back `n` weekdays."""
+    while n > 0:
+        day -= timedelta(days=1)
+        if day.weekday() < 5:
+            n -= 1
+    return day
+
+
+def trading_days_since(ts: Optional[str], now: datetime) -> int:
+    """Weekdays after the day of `ts`, up to and including `now`'s day.
+
+    NSE settles T+3 trading days. Public holidays are not counted out, so a
+    holiday week settles a day early here: close enough for a paper account.
+    """
+    day, end, n = _parse(ts).date(), now.date(), 0
+    while day < end:
+        day += timedelta(days=1)
+        if day.weekday() < 5:
+            n += 1
+    return n
+
+
+def held_days(opened_at: Optional[str], now: datetime) -> float:
+    """Calendar days since the position opened; unknown counts as long held."""
+    if not opened_at:
+        return float('inf')
+    return (now - _parse(opened_at)).total_seconds() / 86400
 
 
 class NsePaperAccount:
@@ -59,9 +113,16 @@ class NsePaperAccount:
         self.min_commission = float(costs.get('min_commission') or 0.0)
         self.slippage_pct = float(costs.get('slippage_pct') or 0.0)
         self.costs_verified = bool(costs.get('verified'))
+        self.costs = costs
+        # The broker's yearly account fee (KES 200 at AIB-AXYS), charged at
+        # the start of each account year.
+        self.annual_fee_kes = float(costs.get('annual_fee_kes') or 0.0)
         self.add_rule = rule(ADD_DEFAULTS, cfg.get('add_to_winners'))
         self.exit_rule = rule(EXIT_DEFAULTS, cfg.get('exits'))
         self.stop_rule = rule(STOP_DEFAULTS, cfg.get('stop_loss'))
+        self.limits = rule(LIMIT_DEFAULTS, cfg.get('trading_limits'))
+        self.dividend_wht = float(cfg.get('dividend_withholding_pct', DIVIDEND_WHT_DEFAULT))
+        self.dividend_events_path = cfg.get('dividend_events_path', DIVIDEND_EVENTS_DEFAULT)
         self.started_at = queue.paper_account_started_at() if self.enabled else None
         if self.enabled and not queue.paper_equity_history():
             # The equity curve starts where the account does.
@@ -91,20 +152,91 @@ class NsePaperAccount:
                        'price': f['price'], 'fees': f['fees_kes'], 'time': f['fill_at']}
                       for f in self._fills())
 
-    def _ledger(self) -> Dict[str, Any]:
+    def account_fees(self, now: Optional[datetime] = None) -> float:
+        """Yearly account fees charged so far: one per account year begun."""
+        if not self.annual_fee_kes or not self.started_at:
+            return 0.0
+        start = datetime.fromisoformat(self.started_at[:19])
+        years = max(((now or datetime.utcnow()) - start).days, 0) // 365 + 1
+        return round(self.annual_fee_kes * years, 2)
+
+    def dividend_events(self) -> List[Dict[str, Any]]:
+        """Announced dividends from the operator's events file; [] if none."""
+        path = Path(self.dividend_events_path)
+        if not path.is_absolute():
+            from src.utils.paths import PROJECT_ROOT
+            path = PROJECT_ROOT / path
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return []
+        events = data.get('events', []) if isinstance(data, dict) else data
+        return [e for e in events if isinstance(e, dict) and e.get('symbol')
+                and e.get('dividend_kes') and e.get('payment_date')
+                and (e.get('ex_date') or e.get('book_closure'))]
+
+    def dividends(self, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+        """Dividends the account has been paid: shares held the day before
+        the ex-date, credited on the payment date, net of withholding tax.
+
+        Without an ex-date the book-closure date stands in, less three
+        trading days: NSE settles T+3, so a buyer must trade that early to be
+        on the register when the books close.
+        """
+        now = now or datetime.utcnow()
+        opened = _parse(self.started_at) if self.started_at else None
+        fills = list(self._fills())
+        out = []
+        for e in self.dividend_events():
+            try:
+                paid = _parse(e['payment_date'])
+                ex = _parse(e['ex_date']) if e.get('ex_date') else \
+                    subtract_trading_days(_parse(e['book_closure']), 3)
+            except ValueError:
+                continue
+            if paid > now or (opened and ex < opened):
+                continue
+            sym = str(e['symbol']).upper()
+            held = 0.0
+            for f in fills:
+                if f['symbol'] == sym and _parse(f['fill_at']) < ex:
+                    held += f['quantity'] if f['side'] == 'buy' else -f['quantity']
+            shares = int(round(max(held, 0.0)))
+            if shares <= 0:
+                continue
+            gross = round(shares * float(e['dividend_kes']), 2)
+            tax = round(gross * self.dividend_wht, 2)
+            out.append({'symbol': sym, 'shares': shares, 'dividend_kes': float(e['dividend_kes']),
+                        'ex_date': ex.date().isoformat(), 'payment_date': paid.date().isoformat(),
+                        'gross_kes': gross, 'tax_kes': tax, 'net_kes': round(gross - tax, 2)})
+        return out
+
+    def _ledger(self, now: Optional[datetime] = None) -> Dict[str, Any]:
         """Cash, fees paid, realised P&L and positions, from the fills."""
-        cash, fees = self.starting_capital, 0.0
+        now = now or datetime.utcnow()
+        account_fees = self.account_fees(now)
+        paid = self.dividends(now)
+        dividends_net = round(sum(d['net_kes'] for d in paid), 2)
+        cash, fees, unsettled = self.starting_capital - account_fees + dividends_net, account_fees, 0.0
+        settle = int(self.limits.get('settlement_days') or 0)
         for f in self._fills():
             notional = f['quantity'] * f['price']
             fees += f['fees_kes']
             cash += -(notional + f['fees_kes']) if f['side'] == 'buy' else notional - f['fees_kes']
+            if f['side'] == 'sell' and settle and trading_days_since(f['fill_at'], now) < settle:
+                unsettled += notional - f['fees_kes']
         states = self.states()
         positions = {
             s: {'quantity': int(round(p.quantity)), 'cost_kes': round(p.cost, 2),
                 'avg_cost_kes': round(p.cost / p.quantity, 4) if p.held else 0.0,
                 'entries': p.entries, 'last_entry_kes': p.last_entry_price}
             for s, p in states.items()}
-        return {'cash': round(cash, 2), 'fees': round(fees, 2), 'states': states,
+        return {'cash': round(cash, 2), 'fees': round(fees, 2), 'account_fees': account_fees,
+                'dividends': paid, 'dividends_net': dividends_net,
+                'dividend_tax': round(sum(d['tax_kes'] for d in paid), 2),
+                'unsettled': round(unsettled, 2),
+                'available': round(cash - unsettled, 2),
+                'states': states,
                 'realised': round(sum(p.realised for p in states.values()), 2),
                 'positions': positions}
 
@@ -123,34 +255,66 @@ class NsePaperAccount:
     # ------------------------------------------------------------- rules
 
     def plan(self, symbol: str, side: str, price: float, target_notional: float,
-             confidence: float = 1.0) -> Tuple[int, Optional[str]]:
+             confidence: float = 1.0, adv: Optional[float] = None,
+             now: Optional[datetime] = None) -> Tuple[int, Optional[str]]:
         """Quantity to trade under the account's rules, or 0 and why not.
 
         Reasons match the US book's (see TradingAgent._position_gate) so the
-        dashboard reads them the same way.
+        dashboard reads them the same way. `adv` is the stock's average daily
+        volume in shares, which caps the order (trading_limits).
         """
-        ledger = self._ledger()
+        now = now or datetime.utcnow()
+        ledger = self._ledger(now)
         state = ledger['states'].get(symbol.upper()) or PositionState()
         account = self._account_at_cost(ledger)
         if side == 'sell':
+            if state.held and held_days(state.opened_at, now) < self.limits['min_holding_days']:
+                return 0, 'min_holding'
             qty, reason = plan_exit(state, confidence, price, account,
-                                    datetime.utcnow().date().isoformat(), self.exit_rule)
+                                    now.date().isoformat(), self.exit_rule)
             if reason:
                 return 0, reason
             held = int(round(state.quantity))
             shares = int(qty) if int(qty) >= 1 else held  # a trim under one share closes it
-            return min(shares, held), None
+            return self._liquidity_cap(min(shares, held), adv)
         if not state.held:
-            return self._buyable(price, float(target_notional), ledger['cash'], target_notional)
+            if self.new_positions_since(now - timedelta(days=7)) >= \
+                    self.limits['max_new_positions_per_week']:
+                return 0, 'turnover_budget'
+            qty, reason = self._buyable(price, float(target_notional), ledger['available'],
+                                        target_notional)
+            return (qty, reason) if reason else self._liquidity_cap(qty, adv)
         value, reason = plan_add(state, price, self.slippage_pct + self.commission_pct,
                                  account, float(target_notional), self.add_rule)
         if reason:
             return 0, reason
-        qty, reason = self._buyable(price, value, ledger['cash'], value)
+        qty, reason = self._buyable(price, value, ledger['available'], value)
         wanted = float(target_notional) * self.add_rule['add_size_pct']
         if reason == 'min_notional' and value < wanted:
             reason = 'position_cap'  # the cap, not the order, left too little room
-        return qty, reason
+        return (qty, reason) if reason else self._liquidity_cap(qty, adv)
+
+    def _liquidity_cap(self, qty: int, adv: Optional[float]) -> Tuple[int, Optional[str]]:
+        """At most max_adv_fraction of a day's average volume; no cap without volume data."""
+        frac = float(self.limits.get('max_adv_fraction') or 0.0)
+        if qty <= 0 or not adv or frac <= 0:
+            return qty, None
+        cap = int(adv * frac)
+        return (min(qty, cap), None) if cap >= 1 else (0, 'liquidity_cap')
+
+    def new_positions_since(self, since: datetime) -> int:
+        """Buys that opened a position (not adds) at or after `since`."""
+        held: Dict[str, float] = {}
+        count = 0
+        for f in self._fills():
+            before = held.get(f['symbol'], 0.0)
+            if f['side'] == 'buy':
+                if before <= 0 and _parse(f['fill_at']) >= since:
+                    count += 1
+                held[f['symbol']] = before + f['quantity']
+            else:
+                held[f['symbol']] = max(before - f['quantity'], 0.0)
+        return count
 
     def _buyable(self, price: float, budget: float, cash: float,
                  wanted: float) -> Tuple[int, Optional[str]]:
@@ -262,16 +426,21 @@ class NsePaperAccount:
             'enabled': self.enabled, 'started_at': self.started_at,
             'starting_capital_kes': self.starting_capital,
             'cash_kes': ledger['cash'], 'holdings_value_kes': round(value, 2),
+            'unsettled_kes': ledger['unsettled'], 'available_cash_kes': ledger['available'],
             'equity_kes': round(equity, 2),
             'return_pct': round((equity / self.starting_capital - 1) * 100, 2) if self.enabled else None,
             'realised_pnl_kes': ledger['realised'], 'fees_paid_kes': ledger['fees'],
+            'account_fees_kes': ledger['account_fees'],
+            'dividends_net_kes': ledger['dividends_net'],
+            'dividend_tax_kes': ledger['dividend_tax'],
+            'dividends': ledger['dividends'],
             'holdings': holdings, 'costs_verified': self.costs_verified,
         }
 
 
 def order_size(symbol: str, action: str, price: float, notional: float,
                queue, paper: Optional[NsePaperAccount],
-               confidence: float = 1.0) -> Tuple[int, Optional[str]]:
+               confidence: float = 1.0, adv: Optional[float] = None) -> Tuple[int, Optional[str]]:
     """Quantity for an NSE ticket, or 0 and a skip reason.
 
     With the paper account on, its rules and cash decide. Without it (the
@@ -280,14 +449,19 @@ def order_size(symbol: str, action: str, price: float, notional: float,
     cost record there to prove a holding profitable; cash is the operator's.
     """
     if paper is not None and paper.enabled:
-        return paper.plan(symbol, action, price, notional, confidence)
+        return paper.plan(symbol, action, price, notional, confidence, adv=adv)
     held = (queue.positions(book=BOOK).get(symbol.upper()) or {}).get('quantity', 0)
     if action == 'sell':
         return (held, None) if held > 0 else (0, 'no_position')
     if held > 0:
         return 0, 'already_held'
     qty = int(notional / price) if price > 0 else 0
-    return (qty, None) if qty >= 1 else (0, 'min_notional')
+    if qty < 1:
+        return 0, 'min_notional'
+    if adv:  # a ticket for more than a tenth of a day's volume will not fill
+        cap = int(adv * LIMIT_DEFAULTS['max_adv_fraction'])
+        return (min(qty, cap), None) if cap >= 1 else (0, 'liquidity_cap')
+    return qty, None
 
 
 def execute_stop(paper: NsePaperAccount, queue, symbol: str, price: float, reason: str,

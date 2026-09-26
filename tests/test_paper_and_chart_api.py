@@ -16,8 +16,11 @@ from src.agent.nse_paper_account import NsePaperAccount
 from src.api.api_server import TradingAPI
 from src.api.auth import create_token
 
-COSTS = {'nse': {'commission_pct': 0.017, 'min_commission': 0.0, 'slippage_pct': 0.003}}
-CONFIG = {'nse_paper_trading': {'starting_capital_kes': 200000}, 'costs': COSTS,
+COSTS = {'nse': {'commission_pct': 0.017, 'min_commission': 0.0, 'slippage_pct': 0.003,
+                 'annual_fee_kes': 0}}
+CONFIG = {'nse_paper_trading': {'starting_capital_kes': 200000,
+                                'trading_limits': {'min_holding_days': 0}},
+          'costs': COSTS,
           'data_manager': {'symbols': ['AAPL', 'BTC-USD'], 'crypto_symbols': ['BTC-USD'],
                            'nse_symbols': ['SCOM', 'KCB']}}
 

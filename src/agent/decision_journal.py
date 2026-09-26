@@ -41,6 +41,9 @@ SKIP_REASONS = {
     'max_adds',           # holding already added to the maximum times
     'position_cap',       # holding at its maximum share of the account
     'trimmed_today',      # weak sell signal, position already trimmed today
+    'min_holding',        # NSE: held for less than the minimum holding period
+    'turnover_budget',    # NSE: this week's allowance of new positions is used up
+    'liquidity_cap',      # NSE: too little trading volume for even one share
 }
 
 _SCHEMA = """

@@ -37,7 +37,8 @@ LIVE_EXIT_DEFAULTS = {**EXIT_DEFAULTS, 'min_remaining_pct': 0.01}
 # callers check these before asking the LLM, so a trade the book cannot take
 # never costs a model call.
 HOLDING_RULE_REASONS = frozenset({'already_held', 'no_position', 'add_not_profitable',
-                                  'max_adds', 'position_cap', 'trimmed_today'})
+                                  'max_adds', 'position_cap', 'trimmed_today',
+                                  'min_holding', 'turnover_budget'})
 
 
 def rule(defaults: Dict[str, Any], configured: Optional[Dict[str, Any]]) -> Dict[str, Any]:

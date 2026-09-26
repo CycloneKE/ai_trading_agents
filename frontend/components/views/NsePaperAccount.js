@@ -158,10 +158,26 @@ function TradeHistory({ fills, mobile, onDrill }) {
   );
 }
 
+// "1.30% brokerage, 0.34% levies and 0.02% stamp duty (AIB-AXYS schedule)…"
+function costText(costs, verified) {
+  const c = costs || {};
+  const f = (v) => `${((v || 0) * 100).toFixed(2)}%`;
+  const b = c.breakdown;
+  const fees = b
+    ? `${f(b.brokerage_pct)} brokerage, ${f(b.statutory_levies_pct)} statutory levies and ${f(b.stamp_duty_pct)} stamp duty`
+    : `${f(c.commission_pct)} in fees`;
+  const annual = c.annual_fee_kes ? `, plus KES ${c.annual_fee_kes} a year for the account` : '';
+  const slip = c.slippage_pct ? ` An estimated ${f(c.slippage_pct)} slippage is added to each price.` : '';
+  return verified
+    ? `Each trade pays ${fees} per side, from the AIB-AXYS schedule${annual}.${slip}`
+    : `Each trade is charged an estimated ${fees} per side until the broker's schedule is confirmed.${slip}`;
+}
+
 function Rules({ rules, costsVerified }) {
   const stop = rules.stop_loss || {};
   const add = rules.add_to_winners || {};
   const exit = rules.exits || {};
+  const limits = rules.limits || {};
   const p = (v) => `${Math.round((v || 0) * 100)}%`;
   return (
     <div style={{ fontSize: '12px', color: theme.colors.textSecondary, lineHeight: 1.6 }}>
@@ -173,13 +189,19 @@ function Rules({ rules, costsVerified }) {
         <strong style={{ color: '#fff' }}>Adding to winners.</strong>{' '}
         {add.enabled === false ? 'Off.' : `Only when the holding is in profit after selling costs and the price is at least ${p(add.min_gain_pct)} above the last purchase. Each add is ${p(add.add_size_pct)} of a normal order, at most ${add.max_adds} adds, and no stock above ${p(add.max_position_pct)} of the account.`}
       </p>
+      {limits.min_holding_days != null && (
+        <p style={{ margin: '0 0 8px' }}>
+          <strong style={{ color: '#fff' }}>Trading limits.</strong>{' '}
+          {`Each holding is kept at least ${limits.min_holding_days} days unless a stop triggers; at most ${limits.max_new_positions_per_week} new holdings a week; no order above ${p(limits.max_adv_fraction)} of the stock's average daily volume; sale proceeds are spendable ${limits.settlement_days} trading days after the sale.`}
+        </p>
+      )}
       <p style={{ margin: '0 0 8px' }}>
         <strong style={{ color: '#fff' }}>Selling.</strong>{' '}
         {exit.partial_exits === false ? 'A sell signal closes the whole holding.' : `A strong sell signal (${p(exit.full_exit_confidence)} confidence or more) closes the holding; a weaker one sells ${p(exit.trim_fraction)} of it, at most once a day.`}
       </p>
       <p style={{ margin: 0 }}>
         <strong style={{ color: '#fff' }}>Costs.</strong>{' '}
-        {costsVerified ? 'Brokerage costs match the confirmed broker schedule.' : 'Each trade is charged an estimated 0.3% slippage and 1.7% commission until the AIB-AXYS schedule is confirmed.'}
+        {costText(rules.costs, costsVerified)}
       </p>
     </div>
   );
@@ -213,11 +235,17 @@ export default function NsePaperAccount({ view, error, mobile, onDrill }) {
         <HUDCard title="Account value" value={money(a.equity_kes, 'KES', 0)} subValue={`${signedMoney(pnl, 'KES', 0)} (${pct(a.return_pct)})`}
                  tone={gainColor(pnl)} icon={Wallet} color={theme.colors.primary}
                  footer={`Started with ${money(start, 'KES', 0)}${a.started_at ? ` on ${new Date(a.started_at).toLocaleDateString()}` : ''}`} />
-        <HUDCard title="Cash" value={money(a.cash_kes, 'KES', 0)} subValue={start ? `${((a.cash_kes / (a.equity_kes || start)) * 100).toFixed(0)}% of the account` : null}
-                 tone={theme.colors.textSecondary} icon={PiggyBank} color={theme.colors.secondary} />
+        <HUDCard title="Cash" value={money(a.cash_kes, 'KES', 0)}
+                 subValue={a.unsettled_kes > 0
+                   ? `${money(a.unsettled_kes, 'KES', 0)} awaiting settlement`
+                   : (start ? `${((a.cash_kes / (a.equity_kes || start)) * 100).toFixed(0)}% of the account` : null)}
+                 tone={a.unsettled_kes > 0 ? theme.colors.warning : theme.colors.textSecondary} icon={PiggyBank} color={theme.colors.secondary} />
         <HUDCard title="Invested" value={money(a.holdings_value_kes, 'KES', 0)} subValue={`${holdings.length} holding${holdings.length === 1 ? '' : 's'}`}
                  tone={theme.colors.textSecondary} icon={Briefcase} color={theme.colors.accent} />
-        <HUDCard title="Realised profit" value={signedMoney(a.realised_pnl_kes, 'KES', 0)} subValue="from closed and trimmed trades"
+        <HUDCard title="Realised profit" value={signedMoney(a.realised_pnl_kes, 'KES', 0)}
+                 subValue={a.dividends_net_kes > 0
+                   ? `plus ${money(a.dividends_net_kes, 'KES', 0)} dividends after ${money(a.dividend_tax_kes, 'KES', 0)} tax`
+                   : 'from closed and trimmed trades'}
                  tone={theme.colors.textMuted} icon={TrendingUp} color={gainColor(a.realised_pnl_kes)} />
         <HUDCard title="Fees paid" value={money(a.fees_paid_kes, 'KES', 0)} subValue={a.costs_verified ? 'broker schedule' : 'estimated costs'}
                  tone={theme.colors.textMuted} icon={Receipt} color={theme.colors.warning} />
