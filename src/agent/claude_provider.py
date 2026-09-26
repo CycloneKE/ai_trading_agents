@@ -48,6 +48,7 @@ class ClaudeProvider:
         self.budget = budget
         self.review_model = cfg.get('trade_review_model', REVIEW_MODEL_DEFAULT)
         self.volume_model = cfg.get('volume_model', VOLUME_MODEL_DEFAULT)
+        self.vision_model = cfg.get('vision_model', self.review_model)
         # Effort trades thoroughness for tokens. A trade review is a short
         # judgement, so medium; Haiku 4.5 does not take an effort setting.
         self.review_effort = cfg.get('review_effort', 'medium')
@@ -110,6 +111,33 @@ class ClaudeProvider:
         # Billed whatever the outcome, so counted before anything else.
         self.budget.record(model, response.usage, purpose)
 
+        if response.stop_reason == 'refusal':
+            raise ClaudeUnavailable('Claude declined the request')
+        if response.stop_reason == 'max_tokens':
+            raise ClaudeUnavailable(f'reply cut off at {max_tokens} tokens')
+        text = next((b.text for b in response.content if b.type == 'text'), '')
+        return _parse_json(text)
+
+
+    def read_image_json(self, system_prompt: str, user_prompt: str, image_b64: str,
+                        media_type: str, schema: Dict[str, Any]) -> Dict[str, Any]:
+        """A JSON object read from an image, shaped by `schema`, or
+        ClaudeUnavailable. Uses the review model: transcribing figures is
+        where a misread digit costs most."""
+        model = self.vision_model
+        max_tokens = 4000
+        # An image costs up to about 1,600 input tokens; counted as text.
+        if not self.budget.allows(self.budget.worst_case(
+                model, len(system_prompt) + len(user_prompt) + 4800, max_tokens)):
+            raise ClaudeUnavailable('monthly AI budget reached')
+        response = self._get_client().messages.create(
+            model=model, max_tokens=max_tokens, system=system_prompt,
+            messages=[{'role': 'user', 'content': [
+                {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type,
+                                             'data': image_b64}},
+                {'type': 'text', 'text': user_prompt}]}],
+            output_config={'format': {'type': 'json_schema', 'schema': schema}})
+        self.budget.record(model, response.usage, 'vision')
         if response.stop_reason == 'refusal':
             raise ClaudeUnavailable('Claude declined the request')
         if response.stop_reason == 'max_tokens':

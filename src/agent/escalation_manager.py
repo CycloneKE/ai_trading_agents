@@ -80,7 +80,16 @@ class EscalationManager:
         self._conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
         self._conn.execute('PRAGMA journal_mode=WAL')
         self._conn.executescript(_SCHEMA)
+        # What each upload was and what the agent did with it, in words.
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(research_uploads)")}
+        for col in ('document_type', 'summary'):
+            if col not in cols:
+                self._conn.execute(f"ALTER TABLE research_uploads ADD COLUMN {col} TEXT")
         self._conn.commit()
+        try:
+            self.withdraw_misread_market_reports()
+        except Exception as e:
+            logger.warning(f"Could not withdraw misread Market Pulse ratings: {e}")
         logger.info(f"EscalationManager database initialized at {db_path}")
 
     def record_upload(self, filename: str, source: str = 'aib_axys') -> int:
@@ -101,6 +110,61 @@ class EscalationManager:
                 (status, signals_count, datetime.utcnow().isoformat(), upload_id)
             )
             self._conn.commit()
+
+    def set_upload_summary(self, upload_id: int, document_type: str, actions: List[str]) -> None:
+        """Keep what the upload was and, in words, what the agent did with it."""
+        import json
+        with self._lock:
+            self._conn.execute(
+                "UPDATE research_uploads SET document_type = ?, summary = ? WHERE id = ?",
+                (document_type, json.dumps(actions), upload_id))
+            self._conn.commit()
+
+    def withdraw_misread_market_reports(self) -> Dict[str, int]:
+        """Undo what the old reader did with Market Pulse reports.
+
+        Before the Market Pulse reader existed, an uploaded report went
+        through the analyst-note path, whose word matcher turned every
+        company mentioned into a HOLD "rating" with prices taken from the
+        scorecard's percentages. Those rows carry the matcher's
+        '[Extracted Analyst Rationale]' mark. Their pending escalations are
+        closed as expired and the watchlist entries they created (and nobody
+        has changed since) are removed. Safe to run on every start.
+        """
+        import json
+        note = ("Withdrawn automatically: produced by the old reader from a Market Pulse report, "
+                "which contains no ratings.")
+        with self._lock:
+            uploads = [r[0] for r in self._conn.execute(
+                "SELECT DISTINCT u.id FROM research_uploads u JOIN research_signals s ON s.upload_id = u.id "
+                "WHERE (lower(u.filename) LIKE '%market_watch%' OR lower(u.filename) LIKE '%market watch%' "
+                "OR lower(u.filename) LIKE '%market_pulse%' OR lower(u.filename) LIKE '%market pulse%') "
+                "AND s.rationale LIKE '[Extracted Analyst Rationale]%'")]
+            if not uploads:
+                return {'uploads': 0, 'escalations': 0, 'watchlist': 0}
+            marks = ','.join('?' * len(uploads))
+            now = datetime.utcnow().isoformat()
+            esc = self._conn.execute(
+                f"UPDATE escalations SET status = 'expired', operator_notes = ?, resolved_at = ?, "
+                f"resolved_by = 'system' WHERE status = 'pending' AND signal_id IN "
+                f"(SELECT id FROM research_signals WHERE upload_id IN ({marks}) "
+                f"AND rationale LIKE '[Extracted Analyst Rationale]%')",
+                (note, now, *uploads)).rowcount
+            wl = self._conn.execute(
+                f"UPDATE position_watchlist SET status = 'removed', last_updated = ? "
+                f"WHERE status = 'active' AND source IN ({marks})",
+                (now, *[f'upload_{u}' for u in uploads])).rowcount
+            self._conn.execute(
+                f"UPDATE research_uploads SET document_type = 'market_pulse', summary = ? "
+                f"WHERE id IN ({marks}) AND summary IS NULL",
+                (json.dumps(["Read by the old reader, which misread this Market Pulse as analyst "
+                             "ratings. Those false ratings have been withdrawn; upload the report "
+                             "again to have it read properly."]), *uploads))
+            self._conn.commit()
+        if esc or wl:
+            logger.warning(f"Withdrew {esc} approval requests and {wl} watchlist entries that the old "
+                           f"reader made from Market Pulse uploads {uploads}")
+        return {'uploads': len(uploads), 'escalations': esc, 'watchlist': wl}
 
     def record_signal(self, upload_id: int, signal: Dict[str, Any]) -> int:
         """Record an extracted research signal."""
@@ -283,7 +347,14 @@ class EscalationManager:
                 (limit,)
             )
             cur.row_factory = sqlite3.Row
-            return [dict(r) for r in cur.fetchall()]
+            rows = [dict(r) for r in cur.fetchall()]
+        import json
+        for r in rows:
+            try:
+                r['summary'] = json.loads(r['summary']) if r.get('summary') else []
+            except ValueError:
+                r['summary'] = []
+        return rows
 
     def get_signals_for_upload(self, upload_id: int) -> List[Dict[str, Any]]:
         """Get all signals extracted from a specific upload."""
