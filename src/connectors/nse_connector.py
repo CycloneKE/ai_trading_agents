@@ -197,14 +197,20 @@ class NSEConnector:
         }
 
     def get_sector_performance(self, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-        quotes = {q["symbol"]: q for q in self.get_all_quotes(symbols)}
+        """Average day change per sector, over the symbols given (every
+        stock with data, on the dashboard). Only real prices count."""
+        from src.connectors.nse_scraper import REAL_NSE_SOURCES
+        by_sector: Dict[str, List[Dict[str, Any]]] = {}
+        for q in self.get_all_quotes(symbols):
+            by_sector.setdefault(q.get("sector") or self._get_sector(q["symbol"]), []).append(q)
         perf = []
-        for sector, symbols in NSE_SECTORS.items():
-            changes = [quotes[s]["change_pct"] for s in symbols if s in quotes and quotes[s].get("change_pct") is not None]
+        for sector, quotes in sorted(by_sector.items()):
+            changes = [q["change_pct"] for q in quotes
+                       if q.get("change_pct") is not None and q.get("source") in REAL_NSE_SOURCES]
             perf.append({
                 "sector": sector,
                 "change": round(sum(changes) / len(changes), 2) if changes else 0,
-                "symbols_tracked": len(symbols),
+                "symbols_tracked": len(quotes),
                 "symbols_reporting": len(changes),
             })
         return perf
@@ -294,6 +300,7 @@ class NSEConnector:
             "source": row.get('source', 'database'),
             "tier": "tier1" if row.get('symbol', '') in NSE_TIER1_SYMBOLS else "tier2",
             "sector": self._get_sector(row.get('symbol', '')),
+            "name": self._get_name(row.get('symbol', '')),
         }
 
     # ------------------------------------------------------------------
@@ -335,6 +342,7 @@ class NSEConnector:
                     "source": last.get('source') or 'csv',
                     "tier": "tier1" if symbol in NSE_TIER1_SYMBOLS else "tier2",
                     "sector": self._get_sector(symbol),
+                    "name": self._get_name(symbol),
                 }
         except Exception as e:
             logger.warning(f"CSV read for {symbol}: {e}")
@@ -345,10 +353,13 @@ class NSEConnector:
     # ------------------------------------------------------------------
 
     def _get_sector(self, symbol: str) -> str:
-        for sector, symbols in NSE_SECTORS.items():
-            if symbol in symbols:
-                return sector
-        return "Other"
+        """The NSE's own sector for the stock (nse_universe.py)."""
+        from src.connectors.nse_universe import sector_of
+        return sector_of(symbol)
+
+    def _get_name(self, symbol: str) -> str:
+        from src.connectors.nse_universe import name_of
+        return name_of(symbol)
 
     def _empty_quote(self, symbol: str) -> Dict[str, Any]:
         return {
@@ -358,5 +369,5 @@ class NSEConnector:
             "kes_usd_rate": self.get_kes_usd_rate(),
             "timestamp": datetime.now(EAT_OFFSET).isoformat(),
             "source": "none", "tier": "tier1" if symbol in NSE_TIER1_SYMBOLS else "tier2",
-            "sector": self._get_sector(symbol), "_stale": True,
+            "sector": self._get_sector(symbol), "name": self._get_name(symbol), "_stale": True,
         }

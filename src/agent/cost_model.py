@@ -6,14 +6,16 @@ trade carries brokerage plus the CMA levy, the NSE levy and CDSC fees. The
 shipped 0.1% is about right for the former and roughly 15 to 20 times too
 low for the latter.
 
-That gap is not cosmetic. At 1.7% a side the round trip is 3.4%, so an NSE
-position must gain 3.4% before it breaks even. A strategy rebalancing
-monthly needs better than 40% a year gross just to stand still. Costing NSE
-trades at 0.1% makes any backtest of them fiction, and makes short-horizon
-NSE trading look viable when it is not.
+That gap is not cosmetic. With AIB-AXYS's schedule (1.30% brokerage on its
+DigiTrader platform, about 0.34% statutory levies and 0.02% stamp duty, so
+1.66% a side) plus an estimated 0.3% slippage, a round trip costs about
+3.9%: an NSE position must gain that before it breaks even. A strategy
+rebalancing monthly needs better than 45% a year gross just to stand still.
+Costing NSE trades at 0.1% makes any backtest of them fiction, and makes
+short-horizon NSE trading look viable when it is not.
 
-The NSE figures below are PLACEHOLDERS. Confirm the real schedule with your
-broker and update `config.json`; see the note on `verified` in each entry.
+`config.json` carries the confirmed schedule and its breakdown; an entry with
+`verified` false is a placeholder, and reports say so.
 """
 
 import logging
@@ -31,12 +33,15 @@ DEFAULT_COSTS: Dict[str, Dict[str, Any]] = {
         'note': 'Alpaca charges no commission on US equities.',
     },
     'nse': {
-        'commission_pct': 0.017,
+        # AIB-AXYS DigiTrader: brokerage + NSE/CMA/CDSC/ICF levies + stamp duty.
+        'commission_pct': 0.0166,
+        'breakdown': {'brokerage_pct': 0.013, 'statutory_levies_pct': 0.0034,
+                      'stamp_duty_pct': 0.0002},
         'min_commission': 0.0,
         'slippage_pct': 0.0030,
-        'verified': False,
-        'note': 'PLACEHOLDER. Brokerage plus CMA levy, NSE levy and CDSC fees. '
-                'Confirm the current schedule with your broker and set verified=true.',
+        'annual_fee_kes': 200,
+        'verified': True,
+        'note': 'AIB-AXYS schedule, 26 Sep 2026. Slippage is an estimate.',
     },
     'crypto': {
         'commission_pct': 0.006,
@@ -84,6 +89,15 @@ def classify(symbol: str, config: Optional[Dict[str, Any]] = None) -> str:
     # config (BTC-USD, ETH-USD); plain tickers are US equities.
     if '-' in sym and sym.rsplit('-', 1)[-1] in {'USD', 'USDT', 'USDC', 'EUR'}:
         return 'crypto'
+    # Any other listed NSE stock (the screener trades beyond the configured
+    # list), unless the config names it as a US holding or core fund.
+    us = {s.upper() for s in dm.get('symbols', []) or []}
+    core = {s.upper() for s in ((config or {}).get('core_satellite') or {}).get('core_symbols', [])
+            } if isinstance(config, dict) else set()
+    if sym not in us and sym not in core:
+        from src.connectors.nse_universe import is_nse_symbol
+        if is_nse_symbol(sym):
+            return 'nse'
     return DEFAULT_MARKET
 
 

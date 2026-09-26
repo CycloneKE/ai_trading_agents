@@ -1,7 +1,7 @@
 // Overview: the headline figures, performance curve, what the agent is
 // watching, top positions, allocation and strategy attribution.
 import {
-  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, PieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area, Line, PieChart, Pie, Cell,
 } from 'recharts';
 import { TrendingUp, Activity, Shield, Zap, Layers, RefreshCw, Globe } from 'lucide-react';
 import AgentActivity from '../AgentActivity';
@@ -25,7 +25,7 @@ const OverviewView = ({ data, isConnected, onDrill, mobile }) => {
       <HUDCard title="Consolidated Equity"
         value={`$${(data.performance.consolidated_equity ?? data.performance.portfolio_value ?? 0).toLocaleString()}`}
         subValue={data.performance.total_pnl > 0 ? `↗ $${data.performance.total_pnl.toFixed(2)}` : `↘ $${(data.performance.total_pnl || 0).toFixed(2)}`}
-        footer={`Paper (US): $${(data.performance.us_paper_value ?? data.performance.portfolio_value ?? 0).toLocaleString()} · Real (NSE): $${(data.performance.nse_value_usd ?? 0).toLocaleString()}`}
+        footer={`US paper: $${(data.performance.us_paper_value ?? data.performance.portfolio_value ?? 0).toLocaleString()} · ${data.performance.nse_is_paper ? 'NSE paper' : 'NSE'}: $${(data.performance.nse_value_usd ?? 0).toLocaleString()}`}
         icon={TrendingUp} color={theme.colors.primary} />
       <HUDCard title="Exposure (VaR)" value={`$${(data.riskMetrics.portfolio_var || 0).toLocaleString()}`} subValue={`Risk Score: ${data.riskMetrics.risk_score?.toFixed(1) || '0.0'}/10`} icon={Shield} color={theme.colors.warning} />
       <HUDCard title="Win Rate" value={`${((data.performance.win_rate || 0) * 100).toFixed(1)}%`} subValue={`${data.performance.total_trades || 0} Trades`} icon={Zap} color={theme.colors.secondary} />
@@ -37,7 +37,7 @@ const OverviewView = ({ data, isConnected, onDrill, mobile }) => {
         <div style={card(mobile)}>
           <SectionHeader title="Performance Curve" icon={Activity} />
           <ResponsiveContainer width="100%" height={mobile ? 220 : 300}>
-            <AreaChart data={data.performance.portfolio_chart || []}>
+            <ComposedChart data={data.performance.portfolio_chart || []}>
               <defs><linearGradient id="colorVal" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={theme.colors.primary} stopOpacity={0.3}/><stop offset="95%" stopColor={theme.colors.primary} stopOpacity={0}/></linearGradient></defs>
               <CartesianGrid strokeDasharray="3 3" stroke={theme.colors.border} vertical={false} />
               <XAxis 
@@ -58,8 +58,13 @@ const OverviewView = ({ data, isConnected, onDrill, mobile }) => {
               />
               <YAxis stroke={theme.colors.textMuted} fontSize={10} domain={['dataMin - (dataMin * 0.01)', 'dataMax + (dataMax * 0.01)']} />
               <Tooltip contentStyle={{ backgroundColor: theme.colors.bgSecondary, border: `1px solid ${theme.colors.border}`, color: '#fff' }} />
-              <Area type="monotone" dataKey="value" stroke={theme.colors.primary} fill="url(#colorVal)" />
-            </AreaChart>
+              <Area type="monotone" dataKey="value" name="Account value" stroke={theme.colors.primary} fill="url(#colorVal)" />
+              {data.performance.benchmark_name && (
+                <Line type="monotone" dataKey="benchmark" name={data.performance.benchmark_name}
+                      stroke={theme.colors.secondary} dot={false} strokeWidth={1.5} strokeDasharray="5 4" connectNulls />
+              )}
+              {data.performance.benchmark_name && <Legend wrapperStyle={{ fontSize: '11px' }} />}
+            </ComposedChart>
           </ResponsiveContainer>
         </div>
         <AgentFocus onDrill={onDrill} />

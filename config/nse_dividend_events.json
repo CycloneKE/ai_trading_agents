@@ -1,0 +1,4 @@
+{
+  "_comment": "Dividends announced by NSE companies, for the paper account (src/agent/nse_paper_account.py). Add each announcement: symbol, dividend_kes (gross per share), payment_date, and ex_date if the notice gives one, otherwise book_closure. The account credits shares it held the day before the ex-date, on the payment date, net of 5% withholding tax. See config/nse_dividends.README.md.",
+  "events": []
+}

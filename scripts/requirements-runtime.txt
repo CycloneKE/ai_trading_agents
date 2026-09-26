@@ -70,6 +70,12 @@ scipy>=1.9.0
 # ModuleNotFoundError. Exactly the failure PyJWT and bcrypt caused before it.
 yfinance>=0.2.60
 
+# --- Paid AI tier ---------------------------------------------------------
+# Claude, via the official SDK. Imported only when ANTHROPIC_API_KEY is set
+# (src/agent/claude_provider.py), so the agent starts without it; it is here
+# so that setting the key is all it takes to switch the paid tier on.
+anthropic>=1.8,<2
+
 # --- Brokers ----------------------------------------------------------------
 # No broker SDK is listed, and none is needed. All three connectors
 # (alpaca, coinbase, oanda) talk to their REST APIs with `requests`, above.
@@ -90,6 +96,8 @@ yfinance>=0.2.60
 # Guarded imports, so the agent starts without them, but then the feature is
 # silently off on the server. Both are small (about 40 MB together).
 pdfplumber>=0.11.0       # Research page: reading uploaded broker research PDFs
+pypdf>=4.0               # Research page: the Market Pulse scorecard keeps its numbers whole
+                         # with pypdf (src/agent/market_pulse.py); pdfplumber is the fallback.
                          # (src/utils/pdf_parser.py). Without it every upload
                          # failed with "PDF extraction will be disabled".
 vaderSentiment>=3.3.2    # News sentiment (src/agent/sentiment_analyzer.py).

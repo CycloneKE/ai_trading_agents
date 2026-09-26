@@ -14,11 +14,22 @@ from src.agent.main import TradingAgent
 from src.agent.nse_order_queue import NseOrderQueue
 from src.agent.nse_paper_account import NsePaperAccount, order_size
 
-COSTS = {'nse': {'commission_pct': 0.017, 'min_commission': 0.0, 'slippage_pct': 0.003}}
+COSTS = {'nse': {'commission_pct': 0.017, 'min_commission': 0.0, 'slippage_pct': 0.003,
+                 'annual_fee_kes': 0}}
 
 
-def _config(capital=200000):
-    return {'nse_paper_trading': {'starting_capital_kes': capital}, 'costs': COSTS,
+# The holding, turnover, liquidity and settlement limits have their own tests
+# below; these mechanics tests buy and sell within one run, so they are off.
+NO_LIMITS = {'min_holding_days': 0, 'max_new_positions_per_week': 1000,
+             'max_adv_fraction': 0, 'settlement_days': 0}
+
+
+def _config(capital=200000, limits=NO_LIMITS, cash_yield=0.0):
+    # Interest on idle cash has its own tests; elsewhere it would move every
+    # cash figure a test computes by hand.
+    return {'nse_paper_trading': {'starting_capital_kes': capital, 'trading_limits': limits,
+                                  'cash_yield_pct': cash_yield},
+            'costs': COSTS,
             'data_manager': {'nse_symbols': ['SCOM'], 'nse_eval_interval': 1800},
             'nse_order_tickets': {'trade_notional_kes': 50000}}
 
@@ -232,7 +243,7 @@ class _LLM:
     def __init__(self):
         self.calls = 0
 
-    def validate_trade(self, symbol, signals, data, news):
+    def validate_trade(self, symbol, signals, data, news, **context):
         self.calls += 1
         return dict(signals, reasoning='approved')
 
@@ -398,3 +409,181 @@ def test_nse_trades_credit_the_strategies_that_voted_for_them(queue, tmp_path):
     assert out['momentum']['closed_trades'] == 1 and out['momentum']['realized_pnl'] < 0
     assert out['momentum']['realized_pnl'] == pytest.approx(3 * out['rsi_strategy']['realized_pnl'], rel=0.01)
     assert out['momentum']['trade_returns'][0] < -0.05
+
+
+def test_the_brokers_yearly_account_fee_is_charged_each_account_year(queue):
+    from datetime import datetime, timedelta
+    cfg = {**_config(), 'costs': {'nse': {**COSTS['nse'], 'annual_fee_kes': 200}}}
+    paper = NsePaperAccount(queue, cfg)
+    assert paper.cash() == 199800.0 and paper.summary()['account_fees_kes'] == 200
+    opened = datetime.fromisoformat(paper.started_at[:19])
+    assert paper.account_fees(opened + timedelta(days=364)) == 200
+    assert paper.account_fees(opened + timedelta(days=366)) == 400
+
+
+# ------------------------------------------------------------ trading limits
+
+LIMITS = {'min_holding_days': 30, 'max_new_positions_per_week': 2,
+          'max_adv_fraction': 0.10, 'settlement_days': 3}
+
+
+def _buy_now(paper, queue, symbol, price=10.0, notional=20000):
+    qty, why = paper.plan(symbol, 'buy', price, notional)
+    assert why is None, why
+    tid = queue.create_ticket(symbol, 'buy', qty, suggested_limit_price=price)
+    paper.fill(tid, 'buy', price, qty)
+    return qty
+
+
+def test_a_signal_cannot_sell_before_the_minimum_holding_period(queue):
+    from datetime import datetime, timedelta
+    paper = NsePaperAccount(queue, _config(limits=LIMITS))
+    _buy_now(paper, queue, 'SCOM')
+    assert paper.plan('SCOM', 'sell', 10.5, 0, confidence=0.9) == (0, 'min_holding')
+    later = datetime.utcnow() + timedelta(days=31)
+    qty, why = paper.plan('SCOM', 'sell', 10.5, 0, confidence=0.9, now=later)
+    assert why is None and qty > 0
+
+
+def test_a_stop_still_sells_inside_the_holding_period(queue):
+    paper = NsePaperAccount(queue, _config(limits=LIMITS))
+    qty = _buy_now(paper, queue, 'SCOM', price=10.0)
+    reason, shares, _ = paper.stop_check('SCOM', 9.0)
+    assert reason == 'stop_loss' and shares == qty
+
+
+def test_new_positions_are_limited_each_week_but_adds_are_not(queue):
+    paper = NsePaperAccount(queue, _config(limits=LIMITS))
+    _buy_now(paper, queue, 'SCOM')
+    _buy_now(paper, queue, 'KCB')
+    assert paper.plan('EQTY', 'buy', 10.0, 20000) == (0, 'turnover_budget')
+    assert paper.new_positions_since(__import__('datetime').datetime(2000, 1, 1)) == 2
+
+
+def test_an_order_is_capped_at_a_tenth_of_average_daily_volume(queue):
+    paper = NsePaperAccount(queue, _config(limits=LIMITS))
+    assert paper.plan('SCOM', 'buy', 10.0, 50000, adv=20000) == (2000, None)
+    assert paper.plan('SCOM', 'buy', 10.0, 50000, adv=5) == (0, 'liquidity_cap')
+    qty, why = paper.plan('SCOM', 'buy', 10.0, 50000, adv=None)  # no volume data: no cap
+    assert why is None and qty > 2000
+
+
+def test_sale_proceeds_are_not_spendable_until_settled(queue):
+    from datetime import datetime, timedelta
+    from src.agent.nse_paper_account import trading_days_since
+    limits = {**LIMITS, 'min_holding_days': 0}
+    paper = NsePaperAccount(queue, _config(capital=30000, limits=limits))
+    qty = _buy_now(paper, queue, 'SCOM', price=10.0, notional=29000)
+    tid = queue.create_ticket('SCOM', 'sell', qty, suggested_limit_price=10.0)
+    paper.fill(tid, 'sell', 10.0, qty)
+    s = paper.summary()
+    assert s['unsettled_kes'] > 25000
+    assert s['available_cash_kes'] == pytest.approx(s['cash_kes'] - s['unsettled_kes'], abs=0.01)
+    assert paper.plan('KCB', 'buy', 5000.0, 20000)[1] == 'insufficient_cash'
+    # Three trading days later the cash is back and the same order fits.
+    later = datetime.utcnow() + timedelta(days=5)
+    assert paper._ledger(later)['unsettled'] == 0
+    qty, why = paper.plan('KCB', 'buy', 5000.0, 20000, now=later)
+    assert why is None and qty > 0
+    # Friday's sale settles on Wednesday.
+    assert trading_days_since('2026-09-25T10:00:00', datetime(2026, 9, 30, 9)) == 3
+
+
+# ------------------------------------------------------------------ dividends
+
+def _with_events(tmp_path, events, **extra):
+    path = tmp_path / 'events.json'
+    path.write_text(__import__('json').dumps({'events': events}))
+    cfg = _config()
+    cfg['nse_paper_trading'].update({'dividend_events_path': str(path), **extra})
+    return cfg
+
+
+def test_a_dividend_is_paid_net_of_withholding_tax_on_its_payment_date(queue, tmp_path):
+    from datetime import datetime, timedelta
+    today = datetime.utcnow()
+    ex = (today + timedelta(days=10)).date().isoformat()
+    pay = (today + timedelta(days=30)).date().isoformat()
+    cfg = _with_events(tmp_path, [{'symbol': 'SCOM', 'dividend_kes': 1.2, 'ex_date': ex,
+                                   'payment_date': pay}])
+    paper = NsePaperAccount(queue, cfg)
+    qty = _buy_now(paper, queue, 'SCOM', price=10.0, notional=20000)
+    cash = paper.cash()
+    assert paper.dividends() == []                       # not paid yet
+    later = today + timedelta(days=31)
+    (d,) = paper.dividends(later)
+    assert (d['shares'], d['gross_kes']) == (qty, round(qty * 1.2, 2))
+    assert d['tax_kes'] == pytest.approx(d['gross_kes'] * 0.05, abs=0.01)
+    assert paper._ledger(later)['cash'] == pytest.approx(cash + d['net_kes'], abs=0.01)
+
+
+def test_shares_bought_on_or_after_the_ex_date_do_not_qualify(queue, tmp_path):
+    from datetime import datetime, timedelta
+    today = datetime.utcnow()
+    cfg = _with_events(tmp_path, [{'symbol': 'SCOM', 'dividend_kes': 1.2,
+                                   'ex_date': (today - timedelta(days=1)).date().isoformat(),
+                                   'payment_date': today.date().isoformat()}])
+    paper = NsePaperAccount(queue, cfg)
+    _buy_now(paper, queue, 'SCOM')
+    assert paper.dividends(today + timedelta(days=1)) == []
+
+
+def test_without_an_ex_date_book_closure_less_three_trading_days_is_used(queue, tmp_path):
+    from datetime import datetime
+    from src.agent.nse_paper_account import subtract_trading_days
+    assert subtract_trading_days(datetime(2026, 7, 31), 3).date().isoformat() == '2026-07-28'
+    cfg = _with_events(tmp_path, [{'symbol': 'SCOM', 'dividend_kes': 1.0,
+                                   'book_closure': '2026-07-31', 'payment_date': '2026-08-29'},
+                                  {'symbol': 'KCB', 'dividend_kes': 1.0}])  # incomplete: ignored
+    paper = NsePaperAccount(queue, cfg)
+    assert [e['symbol'] for e in paper.dividend_events()] == ['SCOM']
+
+
+# ------------------------------------------------------- interest on cash
+
+def test_idle_cash_earns_the_rate_daily_after_withholding_tax():
+    from datetime import datetime
+    from src.agent.nse_paper_account import cash_interest
+    start = datetime(2026, 1, 1)
+    net, tax = cash_interest(start, datetime(2027, 1, 1), 100000, [], 0.0878)
+    # 8.78% less 15% tax is 7.463% a year, compounded daily.
+    assert net == pytest.approx(100000 * ((1 + 0.0878 * 0.85 / 365) ** 365 - 1), abs=0.01)
+    assert tax == pytest.approx(net / 0.85 * 0.15, rel=1e-3)
+    assert cash_interest(start, datetime(2026, 1, 1, 23), 100000, [], 0.0878) == (0.0, 0.0)
+
+
+def test_cash_spent_on_shares_stops_earning_from_that_day():
+    from datetime import datetime
+    from src.agent.nse_paper_account import cash_interest
+    start = datetime(2026, 1, 1)
+    spent_day_one = cash_interest(start, datetime(2026, 1, 11), 100000,
+                                  [(datetime(2026, 1, 1, 9), -100000)], 0.10)
+    assert spent_day_one == (0.0, 0.0)
+    half = cash_interest(start, datetime(2026, 1, 11), 100000,
+                         [(datetime(2026, 1, 1, 9), -50000)], 0.10)
+    whole = cash_interest(start, datetime(2026, 1, 11), 100000, [], 0.10)
+    assert half[0] == pytest.approx(whole[0] / 2, rel=1e-3)
+
+
+def test_the_account_credits_interest_to_cash_and_reports_it(queue):
+    from datetime import datetime, timedelta
+    paper = NsePaperAccount(queue, _config(cash_yield=0.0878))
+    opened = datetime.fromisoformat(paper.started_at[:19])
+    ledger = paper._ledger(opened + timedelta(days=30))
+    assert ledger['interest_net'] > 0
+    assert ledger['cash'] == pytest.approx(200000 + ledger['interest_net'], abs=0.01)
+    assert paper.summary()['cash_yield_pct'] == 0.0878
+
+
+def test_the_cash_rate_defaults_to_the_benchmark_tbill_rate(queue):
+    cfg = _config()
+    del cfg['nse_paper_trading']['cash_yield_pct']
+    cfg['benchmarks'] = {'tbill_rate_pct': 0.09}
+    assert NsePaperAccount(queue, cfg).cash_yield == 0.09
+
+
+def test_a_new_position_after_a_sell_out_has_its_own_average_price(queue):
+    for side, qty, px in (('buy', 100, 40.0), ('sell', 100, 45.0), ('buy', 50, 20.0)):
+        t = queue.create_ticket('KCB', side, qty, suggested_limit_price=px, book='long_term')
+        queue.mark_filled(t, fill_price=px, fill_quantity=qty)
+    assert queue.positions(book='long_term')['KCB'] == {'quantity': 50, 'avg_entry_price_kes': 20.0}

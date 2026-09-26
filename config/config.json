@@ -94,6 +94,38 @@
       "rsi_oversold": 30,
       "weight": 0.8,
       "max_position_size": 0.05
+    },
+    "crypto_trend": {
+      "_comment": "Crypto only (src/agent/slow_strategies.py). Holds a coin while its close is more than `band` above its sma_period-day average, sells when it is more than `band` below, and otherwise has no view. Long-only, no leverage; sized by volatility like every trade. strategy_markets makes it crypto's only voter.",
+      "type": "trend_following",
+      "enabled": true,
+      "markets": ["crypto"],
+      "sma_period": 200,
+      "band": 0.02,
+      "weight": 1.0,
+      "max_position_size": 0.05
+    },
+    "nse_rotation": {
+      "_comment": "NSE only. Ranks the NSE stocks by their return over `lookback` trading days ending `skip` days ago (about six months, skipping the latest month); the top_n with a positive return are buys, and a holding outside the top exit_rank, or with a negative return, is a sell. Abstains until at least min_universe stocks have lookback + skip + 1 days of real history.",
+      "type": "rotation",
+      "enabled": true,
+      "markets": ["nse"],
+      "lookback": 120,
+      "skip": 20,
+      "top_n": 3,
+      "exit_rank": 6,
+      "weight": 1.0,
+      "max_position_size": 0.05
+    },
+    "us_earnings_drift": {
+      "_comment": "US shares only. After an earnings beat of at least min_surprise (actual versus the analysts' estimate), a buy for hold_days calendar days, fading over the window; after a miss of that size, a sell. Needs TRADING_FINNHUB_API_KEY; without it, and outside a report's window, it abstains.",
+      "type": "earnings_drift",
+      "enabled": true,
+      "markets": ["us_equity"],
+      "min_surprise": 0.05,
+      "hold_days": 40,
+      "weight": 1.0,
+      "max_position_size": 0.05
     }
   },
   "risk_management": {
@@ -130,8 +162,10 @@
     ],
     "scoring": {
       "yield_cap_pct": 12.0,
-      "yield_weight": 0.5,
-      "quality_weight": 0.5,
+      "yield_weight": 0.4,
+      "quality_weight": 0.3,
+      "value_weight": 0.3,
+      "earnings_yield_cap_pct": 25.0,
       "payout_ratio_min": 0.3,
       "payout_ratio_max": 0.7,
       "years_paid_target": 5,
@@ -143,6 +177,10 @@
       "min_years_paid": 3,
       "max_per_sector": 2,
       "ex_date_tilt": 0.1
+    },
+    "tbill_switch": {
+      "_comment": "Value against Treasury bills: when the median earnings yield (earnings per share / price) of the stocks the sleeve can buy is below the T-bill rate after 15% withholding tax, the sleeve skips that month and the money stays in bills. The rate is benchmarks.tbill_rate_pct unless tbill_rate_pct is set here.",
+      "enabled": true
     },
     "sectors": {
       "KCB": "banking",
@@ -323,10 +361,22 @@
       "min_remaining_pct": 0.02
     },
     "stop_loss": {
-      "_comment": "Checked every NSE evaluation before any signal: a position is sold in full when the price is stop_loss_pct below its cost (fees included) or trailing_stop_pct below the highest price since it opened. Where the stock's ATR is known the stops scale to risk_limits' ATR multiples, but never tighter than these: a round trip costs about 3.4%, and a stop tripped by an ordinary day's noise pays that for nothing.",
+      "_comment": "Checked every NSE evaluation before any signal: a position is sold in full when the price is stop_loss_pct below its cost (fees included) or trailing_stop_pct below the highest price since it opened. Where the stock's ATR is known the stops scale to risk_limits' ATR multiples, but never tighter than these: a round trip costs about 3.9% with slippage, and a stop tripped by an ordinary day's noise pays that for nothing.",
       "enabled": true,
       "stop_loss_pct": 0.08,
       "trailing_stop_pct": 0.10
+    },
+    "dividend_withholding_pct": 0.05,
+    "dividend_events_path": "config/nse_dividend_events.json",
+    "_cash_yield_note": "Idle cash earns interest daily, as if swept into a money market fund or T-bills, with 15% withholding tax on the interest. Leave cash_yield_pct out to use benchmarks.tbill_rate_pct; set it to 0 to switch interest off.",
+    "interest_withholding_pct": 0.15,
+    "trading_limits": {
+      "_comment": "How often and how big the paper account may trade (src/agent/nse_paper_account.py). An order is capped at max_adv_fraction of the stock's average daily volume over adv_days; a signal cannot sell a position held for less than min_holding_days (stops still can); at most max_new_positions_per_week new holdings are opened in any 7 days (adds do not count); and sale proceeds are not spendable until settlement_days trading days later (CDSC's T+3).",
+      "max_adv_fraction": 0.10,
+      "adv_days": 20,
+      "min_holding_days": 30,
+      "max_new_positions_per_week": 2,
+      "settlement_days": 3
     }
   },
   "strategy_tuning": {
@@ -340,6 +390,12 @@
     "min_closed_trades": 10,
     "poor_win_rate": 0.4
   },
+  "benchmarks": {
+    "_comment": "What each account is compared with on the dashboard (src/agent/benchmarks.py). The NSE paper account: Kenyan 91-day Treasury bills after withholding tax, and an equal-weight basket of the watched NSE stocks bought on its first day and held (price only). The US account: us_symbol. Update tbill_rate_pct when the CBK auction rate moves.",
+    "tbill_rate_pct": 0.0878,
+    "tbill_withholding_pct": 0.15,
+    "us_symbol": "SPY"
+  },
   "costs": {
     "_comment": "Per-side transaction costs by market. A single global rate cannot describe this portfolio: Alpaca is commission-free on US equities while an NSE round trip runs several percent. Set verified=true once you have confirmed a schedule with your broker.",
     "us_equity": {
@@ -350,11 +406,18 @@
       "note": "Alpaca charges no commission on US equities."
     },
     "nse": {
-      "commission_pct": 0.017,
+      "commission_pct": 0.0166,
+      "breakdown": {
+        "brokerage_pct": 0.013,
+        "statutory_levies_pct": 0.0034,
+        "stamp_duty_pct": 0.0002
+      },
       "min_commission": 0.0,
       "slippage_pct": 0.003,
-      "verified": false,
-      "note": "PLACEHOLDER \u2014 CONFIRM WITH AIB-AXYS. Brokerage plus CMA levy, NSE levy and CDSC fees. At 1.7% a side the round trip is 3.4%, which decides whether any NSE strategy is viable. Set verified=true after checking."
+      "annual_fee_kes": 200,
+      "verified": true,
+      "source": "AIB-AXYS fee schedule provided by the operator on 26 Sep 2026",
+      "note": "Per side: 1.30% brokerage on AIB DigiTrader (desk orders can reach 1.6%), statutory levies for the NSE, CMA, CDSC and ICF of 0.29-0.34% taken at 0.34%, and stamp duty of KES 2 per KES 10,000. commission_pct is their sum. Slippage is an estimate, not a fee. Never use the optional 5% instant-settlement fee: the paper account waits for T+3 settlement instead. Check the first real contract note against these figures."
     },
     "crypto": {
       "commission_pct": 0.006,
@@ -369,6 +432,39 @@
     "enabled": true,
     "fast_period": 20,
     "slow_period": 50
+  },
+  "nse_screener": {
+    "_comment": "Which NSE stocks the agent trades (src/agent/nse_screener.py). Every listed stock is screened weekly from its real history; the agent trades its holdings plus the best-ranked eligible stocks, at most max_per_sector from one sector, plus exploration_slots stocks ranked just below the cut (rotating weekly), up to max_symbols in all. Eligible: at least min_history_days real daily bars (what the strategies need to signal) and an average traded value of at least min_avg_value_kes a day (null: ten times nse_order_tickets.trade_notional_kes, since an order is capped at 10% of a day's volume). While too few stocks qualify, data_manager.nse_symbols fills the gaps. With llm_review, an AI may remove up to llm_max_removals names for a concrete reason (a suspension, a takeover offer). Set enabled to false to trade data_manager.nse_symbols as before.",
+    "enabled": true,
+    "max_symbols": 9,
+    "max_per_sector": 3,
+    "exploration_slots": 1,
+    "min_history_days": 50,
+    "min_avg_value_kes": null,
+    "refresh_days": 7,
+    "llm_review": true,
+    "llm_max_removals": 2
+  },
+  "claude": {
+    "_comment": "Paid AI tier (src/agent/claude_provider.py), off unless ANTHROPIC_API_KEY is set in the environment. Then trade_review_model reviews every trade signal and volume_model does the high-volume JSON work, and the free Gemini/OpenRouter models become the fallback. Spending is priced from each reply's token counts and capped at monthly_budget_usd per calendar month (UTC); once the cap would be passed, only the free models are used until the next month. Spending is kept in data/ai_spend.json.",
+    "trade_review_model": "claude-sonnet-5",
+    "volume_model": "claude-haiku-4-5",
+    "review_effort": "medium",
+    "monthly_budget_usd": 20
+  },
+  "strategy_markets": {
+    "_comment": "For each market listed, only these strategies vote on its symbols; a market not listed is open to every strategy (a strategy's own `markets` still applies). Crypto trades on the 200-day trend alone, as the gap analysis recommends: the fast strategies' daily signals cost too much there. Delete the crypto line to let every strategy vote on crypto again.",
+    "crypto": ["crypto_trend"]
+  },
+  "core_satellite": {
+    "_comment": "US account only (src/agent/core_portfolio.py). The strategies trade active_share of equity, sizing every trade from that share; the rest is a core of low-cost index funds (S&P 500, 7-10 year Treasuries, gold) weighted so each carries about the same risk, rebalanced on the first session of each month or when a fund drifts more than drift_band from its target. The core never uses margin and has no stop-losses. Core funds must not be in data_manager.symbols (VOO, not SPY); any that are get dropped from the core. The gap analysis puts active_share at 0.50-0.60 for paper trading; when real money starts, begin lower and raise it in steps only while live results stay within tolerance of paper.",
+    "enabled": true,
+    "active_share": 0.55,
+    "core_symbols": ["VOO", "IEF", "IAU"],
+    "vol_lookback": 60,
+    "max_weight": 0.6,
+    "drift_band": 0.05,
+    "min_trade_usd": 100
   },
   "momentum_rotation": {
     "_comment": "Cross-sectional momentum: rank the universe by 12-1 return, hold the leaders, rebalance monthly. Distinct from the per-symbol `momentum` technical strategy. absolute_filter holds cash rather than buying the best-performing loser in a falling market.",

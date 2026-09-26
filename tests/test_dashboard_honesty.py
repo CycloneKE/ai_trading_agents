@@ -136,12 +136,20 @@ def test_nse_market_reports_the_backend_phase():
     assert data['market_open'] is False
 
 
-def test_nse_market_lists_only_the_watched_universe():
+def test_nse_market_lists_every_stock_with_real_data_and_the_traded_ones(tmp_path, monkeypatch):
+    # Step B: the whole exchange, not only the traded list. A stock with a
+    # real bar is listed; one with only synthetic seed data, which nothing
+    # trades, is not shown as a row of made-up prices.
+    import src.connectors.nse_connector as nse_connector
+    monkeypatch.setattr(nse_connector, 'NSE_CSV_DIR', tmp_path)
+    (tmp_path / 'JUB.csv').write_text('date,close,source\n2026-09-25,180.0,nse_ticker\n')
+    (tmp_path / 'SMER.csv').write_text('date,close,source\n2026-09-25,3.0,synthetic\n')
     nse = _NSE()
     client, h = _client(nse=nse, nse_symbols=['scom', 'eqty', 'kcb'])
     data = client.get('/api/nse-market', headers=h).get_json()
-    assert nse.asked_for == ['SCOM', 'EQTY', 'KCB']
-    assert {q['symbol'] for q in data['quotes']} == {'SCOM', 'EQTY', 'KCB'}
+    assert nse.asked_for == ['EQTY', 'JUB', 'KCB', 'SCOM']
+    assert {q['symbol']: q['traded'] for q in data['quotes']} == {
+        'EQTY': True, 'JUB': False, 'KCB': True, 'SCOM': True}
 
 
 def test_nse_provenance_counts_synthetic_prices_as_synthetic():

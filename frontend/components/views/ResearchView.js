@@ -13,6 +13,7 @@ const ResearchView = ({ active, onChanged, onDrill, mobile }) => {
   const [escalations, setEscalations] = useState([]);
   const [watchlist, setWatchlist] = useState([]);
   const [uploads, setUploads] = useState([]);
+  const [pulse, setPulse] = useState(null);
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('trading_token') : null;
 
@@ -35,6 +36,9 @@ const ResearchView = ({ active, onChanged, onDrill, mobile }) => {
         const wlJson = await wlRes.json();
         setWatchlist(wlJson.watchlist || []);
       }
+
+      const mpRes = await fetch(`${getApiBase()}/api/research/market-pulse`, { headers: { Authorization: `Bearer ${token}` } });
+      if (mpRes.ok) setPulse(await mpRes.json());
     } catch (e) {
       console.error("Failed to fetch research data", e);
     }
@@ -137,8 +141,11 @@ const ResearchView = ({ active, onChanged, onDrill, mobile }) => {
               </div>
             ) : (
               <div>
-                <p style={{ margin: 0, fontSize: '13px', color: theme.colors.textSecondary }}>Drag & drop or click to select AIB AXYS broker report (PDF)</p>
-                <p style={{ margin: '5px 0 0 0', fontSize: '11px', color: theme.colors.textMuted }}>Directly extracts symbols, recommendations & investment rationales via LLM</p>
+                <p style={{ margin: 0, fontSize: '13px', color: theme.colors.textSecondary }}>Drag & drop or click to select an AIB-AXYS report (PDF)</p>
+                <p style={{ margin: '5px 0 0 0', fontSize: '11px', color: theme.colors.textMuted }}>
+                  The daily Market Pulse is read exactly: every stock's fundamentals and closing price, T-bill rates and announcements.
+                  Analyst notes: ratings, targets and rationales are extracted by the AI.
+                </p>
               </div>
             )}
           </div>
@@ -149,7 +156,13 @@ const ResearchView = ({ active, onChanged, onDrill, mobile }) => {
                 {uploadResult.status === 'completed' ? <CheckCircle size={16} /> : <XCircle size={16} />}
                 <span>{uploadResult.status === 'completed' ? 'Processing Complete' : 'Processing Failed'}</span>
               </div>
-              {uploadResult.status === 'completed' ? (
+              {uploadResult.status === 'completed' && uploadResult.document_type === 'market_pulse' ? (
+                <div style={{ fontSize: '12px', marginTop: '5px', color: theme.colors.textSecondary }}>
+                  <p style={{ margin: '3px 0' }}>Market Pulse for <strong>{uploadResult.as_of}</strong>: {uploadResult.stocks_mapped} of {uploadResult.stocks_read} stocks read, {uploadResult.price_bars_added} closing prices added to history, {(uploadResult.announcements || []).length} announcements.</p>
+                  {uploadResult.rates?.tbill_91 && <p style={{ margin: '3px 0' }}>91-day T-bill: <strong>{(uploadResult.rates.tbill_91 * 100).toFixed(2)}%</strong> (now used for the benchmark and the interest on idle cash).</p>}
+                  {uploadResult.unmapped?.length > 0 && <p style={{ margin: '3px 0', color: theme.colors.warning }}>Not yet matched to a ticker: {uploadResult.unmapped.join(', ')}. They are matched automatically once the NSE feed has recorded them on the same day.</p>}
+                </div>
+              ) : uploadResult.status === 'completed' ? (
                 <div style={{ fontSize: '12px', marginTop: '5px', color: theme.colors.textSecondary }}>
                   <p style={{ margin: '3px 0' }}>Successfully processed <strong>{uploadResult.signals_processed}</strong> recommendations.</p>
                   {uploadResult.auto_followed?.length > 0 && <p style={{ margin: '3px 0' }}>Auto-followed watchlist: <span style={{ color: theme.colors.primary }}>{uploadResult.auto_followed.join(', ')}</span></p>}
@@ -161,6 +174,31 @@ const ResearchView = ({ active, onChanged, onDrill, mobile }) => {
             </div>
           )}
         </div>
+
+        {pulse?.latest && (
+          <div style={card(mobile, { flex: '1 1 340px', minWidth: 0 })}>
+            <SectionHeader title="Latest Market Pulse" icon={FileText} />
+            <div style={{ fontSize: '12px', color: theme.colors.textSecondary, display: 'grid', gap: '6px' }}>
+              <div>Report of <strong>{pulse.latest.as_of}</strong>; {pulse.reports} read so far. Fundamentals held for {pulse.stocks_with_fundamentals} stocks: they feed the dividend sleeve, the Market Scan and the AI's review of NSE trades.</div>
+              {pulse.rates?.tbill_91 && (
+                <div>T-bills: 91-day {(pulse.rates.tbill_91 * 100).toFixed(2)}%, 182-day {((pulse.rates.tbill_182 || 0) * 100).toFixed(2)}%, 364-day {((pulse.rates.tbill_364 || 0) * 100).toFixed(2)}%{pulse.rates.usd_kes ? `; USD ${pulse.rates.usd_kes} KES` : ''}.</div>
+              )}
+              {(pulse.announcements || []).length > 0 && (
+                <div style={{ maxHeight: '140px', overflowY: 'auto', borderTop: `1px solid ${theme.colors.border}`, paddingTop: '6px' }}>
+                  {pulse.announcements.map((a, i) => (
+                    <div key={i} style={{ padding: '3px 0' }}>
+                      <span style={{ color: theme.colors.textMuted }}>{a.date}</span>{' '}
+                      {a.symbol && <strong>{a.symbol}</strong>}{' '}
+                      {a.link
+                        ? <a href={a.link} target="_blank" rel="noopener noreferrer" style={{ color: theme.colors.textSecondary }}>{a.text} ↗</a>
+                        : a.text}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         <div style={card(mobile, { flex: '1 1 340px', minWidth: 0 })}>
           <SectionHeader title="Ingest Archives" icon={Clock} />

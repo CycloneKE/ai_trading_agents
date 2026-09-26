@@ -1,7 +1,10 @@
-// Insights: performance analytics and the market feeds (news and the
-// sector heatmap), as two tabs of one section.
+// Insights: performance analytics, the strategies and what the agent has
+// learned about them, and the market feeds (news and the sector heatmap),
+// as three tabs of one section.
 import { ExternalLink, Globe, Layers } from 'lucide-react';
 import AdvancedAnalytics from '../AdvancedAnalytics';
+import AiScorecard from './AiScorecard';
+import StrategiesLearning from './StrategiesLearning';
 import { theme } from '../DashboardStyles';
 import { card, columns, SectionHeader, SubTabs } from '../ui';
 
@@ -84,12 +87,15 @@ const MarketFeeds = ({ data, mobile, onSector }) => (
 );
 
 export default function InsightsSection({ sub, onSub, data, mobile, onSector }) {
-  const tabs = [{ id: 'analytics', label: 'Analytics' }, { id: 'feeds', label: 'Market Feeds' }];
+  const tabs = [{ id: 'analytics', label: 'Analytics' }, { id: 'learning', label: 'Strategies & Learning' },
+    { id: 'feeds', label: 'Market Feeds' }];
   const current = tabs.some((t) => t.id === sub) ? sub : 'analytics';
   return (
     <div>
       <SubTabs tabs={tabs} active={current} onChange={onSub} />
-      {current === 'analytics' ? <AdvancedAnalytics data={data} mobile={mobile} /> : <MarketFeeds data={data} mobile={mobile} onSector={onSector} />}
+      {current === 'analytics' && <><AiScorecard mobile={mobile} /><AdvancedAnalytics data={data} mobile={mobile} /></>}
+      {current === 'learning' && <StrategiesLearning mobile={mobile} />}
+      {current === 'feeds' && <MarketFeeds data={data} mobile={mobile} onSector={onSector} />}
     </div>
   );
 }

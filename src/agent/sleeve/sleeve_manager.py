@@ -52,7 +52,31 @@ def _scoring_config_from_dict(d: Dict[str, Any]) -> ScoringConfig:
         years_paid_target=years_paid_target,
         min_avg_daily_volume=d.get('min_avg_daily_volume', 50_000),
         stale_days=d.get('stale_days', 400),
+        value_weight=d.get('value_weight', 0.0),
+        earnings_yield_cap_pct=max(d.get('earnings_yield_cap_pct', 25.0), 0.1),
     )
+
+
+def tbill_switch_reason(candidates, tbill_rate_pct: float,
+                        withholding: float = 0.15) -> Optional[str]:
+    """Why the sleeve should buy Treasury bills instead of shares, or None.
+
+    When the typical (median) earnings yield of the stocks it can buy is
+    below what a T-bill pays after its 15% withholding tax, shares are
+    dear: the sleeve skips the month and the money stays in bills. Too few
+    stocks with the data to judge means no switch.
+    """
+    from statistics import median
+    from src.agent.sleeve.dividend_scorer import earnings_yield_pct
+    yields = [y for y in (earnings_yield_pct(f) for f in candidates) if y is not None]
+    if len(yields) < 3:
+        return None
+    net_bill = tbill_rate_pct * (1 - withholding)
+    typical = median(yields)
+    if typical < net_bill:
+        return (f"median earnings yield {typical:.1f}% is below the T-bill's "
+                f"{net_bill:.1f}% after tax; holding bills this month")
+    return None
 
 
 class SleeveManager:
@@ -71,6 +95,15 @@ class SleeveManager:
         # high-yield list, so without this the sleeve becomes a single bet on
         # one credit cycle. Unmapped symbols are never capped.
         self.sector_map = sc.get('sectors', {}) or {}
+        # Earnings yield versus T-bills (tbill_switch_reason). The bill rate
+        # is the benchmarks' one unless the sleeve sets its own.
+        ts = sc.get('tbill_switch', {}) or {}
+        self.tbill_switch = bool(ts.get('enabled', False))
+        from src.agent.benchmarks import TBILL_TAX_DEFAULT
+        bench = config.get('benchmarks', {}) if isinstance(config.get('benchmarks'), dict) else {}
+        self._config = config
+        self._tbill_set = ts.get('tbill_rate_pct')
+        self.tbill_withholding = float(bench.get('tbill_withholding_pct', TBILL_TAX_DEFAULT))
 
         self.nse_order_queue = nse_order_queue
         self.fundamentals_store = fundamentals_store
@@ -84,6 +117,15 @@ class SleeveManager:
         self._conn.execute('PRAGMA journal_mode=WAL')
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+
+    @property
+    def tbill_rate_pct(self) -> float:
+        """The bill rate in percent: the sleeve's own setting, else the
+        current rate (the latest Market Pulse, else the benchmarks')."""
+        if self._tbill_set:
+            return 100 * float(self._tbill_set)
+        from src.agent.benchmarks import tbill_rate
+        return 100 * tbill_rate(self._config)[0]
 
     def _get_state(self, key: str) -> Optional[str]:
         with self._lock:
@@ -135,6 +177,13 @@ class SleeveManager:
 
         try:
             candidates = self.fundamentals_store.get_all(self.universe)
+            if self.tbill_switch:
+                why = tbill_switch_reason(candidates, self.tbill_rate_pct, self.tbill_withholding)
+                if why:
+                    logger.info(f"Sleeve: {why}")
+                    self._set_state('last_skip_reason', why)
+                    self._set_state('last_cycle_month', month_key)
+                    return []
             ranked = rank_candidates(candidates, self.scoring_cfg, self.top_n,
                                      sector_lookup=self.sector_map)
             ranked = [c for c in ranked if quotes.get(c.symbol, 0) > 0]
@@ -162,6 +211,7 @@ class SleeveManager:
                     tags.append('VETO_UNAVAILABLE')
                 rationale = (f"Sleeve accumulation: yield_score={candidate.yield_score}, "
                             f"quality_score={candidate.quality_score}, "
+                            f"value_score={candidate.value_score}, "
                             f"combined={candidate.combined_score}")
                 if tags:
                     rationale += " | " + ", ".join(tags)

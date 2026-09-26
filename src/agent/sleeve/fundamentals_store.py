@@ -80,6 +80,13 @@ class FundamentalsStore:
 
     def get(self, symbol: str) -> Optional[Fundamentals]:
         operator = self._load_operator_data().get(symbol.upper())
+        # The broker's Market Pulse carries earnings and dividends for every
+        # listed stock (market_pulse.py). It stands in for the hand-kept file,
+        # which still wins on payment history and on anything it sets.
+        from src.agent import market_pulse
+        pulse = market_pulse.fundamentals(symbol)
+        if pulse:
+            return self._from_pulse(symbol, pulse, operator or {})
         if not operator:
             return None
         scraped = scrape_afx_company_page(symbol) or {}
@@ -99,6 +106,29 @@ class FundamentalsStore:
             eps_trend=operator.get('eps_trend', 'flat'),
             avg_daily_volume=self._avg_daily_volume(symbol),
             last_updated=operator.get('last_updated', datetime.now(timezone.utc).isoformat()),
+        )
+
+    def _from_pulse(self, symbol: str, pulse: Dict[str, Any],
+                    operator: Dict[str, Any]) -> Optional[Fundamentals]:
+        from src.agent.market_pulse import eps_trend
+        eps = operator.get('eps_kes', pulse.get('eps'))
+        dps = operator.get('dividend_per_share_kes', pulse.get('dps'))
+        price = pulse.get('price')
+        if not dps or not price or eps is None:
+            return None
+        yield_pct = operator.get('yield_ttm_pct', round(dps / price * 100, 2))
+        return Fundamentals(
+            symbol=symbol.upper(),
+            yield_ttm_pct=float(yield_pct),
+            dividend_per_share_kes=float(dps),
+            eps_kes=float(eps),
+            payout_ratio=round(dps / eps, 4) if eps > 0 else operator.get('payout_ratio_override'),
+            # Not in the report: a stock's record of paying stays the
+            # operator's to state; without it the quality score counts none.
+            years_consecutive_paid=int(operator.get('years_consecutive_paid', 0)),
+            eps_trend=operator.get('eps_trend', eps_trend(pulse)),
+            avg_daily_volume=self._avg_daily_volume(symbol),
+            last_updated=pulse.get('as_of') or datetime.now(timezone.utc).isoformat(),
         )
 
     def get_all(self, symbols: List[str]) -> List[Fundamentals]:

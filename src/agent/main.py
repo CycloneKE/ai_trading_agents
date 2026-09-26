@@ -17,8 +17,8 @@ import signal
 import threading
 import time
 import math
-from datetime import datetime
-from typing import Dict, Any, Optional
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -125,6 +125,8 @@ class TradingAgent:
         self.running = False
         self.start_time = time.time()  # for /api/system-health uptime
         self.trading_halted = False  # kill switch: blocks all NEW orders when True
+        self.halt_reason = None
+        self.halted_at = None
         self.components = {}
         self.order_journal = None  # initialized in start() after brokers connect
         self.decision_journal = None
@@ -212,6 +214,7 @@ class TradingAgent:
                 self.config.get('risk_management', {}),
                 self.database
             )
+            self._restore_halt()
             
             # Performance Analytics
             self.performance_analytics = PerformanceAnalytics(
@@ -353,7 +356,8 @@ class TradingAgent:
                     risk_manager=self.risk_manager,
                     broker_manager=self.components.get('broker_manager'),
                     audit_journal=self.components.get('audit_journal'),
-                    timeout_seconds=self.config.get('heartbeat_timeout_seconds', 180)
+                    timeout_seconds=self.config.get('heartbeat_timeout_seconds', 180),
+                    on_trigger=lambda reason: self.halt_trading(reason=reason),
                 )
                 self.heartbeat_monitor.start_watchdog()
                 logger.info("Dead-Man's Switch heartbeat monitor activated (timeout=%ds)", self.config.get('heartbeat_timeout_seconds', 180))
@@ -397,11 +401,20 @@ class TradingAgent:
         # position has earned one (position_rules.plan_add).
         return True, None, held, avg_entry
 
-    def _history_needed(self) -> int:
-        """Daily bars a symbol needs before every strategy can signal."""
+    def _history_needed(self, symbol: Optional[str] = None, required_only: bool = True) -> int:
+        """Daily bars a symbol needs before every strategy can signal.
+
+        Per symbol when the strategy manager scopes strategies to markets:
+        crypto's 200-day trend strategy does not make an NSE stock "short".
+        `required_only` leaves out strategies that abstain until their
+        history is deep enough (slow_strategies.py).
+        """
         sm = self.components.get('strategy_manager')
+        if symbol is not None and hasattr(sm, 'history_needed'):
+            return sm.history_needed(symbol, required_only=required_only)
         need = [int(getattr(s, 'lookback_period', 0) or 0)
-                for s in (getattr(sm, 'strategies', {}) or {}).values()]
+                for s in (getattr(sm, 'strategies', {}) or {}).values()
+                if not (required_only and getattr(s, 'abstains', False))]
         return max(need + [1])
 
     def _warm_start_history(self) -> None:
@@ -419,26 +432,35 @@ class TradingAgent:
         if sm is None:
             return
         dm_cfg = self.config.get('data_manager', {})
-        need = self._history_needed()
         live = [s for s in dm_cfg.get('symbols', []) if s not in self._history_seeded]
-        nse = [s for s in dm_cfg.get('nse_symbols', []) if s not in self._history_seeded]
+        trading = TradingAgent.nse_trading_symbols(self)
+        if getattr(self, '_nse_active', None) is None:
+            self._nse_active = set(trading)
+        nse = [s for s in trading if s not in self._history_seeded]
+        # What each symbol must have to trade, and how deep to fetch so the
+        # slower strategies (a 200-day average, six-month ranking) can vote.
+        need_for = {s: self._history_needed(s) for s in live + nse}
+        need = max(list(need_for.values()) + [1])
+        want = lambda syms: max([self._history_needed(s, required_only=False) for s in syms] + [60])
 
         histories = {}
         if live:
-            histories.update(fetch_daily_history(live))
+            histories.update(fetch_daily_history(live, bars=want(live)))
         if nse:
             from src.connectors.nse_connector import NSE_CSV_DIR
-            nse_history = read_nse_history(nse, NSE_CSV_DIR)
+            nse_bars = want(nse)
+            nse_history = read_nse_history(nse, NSE_CSV_DIR, bars=nse_bars)
             # afx only tops up a symbol that is short. Asking it for every
             # symbol on every start, when the stored NSE history already
             # covers them, held the loop for minutes whenever afx was
             # unreachable and tripped the heartbeat watchdog.
-            short_nse = [s for s in nse if len(nse_history.get(s, {}).get('close', [])) < need]
+            short_nse = [s for s in nse
+                         if len(nse_history.get(s, {}).get('close', [])) < need_for[s]]
             if short_nse:
                 try:
                     from src.connectors.nse_scraper import backfill_afx_history
                     if backfill_afx_history(short_nse):
-                        nse_history.update(read_nse_history(short_nse, NSE_CSV_DIR))
+                        nse_history.update(read_nse_history(short_nse, NSE_CSV_DIR, bars=nse_bars))
                 except Exception as e:
                     logger.warning(f"NSE real-history backfill failed: {e}")
             histories.update(nse_history)
@@ -453,7 +475,7 @@ class TradingAgent:
                         logger.debug(f"ATR warm-start failed for {s}: {e}")
 
         depth = {s: len(h['close']) for s, h in histories.items()}
-        self._history_seeded |= {s for s, n in depth.items() if n >= need}
+        self._history_seeded |= {s for s, n in depth.items() if n >= need_for.get(s, need)}
         short = {s: depth.get(s, 0) for s in live + nse if s not in self._history_seeded}
         if short:
             logger.error(
@@ -1138,8 +1160,14 @@ class TradingAgent:
                                 from src.agent.universe_scout import propose_candidates
                                 nse = self.components.get('data_manager')
                                 em = self.components.get('escalation_manager')
+                                from src.agent import nse_screener
+                                # With the screener on, every listed stock is
+                                # already screened weekly; proposing one would
+                                # only ask the operator to approve a no-op.
+                                if nse_screener.settings(self.config).get('enabled'):
+                                    em = None
                                 if em and nse:
-                                    tracked = set(self.config.get('data_manager', {}).get('nse_symbols', []))
+                                    tracked = set(self.nse_trading_symbols())
                                     movers = []
                                     nse_conn = getattr(nse, 'connectors', {}).get('nse')
                                     if nse_conn:
@@ -1157,7 +1185,7 @@ class TradingAgent:
                 # otherwise leave those symbols unable to signal for weeks.
                 try:
                     configured = (set(self.config.get('data_manager', {}).get('symbols', []))
-                                  | set(self.config.get('data_manager', {}).get('nse_symbols', [])))
+                                  | set(self.nse_trading_symbols()))
                     if (configured - getattr(self, '_history_seeded', set())
                             and time.time() - getattr(self, '_last_history_attempt', 0) > 3600):
                         self._warm_start_history()
@@ -1178,6 +1206,13 @@ class TradingAgent:
                     self._run_sleeve_cycle()
                 except Exception as e:
                     logger.error(f"Sleeve cycle error: {e}")
+
+                # Core of the core-satellite split: index funds, rebalanced
+                # monthly (core_portfolio.py). Checked every 15 minutes.
+                try:
+                    self._run_core_cycle()
+                except Exception as e:
+                    logger.error(f"Core portfolio error: {e}")
 
                 # Dead-Man's Switch heartbeat ping
                 if getattr(self, 'heartbeat_monitor', None):
@@ -1225,7 +1260,19 @@ class TradingAgent:
                       and paper is not None and paper.enabled)
         base_notional = nse_cfg.get('trade_notional_kes', 50000)
         cycle = int(now // interval)
-        nse_symbols = self.config.get('data_manager', {}).get('nse_symbols', [])
+        # This week's short list from the screen of the whole exchange, plus
+        # every holding (nse_screener.py); the configured list if it is off.
+        try:
+            TradingAgent._refresh_nse_shortlist(self)
+        except Exception as e:
+            logger.error(f"NSE shortlist refresh failed; keeping the last list: {e}")
+        nse_symbols = TradingAgent.nse_trading_symbols(self)
+        from src.agent import nse_screener
+        stale_days = int(nse_screener.settings(self.config)['stale_after_days'])
+        try:
+            TradingAgent._sync_nse_state(self, nse_symbols)
+        except Exception as e:
+            logger.error(f"NSE trading list sync failed: {e}")
         real_prices = {}  # this cycle's real quotes, for the equity snapshot
 
         for symbol in nse_symbols:
@@ -1255,6 +1302,23 @@ class TradingAgent:
                             self.decision_journal.record({
                                 'symbol': symbol, 'cycle': cycle, 'action': 'hold',
                                 'skip_reason': 'fallback_price', 'price': price,
+                                'ensemble_confidence': 0.0, 'per_strategy': {},
+                                'llm_verdict': {}, 'executed': False,
+                            })
+                        except Exception as e:
+                            logger.debug(f"NSE decision record error: {e}")
+                    continue
+
+                # Never act on an old price. A suspended or untraded stock
+                # keeps its last bar for weeks; a stop or a fill at that
+                # price is not one the market would give.
+                age = TradingAgent._nse_price_age_days(quote)
+                if age is not None and age > stale_days:
+                    if self.decision_journal:
+                        try:
+                            self.decision_journal.record({
+                                'symbol': symbol, 'cycle': cycle, 'action': 'hold',
+                                'skip_reason': 'stale_price', 'price': price,
                                 'ensemble_confidence': 0.0, 'per_strategy': {},
                                 'llm_verdict': {}, 'executed': False,
                             })
@@ -1328,19 +1392,23 @@ class TradingAgent:
                 validated = signals
                 proposed = (signals or {}).get('action', 'hold')
                 blocked = None
+                adv = TradingAgent._nse_adv(symbol, (paper.limits if auto_paper else {}).get('adv_days', 20)) \
+                    if proposed in ('buy', 'sell') else None
                 if proposed in ('buy', 'sell'):
                     # Holding rules first, so a trade the book cannot take (an
                     # add the holding hasn't earned, a sell of nothing) never
                     # costs an LLM call. Cash is checked once the size is known.
                     _, blocked = order_size(symbol, proposed, price, base_notional, queue, paper,
-                                            confidence=float(signals.get('confidence') or 0.0))
+                                            confidence=float(signals.get('confidence') or 0.0),
+                                            adv=adv)
                     if blocked not in HOLDING_RULE_REASONS:
                         blocked = None
                 if blocked:
                     dec['skip_reason'] = blocked
                     validated = {'action': 'hold', 'confidence': 0.0}
                 elif signals and proposed != 'hold' and llm:
-                    validated = llm.validate_trade(symbol, signals, symbol_data, None)
+                    validated = llm.validate_trade(symbol, signals, symbol_data, None,
+                                                   research_context=TradingAgent._nse_research(self, symbol))
                     dec['llm_verdict'] = {
                         'action': validated.get('action'),
                         'confidence': validated.get('confidence'),
@@ -1359,7 +1427,7 @@ class TradingAgent:
                     # a weaker sell trims and a strong one closes, a buy fits
                     # the cash (position_rules.py).
                     qty, reason = order_size(symbol, action, price, notional, queue, paper,
-                                             confidence=float(confidence or 0.0))
+                                             confidence=float(confidence or 0.0), adv=adv)
                     if reason:
                         dec['skip_reason'] = reason
                     else:
@@ -1416,6 +1484,142 @@ class TradingAgent:
             except Exception as e:
                 logger.debug(f"NSE paper equity snapshot failed: {e}")
 
+    def _nse_research(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """What AIB-AXYS says about an NSE stock, for the AI's trade review:
+        an analyst's rating from an uploaded note (the watchlist), and the
+        Market Pulse's fundamentals and announcements (market_pulse.py).
+        The NSE review used to be given no research at all, although the
+        broker covers only NSE stocks."""
+        from src.agent.market_pulse import research_context
+        rated = None
+        em = self.components.get('escalation_manager')
+        if em is not None:
+            try:
+                rated = next((w for w in em.get_active_watchlist()
+                              if str(w.get('symbol', '')).upper() == symbol.upper()), None)
+            except Exception as e:
+                logger.debug(f"Watchlist unavailable for {symbol}: {e}")
+        try:
+            pulse = research_context(symbol)
+        except Exception as e:
+            logger.debug(f"Market Pulse context unavailable for {symbol}: {e}")
+            pulse = None
+        if not rated:
+            return pulse
+        ctx = {'recommendation': rated.get('recommendation'), 'target_price': rated.get('target_price'),
+               'rationale': rated.get('rationale') or ''}
+        if pulse:
+            ctx['rationale'] = f"{ctx['rationale']} {pulse['rationale']}".strip()
+        return ctx
+
+    @staticmethod
+    def _nse_price_age_days(quote: Dict[str, Any], today=None) -> Optional[int]:
+        """Calendar days since the quote's bar, or None when it has no date."""
+        from src.connectors.nse_connector import EAT_OFFSET
+        try:
+            bar_day = datetime.fromisoformat(str(quote.get('timestamp') or '')[:10]).date()
+        except ValueError:
+            return None
+        today = today or datetime.now(EAT_OFFSET).date()
+        return (today - bar_day).days
+
+    def _nse_held(self) -> List[str]:
+        """Every NSE stock held for trading: the paper account's positions
+        when it is on, otherwise the trading book's recorded fills (the
+        manual AIB-AXYS workflow, where real shares are bought by ticket)."""
+        try:
+            paper = self.components.get('nse_paper_account')
+            if paper is not None and getattr(paper, 'enabled', False):
+                return [s.upper() for s in paper.positions()]
+            queue = self.components.get('nse_order_queue')
+            if queue is not None:
+                from src.agent.nse_paper_account import BOOK
+                return [s.upper() for s, p in queue.positions(book=BOOK).items()
+                        if (p or {}).get('quantity', 0) > 0]
+        except Exception as e:
+            logger.warning(f"NSE holdings unavailable for the trading list: {e}")
+        return []
+
+    def nse_trading_symbols(self) -> List[str]:
+        """The NSE stocks the agent evaluates: the screener's short list, or
+        the configured list (data_manager.nse_symbols) while the screener is
+        off or has not run, plus every stock held. Holdings are always in,
+        whatever the list says, because their stops and exits are checked
+        only for the stocks evaluated here."""
+        from src.agent import nse_screener
+        from src.connectors.nse_universe import register
+        configured = [s.upper() for s in self.config.get('data_manager', {}).get('nse_symbols', [])]
+        symbols = configured
+        if nse_screener.settings(self.config).get('enabled'):
+            sl = nse_screener.ShortlistStore(DATA_DIR / 'nse_shortlist.json').load()
+            if sl and sl.symbols:
+                symbols = list(sl.symbols)
+        held = TradingAgent._nse_held(self)
+        out = symbols + [h for h in held if h not in symbols]
+        register(out)
+        return out
+
+    def _sync_nse_state(self, symbols: List[str]) -> None:
+        """Forget stocks that left the NSE trading list and warm-start the
+        ones that joined, so the strategies only ever compare the stocks
+        traded now, each on a continuous history."""
+        current = set(symbols)
+        previous = getattr(self, '_nse_active', None)
+        self._nse_active = current
+        if previous is None:
+            return
+        gone = previous - current
+        if gone:
+            sm = self.components.get('strategy_manager')
+            if sm is not None and hasattr(sm, 'forget'):
+                sm.forget(gone)
+            tracker = getattr(self, 'volatility', None)
+            for symbol in gone:
+                if tracker is not None:
+                    tracker.forget(symbol)
+                getattr(self, '_nse_last_price', {}).pop(symbol, None)
+            self._history_seeded -= gone
+            logger.info(f"NSE trading list: dropped {sorted(gone)}")
+        joined = current - previous
+        if joined - self._history_seeded:
+            logger.info(f"NSE trading list: added {sorted(joined)}; loading their history")
+            self._warm_start_history()
+
+    def _refresh_nse_shortlist(self, now: Optional[datetime] = None, llm=None):
+        """Rebuild the NSE short list when it is due (weekly by default)."""
+        from src.agent import nse_screener
+        from src.connectors.nse_connector import NSE_CSV_DIR
+        from src.connectors.nse_universe import market_symbols
+        cfg = nse_screener.settings(self.config)
+        if not cfg.get('enabled'):
+            return None
+        store = nse_screener.ShortlistStore(DATA_DIR / 'nse_shortlist.json')
+        if not store.due(cfg, now):
+            return None
+        configured = [s.upper() for s in self.config.get('data_manager', {}).get('nse_symbols', [])]
+        ranked = nse_screener.screen(market_symbols(NSE_CSV_DIR, configured), NSE_CSV_DIR, cfg)
+        held = TradingAgent._nse_held(self)
+        sl = nse_screener.refresh(ranked, held, cfg, configured,
+                                  llm or self.components.get('llm_orchestrator'), now)
+        store.save(sl)
+        logger.info(f"NSE short list rebuilt from {sum(m.eligible for m in ranked)} eligible of "
+                    f"{len(ranked)} stocks: {', '.join(f'{s} ({sl.roles[s]})' for s in sl.symbols)}"
+                    + (f"; the AI removed {[r['symbol'] for r in sl.removed]}" if sl.removed else ''))
+        return sl
+
+    @staticmethod
+    def _nse_adv(symbol: str, days: int = 20) -> Optional[float]:
+        """Average daily volume in shares over the last `days` real NSE bars,
+        or None with fewer than five days of volume (no cap is applied then)."""
+        try:
+            from src.agent.chart_data import nse_bars
+            from src.connectors.nse_connector import NSE_CSV_DIR
+            vols = [b['volume'] for b in nse_bars(symbol, NSE_CSV_DIR, int(days)) if b.get('volume')]
+            return sum(vols) / len(vols) if len(vols) >= 5 else None
+        except Exception as e:
+            logger.debug(f"No NSE volume for {symbol}: {e}")
+            return None
+
     def _run_sleeve_cycle(self):
         """Monthly dividend-sleeve accumulation pass. Pulls current NSE
         quotes for the sleeve's configured universe and hands them to
@@ -1436,6 +1640,153 @@ class TradingAgent:
         if results:
             logger.info(f"Sleeve cycle generated {len(results)} accumulation "
                        f"ticket(s): {[r['symbol'] for r in results]}")
+
+    def _core(self):
+        """The core-satellite settings and saved state, read once."""
+        if getattr(self, '_core_cfg', None) is None:
+            from src.agent.core_portfolio import CoreState, config_from_dict
+            dm_cfg = self.config.get('data_manager', {})
+            self._core_cfg = config_from_dict(self.config.get('core_satellite'),
+                                              dm_cfg.get('symbols', []))
+            self._core_state = CoreState(str(DATA_DIR / 'core_portfolio.json'))
+            self._core_last_check = 0.0
+            self._core_value = 0.0
+        return self._core_cfg, self._core_state
+
+    def _core_symbols(self) -> set:
+        cfg, _ = TradingAgent._core(self)
+        return set(cfg.symbols) if cfg.enabled else set()
+
+    def _run_core_cycle(self, now: Optional[datetime] = None, fetch_history=None,
+                        price_for=None) -> List[Dict[str, Any]]:
+        """Keep the core at its target weights.
+
+        Trades only in the US regular session, never while halted, and only
+        when core_portfolio.rebalance_reason says so: the first build, the
+        first session of a month, or a fund drifting past its band. Returns
+        the orders placed.
+        """
+        from src.agent import core_portfolio as core
+        cfg, state = self._core()
+        if not cfg.enabled or self.trading_halted:
+            return []
+        if now is None and time.time() - self._core_last_check < 900:
+            return []
+        self._core_last_check = time.time()
+        now = now or datetime.now(timezone.utc)
+        bm = self.components.get('broker_manager')
+        broker = bm.get_broker() if bm else None
+        if not broker or not broker.is_connected:
+            return []
+        acct = broker.get_account_info()
+        if not acct or not acct.equity:
+            return []
+        fetch_pos = getattr(broker, 'fetch_positions', None)
+        positions = fetch_pos() if callable(fetch_pos) else (broker.get_positions() or [])
+        held, values, prices = {}, {}, {}
+        for p in positions:
+            sym = str(getattr(p, 'symbol', '')).upper()
+            if sym in cfg.symbols:
+                qty = float(getattr(p, 'quantity', 0) or 0)
+                px = float(getattr(p, 'current_price', 0) or 0)
+                held[sym] = qty
+                values[sym] = float(getattr(p, 'market_value', 0) or qty * px)
+                if px > 0:
+                    prices[sym] = px
+        # Kept fresh around the clock: crypto sizing reads it overnight.
+        self._core_value = sum(values.values())
+        if not core.us_session_open(now):
+            return []
+
+        targets = state.data.get('targets') or {s: 1 / len(cfg.symbols) for s in cfg.symbols}
+        reason = core.rebalance_reason(state.last_rebalance, now.date(), values, targets,
+                                       cfg.drift_band)
+        if not reason:
+            return []
+        fetch_open = getattr(broker, 'fetch_open_orders', None)
+        for sym in cfg.symbols:
+            pending = fetch_open(sym) if callable(fetch_open) else (broker.get_orders(sym) or [])
+            if any(getattr(o, 'symbol', '').upper() == sym for o in pending):
+                logger.info(f"Core rebalance waits: an order for {sym} is still working")
+                return []
+
+        if fetch_history is None:
+            from src.agent.history_warmstart import fetch_daily_history
+            fetch_history = fetch_daily_history
+        history = fetch_history(list(cfg.symbols), bars=cfg.vol_lookback + 1)
+        closes = {s: (history.get(s) or {}).get('close', []) for s in cfg.symbols}
+        targets = core.inverse_vol_weights(closes, cfg.vol_lookback, cfg.max_weight)
+        if price_for is None:
+            from src.utils.real_price_feed import price_feed
+            price_for = price_feed.get_price
+        for sym in cfg.symbols:
+            if sym not in prices:
+                px = price_for(sym) or (closes[sym][-1] if closes[sym] else None)
+                if px:
+                    prices[sym] = float(px)
+
+        core_value = float(acct.equity) * cfg.core_share
+        planned = core.plan_orders(targets, core_value, held, prices, cfg.min_trade_usd)
+        planned = core.fit_to_cash(planned, float(getattr(acct, 'cash', 0) or 0))
+        placed = self._place_core_orders(broker, planned, prices, now)
+        state.save(last_rebalance=now.date().isoformat(), targets=targets, reason=reason,
+                   core_value_target=round(core_value, 2))
+        logger.info(f"Core rebalance ({reason}): targets "
+                    f"{ {s: round(w, 3) for s, w in targets.items()} }, "
+                    f"{len(placed)} order(s)")
+        return placed
+
+    def _place_core_orders(self, broker, planned, prices, now) -> List[Dict[str, Any]]:
+        from src.agent import core_portfolio as core
+        from src.agent.order_journal import make_client_order_id
+        from src.agent.position_sizing import size_order
+        from src.connectors.base_broker import OrderRequest
+        sizing_cfg = self.config.get('trading', {})
+        allow_fractional = sizing_cfg.get('allow_fractional', True)
+        day_key = int(now.strftime('%Y%m%d'))
+        placed = []
+        for o in planned:
+            sym, side = o['symbol'], o['side']
+            if side == 'sell':
+                qty = o['quantity'] if allow_fractional else float(math.floor(o['quantity']))
+                tif = 'day'
+                if qty <= 0:
+                    continue
+            else:
+                sized = size_order(o['notional'], prices[sym],
+                                   min_notional=sizing_cfg.get('min_notional', 5.0),
+                                   allow_fractional=allow_fractional)
+                if not sized:
+                    continue
+                qty, tif = sized.quantity, sized.time_in_force
+            coid = make_client_order_id(core.STRATEGY, sym, side, day_key)
+            if self.order_journal and not self.order_journal.record_intent(
+                    coid, sym, side, float(qty), 'market', strategy=core.STRATEGY,
+                    strategy_weights={core.STRATEGY: 1.0}):
+                logger.info(f"Core order already journaled today ({coid}); skipping")
+                continue
+            result = broker.place_order(OrderRequest(
+                symbol=sym, quantity=float(qty), side=side, order_type='market',
+                time_in_force=tif, client_order_id=coid))
+            if self.order_journal:
+                if result:
+                    self.order_journal.mark_submitted(coid, result.order_id, result.status)
+                else:
+                    self.order_journal.mark_failed(coid, 'place_order returned no response')
+            if result:
+                placed.append({**o, 'quantity': qty, 'client_order_id': coid})
+        return placed
+
+    def _core_value_now(self) -> float:
+        """Market value of the core's funds at the last core check."""
+        cfg, _ = TradingAgent._core(self)
+        return float(getattr(self, '_core_value', 0.0) or 0.0) if cfg.enabled else 0.0
+
+    def _active_equity(self, equity: float) -> float:
+        """The strategies' share of equity under the core-satellite split."""
+        from src.agent.core_portfolio import active_equity
+        cfg, _ = TradingAgent._core(self)
+        return active_equity(equity, cfg)
 
     def _check_risk_limits(self, risk_assessment: Dict[str, Any]) -> bool:
         """
@@ -1613,9 +1964,14 @@ class TradingAgent:
                             logger.warning(f"No account info for {symbol}; skipping (won't size off a default)")
                             _note(symbol, 'no_account_info')
                             continue
-                        portfolio_value = account_info.equity
+                        # Under the core-satellite split the strategies size
+                        # from their own share of equity, and "deployed" is
+                        # measured within that share, not across the core.
+                        equity = float(account_info.equity)
+                        portfolio_value = TradingAgent._active_equity(self, equity)
                         cash = float(getattr(account_info, 'cash', 0) or 0)
-                        deployed_pct = 1 - (cash / portfolio_value) if portfolio_value else 0.0
+                        active_invested = max(equity - cash - TradingAgent._core_value_now(self), 0.0)
+                        deployed_pct = active_invested / portfolio_value if portfolio_value else 0.0
                         if not hasattr(self, 'cash_policy'):
                             from src.agent.cash_policy import CashDeploymentPolicy
                             self.cash_policy = CashDeploymentPolicy(self.config)
@@ -1850,6 +2206,16 @@ class TradingAgent:
         market orders when no price is available), so it works premarket too.
         """
         self.trading_halted = True
+        self.halt_reason = reason
+        self.halted_at = datetime.utcnow().isoformat()
+        # Kept in the database, so a restart stays halted until an operator
+        # resumes: a halt that a redeploy quietly undid would not be a halt.
+        rm = getattr(self, 'risk_manager', None)
+        if rm is not None and hasattr(rm, 'set_persistent_kill_switch'):
+            try:
+                rm.set_persistent_kill_switch(True, reason)
+            except Exception as e:
+                logger.error(f"Could not persist the kill switch: {e}")
         logger.warning(f"KILL SWITCH ENGAGED ({reason}); flatten={flatten}")
         result = {'halted': True, 'canceled_orders': 0, 'close_orders': 0, 'errors': []}
         if not flatten:
@@ -1919,10 +2285,34 @@ class TradingAgent:
         return result
 
     def resume_trading(self) -> Dict[str, Any]:
-        """Release the kill switch; the loop resumes submitting orders."""
+        """Release the kill switch, in memory and in the database, and re-arm
+        the heartbeat watchdog; the loop resumes submitting orders."""
         self.trading_halted = False
+        self.halt_reason = None
+        self.halted_at = None
+        rm = getattr(self, 'risk_manager', None)
+        if rm is not None and hasattr(rm, 'set_persistent_kill_switch'):
+            try:
+                rm.set_persistent_kill_switch(False, 'resumed by an operator')
+            except Exception as e:
+                logger.error(f"Could not clear the stored kill switch: {e}")
+        hb = getattr(self, 'heartbeat_monitor', None)
+        if hb is not None and hasattr(hb, 'reset'):
+            hb.reset()
         logger.warning("Kill switch released; trading resumed")
         return {'halted': False}
+
+    def _restore_halt(self) -> None:
+        """Start halted if the kill switch was engaged before the restart."""
+        rm = getattr(self, 'risk_manager', None)
+        if rm is None or not getattr(rm, 'emergency_stop', False):
+            return
+        self.trading_halted = True
+        self.halt_reason = getattr(rm, 'kill_switch_reason', None) or \
+            'engaged before the last restart (reason not recorded)'
+        self.halted_at = getattr(rm, 'kill_switch_at', None)
+        logger.warning(f"Trading is HALTED ({self.halt_reason}, since {self.halted_at}). "
+                       f"Nothing new will be ordered until an operator presses Resume.")
 
     PDT_EQUITY_THRESHOLD = 25_000
     PDT_MAX_DAY_TRADES = 3
@@ -2015,9 +2405,14 @@ class TradingAgent:
             if not positions:
                 return
             
+            core_symbols = TradingAgent._core_symbols(self)
             for position in positions:
                 try:
                     if position.quantity == 0 or position.cost_basis <= 0:
+                        continue
+                    # The core's index funds are held through drawdowns by
+                    # design; a stop would defeat the point of holding them.
+                    if str(position.symbol).upper() in core_symbols:
                         continue
 
                     unrealized_pl_pct = position.unrealized_pl / position.cost_basis
@@ -2206,6 +2601,8 @@ class TradingAgent:
             status = {
                 'running': self.running,
                 'trading_halted': getattr(self, 'trading_halted', False),
+                'halt_reason': getattr(self, 'halt_reason', None),
+                'halted_at': getattr(self, 'halted_at', None),
                 'timestamp': datetime.now().isoformat(),
                 'components': {}
             }

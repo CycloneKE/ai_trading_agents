@@ -8,11 +8,12 @@ import {
   th, td, tableHeadRow,
 } from '../ui';
 import NsePaperAccount from './NsePaperAccount';
+import NseMarketScan from './NseMarketScan';
 import { getApiBase } from '../../utils/apiBase';
 
 // Sources the scraper stamps on prices it actually fetched. Mirrors
 // REAL_NSE_SOURCES in src/connectors/nse_scraper.py.
-const REAL_NSE_SOURCES = ['nse_ticker', 'nse_pricelist', 'nse_website', 'afx_kwayisi', 'afx_history'];
+const REAL_NSE_SOURCES = ['nse_ticker', 'nse_pricelist', 'nse_website', 'afx_kwayisi', 'afx_history', 'aib_market_pulse'];
 const NSE_SOURCE_NOTE = {
   synthetic: 'Generated seed data, not a market price. No live source has answered for this symbol yet.',
   none: 'No price available for this symbol.',
@@ -74,11 +75,21 @@ function ProvenanceBanner({ nseData }) {
 
 function MarketWatch({ nseData, holdings, mobile, onDrill }) {
   const [sort, setSort] = useState({ key: 'symbol', dir: 1 });
-  const [filter, setFilter] = useState('all'); // all | held | movers
+  const [filter, setFilter] = useState('all'); // all | traded | held | movers
+  const [query, setQuery] = useState('');
+  const [sector, setSector] = useState('');
   const held = Object.fromEntries((holdings || []).map((h) => [h.symbol, h]));
   const quotes = nseData.quotes || [];
+  const sectors = [...new Set(quotes.map((q) => q.sector).filter(Boolean))].sort();
+  const traded = quotes.filter((q) => q.traded).length;
+  const needle = query.trim().toLowerCase();
   const rows = quotes
-    .filter((q) => filter === 'all' || (filter === 'held' ? held[q.symbol] : Math.abs(q.change_pct || 0) >= 1))
+    .filter((q) => (filter === 'all'
+      || (filter === 'traded' && q.traded)
+      || (filter === 'held' && held[q.symbol])
+      || (filter === 'movers' && Math.abs(q.change_pct || 0) >= 1)))
+    .filter((q) => !sector || q.sector === sector)
+    .filter((q) => !needle || q.symbol.toLowerCase().includes(needle) || (q.name || '').toLowerCase().includes(needle))
     .sort((a, b) => {
       const va = a[sort.key] ?? '';
       const vb = b[sort.key] ?? '';
@@ -109,17 +120,29 @@ function MarketWatch({ nseData, holdings, mobile, onDrill }) {
                  onClick={gainer ? () => onDrill(gainer.symbol) : undefined} />
         <HUDCard title="Top loser" value={loser?.symbol || '—'} subValue={loser ? pct(loser.change_pct) : null} icon={TrendingDown} color={theme.colors.danger}
                  onClick={loser ? () => onDrill(loser.symbol) : undefined} />
-        <HUDCard title="Paper holdings" value={(holdings || []).length} subValue={`of ${quotes.length} watched`} tone={theme.colors.textMuted} icon={Shield} color={theme.colors.accent} />
+        <HUDCard title="Paper holdings" value={(holdings || []).length} subValue={`${traded} traded of ${quotes.length} listed`} tone={theme.colors.textMuted} icon={Shield} color={theme.colors.accent} />
       </HudRow>
 
       <div style={card(mobile)}>
         <SectionHeader title="NSE Market Watch" icon={Flag} />
         <div style={{ marginBottom: '12px', fontSize: '12px', color: theme.colors.textMuted }}>
-          The agent checks all {quotes.length} symbols below every cycle. Highlighted rows are held in the paper account. Tap a row for its chart.
+          Every NSE stock with a live price: {quotes.length} listed. The agent trades the {traded} marked TRADED,
+          chosen weekly by the screener (see Market Scan). Highlighted rows are held in the paper account. Tap a row for its chart.
         </div>
         <ProvenanceBanner nseData={nseData} />
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '10px', flexWrap: 'wrap' }}>
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search symbol or company"
+                 style={{ flex: '1 1 180px', minWidth: 0, background: 'rgba(255,255,255,0.05)', color: '#fff',
+                          border: `1px solid ${theme.colors.border}`, borderRadius: '6px', padding: '7px 10px', fontSize: '12px' }} />
+          <select value={sector} onChange={(e) => setSector(e.target.value)}
+                  style={{ flex: '0 1 200px', background: theme.colors.bgSecondary, color: '#fff',
+                           border: `1px solid ${theme.colors.border}`, borderRadius: '6px', padding: '7px 10px', fontSize: '12px' }}>
+            <option value="">All sectors</option>
+            {sectors.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
         <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
-          {[['all', 'ALL'], ['held', 'HELD'], ['movers', 'MOVERS ±1%']].map(([id, label]) => (
+          {[['all', 'ALL'], ['traded', 'TRADED'], ['held', 'HELD'], ['movers', 'MOVERS ±1%']].map(([id, label]) => (
             <button key={id} onClick={() => setFilter(id)} style={{
               backgroundColor: filter === id ? theme.colors.primary : 'rgba(255,255,255,0.05)',
               color: filter === id ? '#000' : theme.colors.textSecondary,
@@ -132,6 +155,7 @@ function MarketWatch({ nseData, holdings, mobile, onDrill }) {
             <thead>
               <tr style={tableHeadRow}>
                 {sortHead('symbol', 'SYMBOL')}{sortHead('price_kes', 'PRICE (KES)')}{sortHead('change_pct', 'CHANGE')}
+                {!mobile && sortHead('sector', 'SECTOR')}
                 {!mobile && sortHead('volume', 'VOLUME')}
                 <th style={th}>{mobile ? 'HELD' : 'PAPER POSITION'}</th>
               </tr>
@@ -145,7 +169,16 @@ function MarketWatch({ nseData, holdings, mobile, onDrill }) {
                       style={{ borderBottom: `1px solid ${theme.colors.border}`, background: bg, cursor: 'pointer' }}
                       onMouseEnter={(e) => { e.currentTarget.style.background = `${theme.colors.primary}25`; }}
                       onMouseLeave={(e) => { e.currentTarget.style.background = bg; }}>
-                    <td style={{ ...td, fontWeight: 700 }}>{q.symbol} <span style={{ color: theme.colors.textMuted, fontSize: '10px' }}>↗</span></td>
+                    <td style={{ ...td, fontWeight: 700 }}>
+                      {q.symbol} <span style={{ color: theme.colors.textMuted, fontSize: '10px' }}>↗</span>
+                      {q.traded && (
+                        <span title="The agent trades this stock this week" style={{ marginLeft: '6px', fontSize: '9px', fontWeight: 800, padding: '1px 5px',
+                          borderRadius: '4px', background: `${theme.colors.accent}30`, color: theme.colors.accent }}>TRADED</span>
+                      )}
+                      {q.name && q.name !== q.symbol && (
+                        <div style={{ fontSize: '10px', fontWeight: 400, color: theme.colors.textMuted }}>{q.name}</div>
+                      )}
+                    </td>
                     <td style={{ ...td, color: isRealNsePrice(q) ? undefined : theme.colors.textMuted, whiteSpace: 'nowrap' }}>
                       {q.price_kes?.toFixed(2)}
                       {!isRealNsePrice(q) && (
@@ -158,6 +191,7 @@ function MarketWatch({ nseData, holdings, mobile, onDrill }) {
                       )}
                     </td>
                     <td style={{ ...td, color: gainColor(q.change_pct) }}>{pct(q.change_pct)}</td>
+                    {!mobile && <td style={{ ...td, fontSize: '11px', color: theme.colors.textSecondary }}>{q.sector}</td>}
                     {!mobile && <td style={td}>{q.volume?.toLocaleString()}</td>}
                     <td style={{ ...td, color: h ? gainColor(h.unrealised_pnl_pct) : theme.colors.textMuted, whiteSpace: 'nowrap' }}>
                       {h ? (mobile ? pct(h.unrealised_pnl_pct, 1) : `${h.quantity.toLocaleString()} sh · ${pct(h.unrealised_pnl_pct)}`) : '—'}
@@ -165,7 +199,9 @@ function MarketWatch({ nseData, holdings, mobile, onDrill }) {
                   </tr>
                 );
               }) : (
-                <tr><td colSpan={mobile ? 4 : 5} style={{ ...td, textAlign: 'center', color: theme.colors.textMuted }}>No NSE data available</td></tr>
+                <tr><td colSpan={mobile ? 4 : 6} style={{ ...td, textAlign: 'center', color: theme.colors.textMuted }}>
+                  {quotes.length ? 'No stock matches the filters' : 'No NSE data available'}
+                </td></tr>
               )}
             </tbody>
           </table>
@@ -298,6 +334,7 @@ export default function NseSection({ active, sub, onSub, nseData, isOperator, mo
 
   const tabs = [
     { id: 'watch', label: 'Market Watch' },
+    { id: 'scan', label: 'Market Scan' },
     { id: 'paper', label: 'Paper Account' },
     ...(isOperator ? [{ id: 'tickets', label: 'Order Tickets' }] : []),
   ];
@@ -308,6 +345,7 @@ export default function NseSection({ active, sub, onSub, nseData, isOperator, mo
     <div>
       <SubTabs tabs={tabs} active={current} onChange={onSub} />
       {current === 'watch' && <MarketWatch nseData={nseData} holdings={holdings} mobile={mobile} onDrill={onDrill} />}
+      {current === 'scan' && <NseMarketScan active={active} mobile={mobile} onDrill={onDrill} />}
       {current === 'paper' && <NsePaperAccount view={paper} error={paperError} mobile={mobile} onDrill={onDrill} />}
       {current === 'tickets' && <OrderTickets active={active} mobile={mobile} />}
     </div>

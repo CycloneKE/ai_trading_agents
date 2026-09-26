@@ -11,6 +11,7 @@ const REASON_LABEL = {
   bias_downgrade: 'Bias detector downgrade',
   llm_veto: 'LLM vetoed the trade',
   fallback_price: 'Price was synthetic fallback',
+  stale_price: 'Latest price is too old (stock suspended or not trading)',
   halted: 'Trading halted (kill switch)',
   risk_limits: 'Portfolio risk limit hit',
   pdt_guard: 'Pattern-day-trader block',
@@ -28,6 +29,9 @@ const REASON_LABEL = {
   max_adds: 'Already added to this holding the maximum times',
   position_cap: 'Holding is at its size limit',
   trimmed_today: 'Already trimmed this position today',
+  min_holding: 'Held for less than the minimum holding period',
+  turnover_budget: "This week's allowance of new NSE positions is used",
+  liquidity_cap: 'Too little trading volume for the order',
 };
 
 const MARKET_LABEL = { nse: 'NSE KENYA', us_equity: 'US STOCK', crypto: 'CRYPTO' };

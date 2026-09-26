@@ -4,8 +4,11 @@ Test suite for Broker Research PDF Ingestion, Multi-Page Extraction, and Embedde
 import pytest
 from src.agent.broker_research_ingest import BrokerResearchIngest
 
-def test_broker_research_fallback_extraction_all_stocks():
-    """Test heuristic signal extraction across all 20+ covered Kenyan & African equities."""
+def test_a_market_report_without_ratings_yields_no_recommendations():
+    """A market report names companies without rating them. This used to
+    return a "HOLD" for every company named, with "prices" read from the
+    percentages beside the names; now a company needs a rating near its
+    name. (The daily Market Pulse itself is read by market_pulse.py.)"""
     ingest = BrokerResearchIngest(None, None, {})
     
     sample_report_text = """
@@ -25,23 +28,12 @@ def test_broker_research_fallback_extraction_all_stocks():
     East African Portland Cement Audited Results (here: https://aib-axysafrica.com/reports/eapc-2025.pdf)
     """
     
-    signals = ingest._extract_signals_fallback(sample_report_text)
-    
-    # Assert signals were extracted across all major companies
-    extracted_symbols = [s["symbol"] for s in signals]
-    
-    assert "ABSA" in extracted_symbols
-    assert "COOP" in extracted_symbols
-    assert "DTB" in extracted_symbols
-    assert "EQTY" in extracted_symbols
-    assert "KCB" in extracted_symbols
-    assert "SCOM" in extracted_symbols
-    assert "WILLIAMSON" in extracted_symbols
-    assert "KAPCHORUA" in extracted_symbols
-    assert "PORTLAND" in extracted_symbols
-    
-    # Assert rationale retention and embedded link capture
-    portland_signal = next(s for s in signals if s["symbol"] == "PORTLAND")
-    assert portland_signal["rationale"] is not None
-    assert len(portland_signal["document_links"]) > 0
-    assert "https://aib-axysafrica.com/reports/eapc-2025.pdf" in portland_signal["document_links"]
+    assert ingest._extract_signals_fallback(sample_report_text) == []
+
+    # A rated mention in the same kind of text is still found, with its link.
+    rated = sample_report_text + (
+        "\n    East African Portland Cement: we upgrade to BUY, target 140.00 "
+        "(here: https://aib-axysafrica.com/reports/eapc-2025.pdf)\n")
+    (portland,) = ingest._extract_signals_fallback(rated)
+    assert (portland["symbol"], portland["recommendation"]) == ("PORTLAND", "BUY")
+    assert "https://aib-axysafrica.com/reports/eapc-2025.pdf" in portland["document_links"]

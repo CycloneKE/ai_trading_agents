@@ -68,6 +68,19 @@ class BrokerResearchIngest:
         upload_id = self.escalation_manager.record_upload(os.path.basename(file_path), source)
         
         try:
+            # 0. AIB-AXYS's daily Market Pulse is market data, not a note
+            #    with ratings: read its tables exactly (market_pulse.py)
+            #    rather than asking for recommendations it does not contain.
+            from src.agent import market_pulse
+            texts = market_pulse.page_texts(file_path)
+            if market_pulse.is_market_pulse(texts):
+                summary = market_pulse.ingest(file_path, texts)
+                self.escalation_manager.update_upload_status(
+                    upload_id, "completed", summary['stocks_mapped'])
+                return {"upload_id": upload_id, "status": "completed",
+                        "signals_processed": 0, "auto_followed": [], "escalated": [],
+                        **summary}
+
             # 1. Parse PDF with full table & page structure
             extracted = pdf_parser.extract_all(file_path)
             text = extracted.get("text", "")
@@ -175,6 +188,10 @@ class BrokerResearchIngest:
         extracted = []
         import re
         seen_symbols = set()
+        alias_owner = {a.upper(): sym for sym, aliases in COMPANY_MAP.items() for a in aliases}
+        other_names = re.compile(r"\b(" + "|".join(re.escape(a) for a in sorted(alias_owner, key=len, reverse=True))
+                                 + r")\b", re.IGNORECASE)
+        owner_of = lambda name: alias_owner.get(name.upper())
 
         for canonical_sym, aliases in COMPANY_MAP.items():
             for alias in aliases:
@@ -183,8 +200,19 @@ class BrokerResearchIngest:
                     continue
                     
                 for match in matches:
-                    start = max(0, match.start() - 20)
-                    end = min(len(text), match.end() + 100)
+                    # From the start of the company's sentence (or the last
+                    # other company named in it) to the next company named,
+                    # at most ~160 characters on: a rating that follows
+                    # another company's name belongs to that company.
+                    bounds = [m.end() for m in re.finditer(r"[.!?](?=\s+[A-Z])|\n", text[:match.start()])]
+                    start = bounds[-1] if bounds else 0
+                    others_before = [m.end() for m in other_names.finditer(text, start, match.start())
+                                     if owner_of(m.group(0)) != canonical_sym]
+                    start = max([start] + others_before)
+                    end = min(len(text), match.end() + 160)
+                    nxt = next((m.start() for m in other_names.finditer(text, match.end(), end)
+                                if owner_of(m.group(0)) != canonical_sym), None)
+                    end = nxt if nxt is not None else end
                     context = text[start:end].replace('\n', ' ').strip()
                     context_lower = context.lower()
 
@@ -193,7 +221,7 @@ class BrokerResearchIngest:
                         "sell": "SELL", "reduce": "SELL", "underweight": "SELL", "underperform": "SELL",
                         "hold": "HOLD", "neutral": "HOLD", "maintain": "HOLD"
                     }
-                    recommendation = "HOLD"
+                    recommendation = None
                     min_dist = float('inf')
                     sym_pos = context_lower.find(alias.lower())
                     if sym_pos != -1:
@@ -203,6 +231,12 @@ class BrokerResearchIngest:
                                 if dist < min_dist:
                                     min_dist = dist
                                     recommendation = category
+                    # A company named without a rating beside it is market
+                    # commentary, not a recommendation. This used to default
+                    # to HOLD, so a market report produced a "HOLD" for every
+                    # company it mentioned, with prices read from percentages.
+                    if recommendation is None:
+                        continue
 
                     # Target price / Current price parsing - exclude 4-digit years like 2024-2027 and percentage values
                     price_matches = re.findall(r"(?:price|target|kes|closing|@|\$)\s*:?\s*(\d+(?:\.\d+)?)", context, re.IGNORECASE)

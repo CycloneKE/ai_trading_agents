@@ -11,9 +11,9 @@ import threading
 import time
 import os
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from src.agent.sentiment_analyzer import FinancialSentimentAnalyzer
 from src.utils.paths import DATA_DIR
 # Sources the NSE scraper stamps on bars it actually fetched. Anything else
@@ -219,6 +219,81 @@ class TradingAPI:
             atr_lookup = (lambda s: tracker.atr_pct(s)) if tracker is not None else (lambda s: None)
         return paper.summary(prices, atr_lookup)
 
+    def _nse_holdings(self) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Every NSE holding once, valued the same way on every page.
+
+        With the paper account on, its holdings (the trading book since it
+        opened) are the NSE trading book, and any real operator fills in the
+        trading book from before it opened are listed separately. The
+        dividend sleeve (book 'long_term') is always the operator's own
+        fills. Prices are real NSE quotes, falling back to the entry price;
+        an unpriced holding is never valued at zero.
+
+        Returns (rows, paper account figures or None). Never raises: an NSE
+        problem must not blank the US side of a page.
+        """
+        rows: List[Dict[str, Any]] = []
+        account = None
+        try:
+            queue = self.trading_agent.components.get('nse_order_queue')
+            dm = self.trading_agent.components.get('data_manager')
+            nse = dm.connectors.get('nse') if dm and hasattr(dm, 'connectors') else None
+            paper = self.trading_agent.components.get('nse_paper_account')
+
+            def real_price(sym):
+                try:
+                    q = nse.get_quote(sym) if nse else None
+                    if q and q.get('price_kes') and q.get('source') in REAL_NSE_SOURCES:
+                        return float(q['price_kes'])
+                except Exception:
+                    pass
+                return None
+
+            books = [('trading', None, None, 'NSE Kenya'), ('long_term', None, None, 'NSE Dividend Sleeve')]
+            if paper is not None and getattr(paper, 'enabled', False):
+                summ = self._nse_paper_summary() or {}
+                account = {'paper': True, 'cash_kes': summ.get('cash_kes', 0.0),
+                           'equity_kes': summ.get('equity_kes', 0.0),
+                           'started_at': summ.get('started_at')}
+                for h in summ.get('holdings', []):
+                    rows.append({'symbol': h['symbol'], 'quantity': h['quantity'],
+                                 'avg_kes': h['avg_cost_kes'],
+                                 'price_kes': h.get('last_price_kes') or h['avg_cost_kes'],
+                                 'cost_kes': h.get('cost_kes'), 'market_name': 'NSE Paper Account'})
+                from src.agent.nse_paper_account import RESOLVED_BY
+                books[0] = ('trading', paper.started_at, RESOLVED_BY, 'NSE Kenya')
+            if queue:
+                for book, until, exclude, name in books:
+                    for sym, pos in queue.positions(book=book, until=until,
+                                                    exclude_resolved_by=exclude).items():
+                        qty = pos.get('quantity', 0)
+                        if qty > 0:
+                            avg = pos.get('avg_entry_price_kes', 0.0)
+                            rows.append({'symbol': sym, 'quantity': qty, 'avg_kes': avg,
+                                         'price_kes': real_price(sym) or avg, 'cost_kes': None,
+                                         'market_name': name})
+        except Exception as e:
+            logger.error(f"NSE holdings unavailable: {e}")
+        return rows, account
+
+    def _core_summary(self) -> Dict[str, Any]:
+        """The core-satellite split's settings and last rebalance, for the
+        Portfolio page. Values are filled in from the broker's positions."""
+        try:
+            from src.agent import core_portfolio as core
+            cfg = getattr(self.trading_agent, 'config', None) or self.config or {}
+            c = core.config_from_dict(cfg.get('core_satellite'),
+                                      cfg.get('data_manager', {}).get('symbols', []))
+            if not c.enabled:
+                return {'enabled': False}
+            state = core.CoreState(str(DATA_DIR / 'core_portfolio.json'))
+            return {'enabled': True, 'active_share': c.active_share, 'symbols': list(c.symbols),
+                    'targets': state.data.get('targets'),
+                    'last_rebalance': state.last_rebalance, 'reason': state.data.get('reason')}
+        except Exception as e:
+            logger.debug(f"Core summary unavailable: {e}")
+            return {'enabled': False}
+
     def _fx_snapshot(self, nse=None) -> Optional[Dict[str, Any]]:
         """The KES/USD rate with its source and time, or None.
 
@@ -233,13 +308,105 @@ class TradingAPI:
             logger.debug(f"KES/USD rate unavailable: {e}")
             return None
 
+    def _benchmark_config(self) -> Dict[str, Any]:
+        cfg = getattr(self.trading_agent, 'config', None) or self.config or {}
+        return cfg.get('benchmarks', {}) or {}
+
+    def _nse_benchmarks(self, curve: List[Dict[str, Any]], start_value: float) -> Dict[str, Any]:
+        """Treasury bills and an equal-weight basket of the watched stocks,
+        drawn on the paper account's own days (added to each curve point)."""
+        from src.agent import benchmarks as bm
+        bcfg = self._benchmark_config()
+        rate, tax = bm.TBILL_RATE_DEFAULT, bm.TBILL_TAX_DEFAULT
+        rate_source = 'default'
+        days = [p['day'] for p in curve]
+        symbols = []
+        try:
+            rate, rate_source = bm.tbill_rate(getattr(self.trading_agent, 'config', None) or self.config)
+            tax = float(bcfg.get('tbill_withholding_pct', tax))
+        except (TypeError, ValueError):
+            logger.warning(f"Bad benchmarks settings {bcfg}; using the defaults")
+        try:
+            bm.overlay(curve, 'tbill_kes', bm.tbill_values(days, start_value, rate, tax))
+            from src.connectors.nse_connector import NSE_CSV_DIR
+            cfg = getattr(self.trading_agent, 'config', None) or self.config or {}
+            symbols = [s.upper() for s in cfg.get('data_manager', {}).get('nse_symbols', [])]
+            closes = {s: bm.nse_closes(s, NSE_CSV_DIR) for s in symbols}
+            bm.overlay(curve, 'basket_kes', bm.basket_values(days, closes, start_value))
+        except Exception as e:
+            logger.debug(f"NSE benchmarks unavailable: {e}")
+        return {'tbill_rate_pct': rate, 'tbill_rate_source': rate_source,
+                'tbill_withholding_pct': tax, 'basket_symbols': symbols}
+
+    def _daily_closes(self, symbol: str) -> Dict[Any, float]:
+        """Real daily closes by date: the NSE CSVs for NSE symbols, two
+        years of yfinance history (cached for an hour) for the rest."""
+        from src.agent import benchmarks as bm
+        from src.agent import chart_data
+        from src.agent.cost_model import classify
+        cfg = getattr(self.trading_agent, 'config', None) or self.config or {}
+        if classify(symbol, cfg) == 'nse':
+            from src.connectors.nse_connector import NSE_CSV_DIR
+            return bm.nse_closes(symbol, NSE_CSV_DIR)
+        if self._offline_mode():
+            return {}
+
+        def fetch():
+            # A failure is cached as "no data" for the hour too: otherwise a
+            # Yahoo rate limit makes every dashboard poll download again,
+            # which keeps the limit (and the live price feed) blocked.
+            try:
+                return chart_data.yfinance_bars(symbol, period='2y')
+            except Exception as e:
+                logger.debug(f"Daily closes for {symbol} unavailable: {e}")
+                return []
+        bars = self._cached(f'daily2y:{symbol}', 3600, fetch)
+        return {bm._day(b['time']): b['close'] for b in bars}
+
+    def _offline_mode(self) -> bool:
+        """True when the agent runs on fallback data (tests, offline demos)."""
+        cfg = getattr(self.trading_agent, 'config', None) or self.config or {}
+        dm = cfg.get('data_manager', {}) if isinstance(cfg, dict) else {}
+        return bool(cfg.get('test_mode') or dm.get('test_mode') or dm.get('use_fallback_only'))
+
+    def _exchange_tz(self, symbol: str) -> str:
+        """The time zone a symbol's trading day is dated in."""
+        from src.agent.cost_model import classify
+        cfg = getattr(self.trading_agent, 'config', None) or self.config or {}
+        market = classify(symbol, cfg)
+        return {'nse': 'Africa/Nairobi', 'crypto': 'UTC'}.get(market, 'America/New_York')
+
     def _tracked_symbols(self) -> set:
-        """Every symbol the agent trades, for validating per-symbol requests."""
+        """Every symbol the agent trades or Market Watch lists, for
+        validating per-symbol requests."""
         out = set()
         for cfg in (self.config, getattr(self.trading_agent, 'config', {}) or {}):
             dm = (cfg or {}).get('data_manager', {}) or {}
             out |= {s.upper() for s in (dm.get('symbols', []) or []) + (dm.get('nse_symbols', []) or [])}
-        return out
+        return out | set(self._nse_trading_list()) | set(self._nse_market_symbols())
+
+    def _nse_trading_list(self) -> List[str]:
+        """The NSE stocks the agent trades now (its screener's short list)."""
+        fn = getattr(self.trading_agent, 'nse_trading_symbols', None)
+        if callable(fn):
+            try:
+                return [s.upper() for s in fn()]
+            except Exception as e:
+                logger.debug(f"NSE trading list unavailable: {e}")
+        cfg = getattr(self.trading_agent, 'config', None) or self.config or {}
+        return [s.upper() for s in cfg.get('data_manager', {}).get('nse_symbols', [])]
+
+    def _nse_market_symbols(self) -> List[str]:
+        """Every NSE stock with real data, plus the ones traded (cached a minute)."""
+        def produce():
+            from src.connectors.nse_connector import NSE_CSV_DIR
+            from src.connectors.nse_universe import market_symbols
+            return market_symbols(NSE_CSV_DIR, self._nse_trading_list())
+        try:
+            return self._cached('nse_market_symbols', 60, produce)
+        except Exception as e:
+            logger.debug(f"NSE market symbols unavailable: {e}")
+            return []
 
     def _setup_routes(self):
         """Setup API routes with authentication and rate limiting."""
@@ -339,31 +506,49 @@ class TradingAPI:
                 report['sharpe_ratio'] = metrics.get('sharpe_ratio', 0)
                 report['max_drawdown'] = metrics.get('max_drawdown', 0)
 
-                # Consolidated equity: US (Alpaca paper, simulated) + NSE
-                # (AIB-AXYS, real money the operator actually executes) in
-                # USD. Kept separate from `portfolio_value`/Sharpe/drawdown
-                # above — those stay pure US-paper so risk metrics aren't
-                # corrupted by blending simulated and real, single-point NSE
-                # value into a return series. This is a headline-number-only
-                # addition, clearly broken out so paper vs real is never
-                # ambiguous on the dashboard.
+                # Consolidated equity: the US account plus the NSE side in
+                # USD at the live rate. Kept apart from `portfolio_value`,
+                # Sharpe and drawdown above, which stay pure US so the risk
+                # numbers are not blended with a second account. With the
+                # NSE paper account on, its equity (cash plus holdings at
+                # real quotes) is the NSE trading book; the dividend sleeve
+                # (real tickets the operator fills) is added on top.
                 nse_value_usd = 0.0
+                nse_is_paper = False
                 try:
-                    nse_q = self.trading_agent.components.get('nse_order_queue')
                     dm = self.trading_agent.components.get('data_manager')
                     nse_conn = dm.connectors.get('nse') if dm and hasattr(dm, 'connectors') else None
-                    if nse_q and nse_conn:
-                        kes_usd = nse_conn.get_kes_usd_rate()
-                        for symbol, pos in nse_q.positions().items():
-                            qty = pos.get('quantity', 0)
-                            if qty > 0:
-                                quote = nse_conn.get_quote(symbol) or {}
-                                nse_value_usd += qty * (quote.get('price_kes') or 0) * kes_usd
+                    fx = self._fx_snapshot(nse_conn)
+                    kes_per_usd = (fx or {}).get('kes_per_usd') or 130.0
+                    rows, account = self._nse_holdings()
+                    nse_kes = sum(r['quantity'] * r['price_kes'] for r in rows
+                                  if r['market_name'] != 'NSE Paper Account')
+                    if account:
+                        nse_kes += float(account.get('equity_kes') or 0)
+                        nse_is_paper = True
+                    nse_value_usd = nse_kes / kes_per_usd
                 except Exception as e:
                     logger.debug(f"NSE equity contribution unavailable: {e}")
 
+                # The S&P 500 (SPY) drawn on the same points, from the
+                # chart's own starting value.
+                chart = report.get('portfolio_chart') or []
+                if chart:
+                    try:
+                        from src.agent import benchmarks as bm
+                        symbol = self._benchmark_config().get('us_symbol', 'SPY')
+                        prices = self._daily_closes(symbol)
+                        start = float(chart[0].get('value') or 0)
+                        if prices and start > 0:
+                            bm.overlay(chart, 'benchmark', bm.rebased_values(
+                                [p.get('timestamp') for p in chart], prices, start))
+                            report['benchmark_name'] = f'S&P 500 ({symbol})' if symbol == 'SPY' else symbol
+                    except Exception as e:
+                        logger.debug(f"US benchmark unavailable: {e}")
+
                 report['us_paper_value'] = round(current_value, 2)
                 report['nse_value_usd'] = round(nse_value_usd, 2)
+                report['nse_is_paper'] = nse_is_paper
                 report['consolidated_equity'] = round(current_value + nse_value_usd, 2)
                 return jsonify(report)
             except Exception as e:
@@ -396,11 +581,8 @@ class TradingAPI:
             execution quality, and alpha-vs-hold (Phase 1 of the drill-down)."""
             symbol = (symbol or '').upper()
             # Validate against configured symbols to avoid unbounded lookups.
-            allowed = set(self.config.get('data_manager', {}).get('symbols', [])) | \
-                      set(self.config.get('data_manager', {}).get('nse_symbols', [])) | \
-                      set(self.trading_agent.config.get('data_manager', {}).get('symbols', [])) | \
-                      set(self.trading_agent.config.get('data_manager', {}).get('nse_symbols', []))
-            if allowed and symbol not in {s.upper() for s in allowed}:
+            allowed = self._tracked_symbols()
+            if allowed and symbol not in allowed:
                 return jsonify({'error': f'Unknown or untracked symbol: {symbol}'}), 404
 
             def produce():
@@ -469,7 +651,11 @@ class TradingAPI:
                 cash_usd = 100000.0
                 equity_usd = 100000.0
                 
-                # 1. Primary US / International broker
+                # 1. Primary US / International broker. Index funds held by
+                # the core of the core-satellite split are labelled as such.
+                core = self._core_summary()
+                core_symbols = set(core['symbols']) if core.get('enabled') else set()
+                core_value = 0.0
                 broker_mgr = self.trading_agent.components.get('broker_manager')
                 if broker_mgr:
                     primary = broker_mgr.get_broker()
@@ -490,6 +676,9 @@ class TradingAPI:
                             
                             sym_str = getattr(p, 'symbol', '').upper()
                             region = 'Crypto' if any(c in sym_str for c in ['BTC', 'ETH', 'SOL', 'AVAX', 'DOGE', '-USD']) else 'US'
+                            in_core = sym_str in core_symbols
+                            if in_core:
+                                core_value += mkt_val
                             all_positions.append({
                                 'symbol': getattr(p, 'symbol', 'UNKNOWN'),
                                 'quantity': qty,
@@ -500,64 +689,33 @@ class TradingAPI:
                                 'market_value': mkt_val,
                                 'currency': 'USD',
                                 'region': region,
-                                'market_name': 'Crypto' if region == 'Crypto' else 'US Equities',
+                                'market_name': ('US Core (index funds)' if in_core else
+                                                'Crypto' if region == 'Crypto' else 'US Equities'),
                                 'flag': '🪙' if region == 'Crypto' else '🇺🇸'
                             })
+                if core.get('enabled'):
+                    core['value_usd'] = round(core_value, 2)
+                    core['target_usd'] = round(float(equity_usd or 0) * (1 - core['active_share']), 2)
                 
-                # 2. NSE Kenya & African filled holdings from NseOrderQueue & Sleeve
-                nse_queue = self.trading_agent.components.get('nse_order_queue')
+                # 2. NSE Kenya: the paper account, any real trading-book
+                # fills from before it, and the dividend sleeve (_nse_holdings).
+                # This used to replay the last 100 fills newest first, so a
+                # sale could be applied before the buy it closed.
                 dm = self.trading_agent.components.get('data_manager')
                 nse_connector = dm.connectors.get('nse') if dm and hasattr(dm, 'connectors') else None
-                
-                if nse_queue:
-                    fills = nse_queue.recent_fills(limit=100)
-                    nse_holdings = {}
-                    for fill in fills:
-                        sym = fill['symbol']
-                        side = fill['side']
-                        qty = fill.get('fill_quantity') or fill.get('quantity') or 0
-                        price = fill.get('fill_price') or fill.get('suggested_limit_price') or 0
-                        
-                        if sym not in nse_holdings:
-                            nse_holdings[sym] = {'qty': 0, 'total_cost': 0.0, 'book': fill.get('book', 'trading')}
-                        
-                        if side == 'buy':
-                            nse_holdings[sym]['qty'] += qty
-                            nse_holdings[sym]['total_cost'] += qty * price
-                        elif side == 'sell':
-                            nse_holdings[sym]['qty'] = max(0, nse_holdings[sym]['qty'] - qty)
-
-                    for sym, data in nse_holdings.items():
-                        qty = data['qty']
-                        if qty > 0:
-                            avg_entry = data['total_cost'] / qty if qty > 0 else 0.0
-                            # Live price lookup
-                            live_price = avg_entry
-                            if nse_connector:
-                                try:
-                                    quote = nse_connector.get_quote(sym)
-                                    if quote and quote.get('price_kes'):
-                                        live_price = float(quote['price_kes'])
-                                except Exception:
-                                    pass
-                            
-                            mkt_val_kes = qty * live_price
-                            unrealized_kes = mkt_val_kes - data['total_cost']
-                            unrealized_pct = (unrealized_kes / data['total_cost']) * 100 if data['total_cost'] > 0 else 0.0
-                            
-                            all_positions.append({
-                                'symbol': sym,
-                                'quantity': qty,
-                                'avg_entry_price': round(avg_entry, 2),
-                                'current_price': round(live_price, 2),
-                                'unrealized_pl': round(unrealized_kes, 2),
-                                'unrealized_pl_pct': round(unrealized_pct, 2),
-                                'market_value': round(mkt_val_kes, 2),
-                                'currency': 'KES',
-                                'region': 'Kenya/Africa',
-                                'market_name': 'NSE Kenya' if data['book'] == 'trading' else 'NSE Dividend Sleeve',
-                                'flag': '🇰🇪'
-                            })
+                nse_rows, nse_account = self._nse_holdings()
+                for r in nse_rows:
+                    qty, avg, price = r['quantity'], r['avg_kes'], r['price_kes']
+                    value = qty * price
+                    basis = r['cost_kes'] if r['cost_kes'] is not None else qty * avg
+                    pl = value - basis
+                    all_positions.append({
+                        'symbol': r['symbol'], 'quantity': qty,
+                        'avg_entry_price': round(avg, 2), 'current_price': round(price, 2),
+                        'unrealized_pl': round(pl, 2),
+                        'unrealized_pl_pct': round(pl / basis * 100, 2) if basis else 0.0,
+                        'market_value': round(value, 2), 'currency': 'KES',
+                        'region': 'Kenya/Africa', 'market_name': r['market_name'], 'flag': '🇰🇪'})
 
                 # Region allocation summary, KES converted at the market rate
                 # (src/connectors/fx_rate.py; it was a fixed 130).
@@ -571,6 +729,8 @@ class TradingAPI:
 
                 return jsonify({
                     'fx': fx,
+                    'nse_account': nse_account,
+                    'core': core,
                     'account': {
                         'cash': round(cash_usd, 2),
                         'equity': round(equity_usd, 2),
@@ -584,7 +744,7 @@ class TradingAPI:
                 })
             except Exception as e:
                 logger.error(f"Error getting portfolio: {e}")
-                return jsonify({'error': str(e)}), 500
+                return jsonify({'error': 'Failed to build the portfolio'}), 500
 
         @self.app.route('/api/positions', methods=['GET'])
         @require_rate_limit
@@ -716,7 +876,7 @@ class TradingAPI:
                 flatten = bool(data.get('flatten', False))
                 result = self.trading_agent.halt_trading(
                     flatten=flatten,
-                    reason=f"API request (flatten={flatten})")
+                    reason='halted from the dashboard' + (' and positions closed' if flatten else ''))
                 logger.warning(f"Kill switch engaged via API: {result}")
                 return jsonify(result)
             except Exception as e:
@@ -1191,18 +1351,21 @@ class TradingAPI:
                     scraper_status = {}
                     if hasattr(self.trading_agent, 'nse_scraper') and self.trading_agent.nse_scraper:
                         scraper_status = self.trading_agent.nse_scraper.get_status()
-                    # Only the configured universe: those are the symbols
-                    # the scraper fetches and the agent evaluates. Listing
-                    # the full 18 showed nine rows of 0.00 for symbols
-                    # nothing fetches.
-                    agent_cfg = getattr(self.trading_agent, 'config', {}) or {}
-                    watched = [s.upper() for s in
-                               agent_cfg.get('data_manager', {}).get('nse_symbols', [])] or None
-                    quotes = nse.get_all_quotes(watched)
+                    # Every stock with a real price (the scraper records
+                    # the whole exchange), plus the ones the agent trades.
+                    # A stock with no real bar is left out, rather than shown
+                    # as a row of 0.00.
+                    traded = set(self._nse_trading_list())
+                    listed = self._nse_market_symbols() or sorted(traded) or None
+                    quotes = nse.get_all_quotes(listed)
+                    for q in quotes:
+                        q['traded'] = q.get('symbol') in traded
+                    real = [q['symbol'] for q in quotes if q.get('source') in REAL_NSE_SOURCES]
                     return {
                         'quotes': quotes,
-                        'movers': nse.get_top_movers(watched),
-                        'sectors': nse.get_sector_performance(watched),
+                        'traded_count': len(traded),
+                        'movers': nse.get_top_movers(real or listed),
+                        'sectors': nse.get_sector_performance(listed),
                         'status': nse.get_status(),
                         'scraper': scraper_status,
                         'kes_usd_rate': nse.get_kes_usd_rate(),
@@ -1375,17 +1538,206 @@ class TradingAPI:
                 return jsonify({'enabled': False}), 200
             try:
                 fills = queue.fills(book='trading', since=paper.started_at)
+                curve = queue.paper_equity_history()
                 return jsonify({
                     'enabled': True,
                     'account': self._nse_paper_summary(with_stops=True),
                     'fills': list(reversed(fills))[:100],
-                    'equity_curve': queue.paper_equity_history(),
+                    'equity_curve': curve,
+                    'benchmarks': self._nse_benchmarks(curve, paper.starting_capital),
                     'rules': {'add_to_winners': paper.add_rule, 'exits': paper.exit_rule,
-                              'stop_loss': paper.stop_rule},
+                              'stop_loss': paper.stop_rule,
+                              'limits': paper.limits,
+                              'costs': {k: paper.costs.get(k) for k in (
+                                  'commission_pct', 'breakdown', 'slippage_pct',
+                                  'annual_fee_kes', 'verified', 'source')}},
                 }), 200
             except Exception as e:
                 logger.error(f"Error building NSE paper view: {e}")
                 return jsonify({'error': 'Failed to build NSE paper view'}), 500
+
+        @self.app.route('/api/nse/scan', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_nse_scan():
+            """The screen of every NSE stock and this week's short list
+            (nse_screener.py). Cached for ten minutes."""
+            def produce():
+                from dataclasses import asdict
+                from src.agent import nse_screener
+                from src.connectors.nse_connector import NSE_CSV_DIR
+                cfg_all = getattr(self.trading_agent, 'config', None) or self.config or {}
+                cfg = nse_screener.settings(cfg_all)
+                ranked = nse_screener.screen(self._nse_market_symbols(), NSE_CSV_DIR, cfg)
+                enabled = bool(cfg.get('enabled'))
+                sl = nse_screener.ShortlistStore(DATA_DIR / 'nse_shortlist.json').load()
+                # An old short list left on disk says nothing while the
+                # screener is off, and an empty one says nothing at all.
+                if not (enabled and sl and sl.symbols):
+                    sl = None
+                traded = self._nse_trading_list()
+                held_fn = getattr(self.trading_agent, '_nse_held', None)
+                try:
+                    held = set(held_fn()) if callable(held_fn) else set()
+                except Exception as e:
+                    logger.debug(f"NSE holdings unavailable for the scan: {e}")
+                    held = set()
+                listed_roles = dict(sl.roles) if sl else {}
+                roles = {sym: listed_roles.get(sym) or ('holding' if sym in held else 'configured')
+                         for sym in traded}
+                from src.agent import market_pulse
+                funds = market_pulse.fundamentals()
+                stocks = nse_screener.as_dicts(ranked)
+                for st in stocks:
+                    f = funds.get(st['symbol']) or {}
+                    st['pe'], st['dividend_yield_pct'] = f.get('pe'), f.get('dividend_yield_pct')
+                    st['fundamentals_as_of'] = f.get('as_of')
+                return {
+                    'enabled': enabled,
+                    'rules': {k: cfg[k] for k in ('max_symbols', 'max_per_sector', 'exploration_slots',
+                                                  'min_history_days', 'min_avg_value_kes',
+                                                  'refresh_days', 'llm_review')},
+                    'stocks': stocks,
+                    'traded': traded,
+                    'roles': roles,
+                    'shortlist': asdict(sl) if sl else None,
+                    'eligible': sum(1 for m in ranked if m.eligible),
+                }
+            try:
+                return jsonify(self._cached('nse_scan', 600, produce)), 200
+            except Exception as e:
+                logger.error(f"Error building the NSE scan: {e}")
+                return jsonify({'error': 'Failed to build the NSE scan'}), 500
+
+        @self.app.route('/api/research/market-pulse', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_market_pulse():
+            """What the uploaded AIB-AXYS Market Pulse reports gave the agent:
+            the latest report, T-bill rates and recent announcements."""
+            try:
+                from src.agent import market_pulse
+                reports = market_pulse.reports()
+                funds = market_pulse.fundamentals(max_age_days=3650)
+                news = market_pulse.recent_announcements(20)
+                return jsonify({
+                    'latest': reports[-1] if reports else None,
+                    'reports': len(reports),
+                    'rates': market_pulse.latest_rates(max_age_days=3650),
+                    'stocks_with_fundamentals': len(funds),
+                    'announcements': news,
+                }), 200
+            except Exception as e:
+                logger.error(f"Error reading Market Pulse data: {e}")
+                return jsonify({'error': 'Failed to read Market Pulse data'}), 500
+
+        @self.app.route('/api/strategies/learning', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_strategies_learning():
+            """Which strategies vote where, their weights and results, and
+            what the agent has changed about them (the tuner's log)."""
+            def produce():
+                from src.agent.strategy_attribution import compute_attribution
+                cfg = getattr(self.trading_agent, 'config', None) or self.config or {}
+                sm = self.trading_agent.components.get('strategy_manager')
+                journal = getattr(self.trading_agent, 'order_journal', None)
+                results = {}
+                if journal is not None:
+                    try:
+                        from src.agent.cost_model import classify
+                        fx = self._fx_snapshot()
+                        kes_per_usd = (fx or {}).get('kes_per_usd') or 130.0
+                        # One currency: NSE results are in KES, the rest in USD.
+                        results = compute_attribution(
+                            journal.filled_orders(),
+                            fx=lambda sym: 1 / kes_per_usd if classify(sym, cfg) == 'nse' else 1.0)
+                    except Exception as e:
+                        logger.debug(f"Attribution unavailable: {e}")
+                strategies = []
+                weights = dict(getattr(sm, 'strategy_weights', {}) or {})
+                total = sum(weights.values()) or 1.0
+                for name, strat in (getattr(sm, 'strategies', {}) or {}).items():
+                    scfg = (cfg.get('strategies') or {}).get(name, {}) or {}
+                    r = results.get(name) or {}
+                    markets = ([m for m in ('us_equity', 'crypto', 'nse') if sm.votes_in(name, m)]
+                               if hasattr(sm, 'votes_in') else [])
+                    strategies.append({
+                        'name': name, 'type': scfg.get('type', 'technical'),
+                        'markets': markets,
+                        'weight_pct': round(100 * weights.get(name, 0.0) / total, 1),
+                        'history_days': int(getattr(strat, 'lookback_period', 0) or 0),
+                        'closed_trades': int(r.get('closed_trades') or 0),
+                        'win_rate': r.get('win_rate'),
+                        'realized_pnl': r.get('realized_pnl'),
+                        'note': scfg.get('_comment'),
+                    })
+                for name, r in results.items():
+                    if name not in {s['name'] for s in strategies}:
+                        strategies.append({'name': name, 'type': 'other', 'markets': [],
+                                           'weight_pct': None, 'history_days': None,
+                                           'closed_trades': int(r.get('closed_trades') or 0),
+                                           'win_rate': r.get('win_rate'),
+                                           'realized_pnl': r.get('realized_pnl'), 'note': None})
+                tuner = getattr(self.trading_agent, 'strategy_tuner', None)
+                state = dict(getattr(tuner, 'state', {}) or {})
+                return {
+                    'strategies': strategies,
+                    'strategy_markets': {k: v for k, v in (cfg.get('strategy_markets') or {}).items()
+                                         if not k.startswith('_')},
+                    'ensemble_method': cfg.get('ensemble_method'),
+                    'min_trade_confidence': cfg.get('min_trade_confidence'),
+                    'regime_filter': bool((cfg.get('regime_filter') or {}).get('enabled', True)),
+                    'tuner': {
+                        'last_run': state.get('last_run') or None,
+                        'params': state.get('params') or {},
+                        'log': (state.get('log') or [])[-15:][::-1],
+                    },
+                }
+            try:
+                payload = self._cached('strategies_learning', 60, produce)
+                # Viewers see which strategies run and how they did, not the
+                # settings the tuner chose: those are the strategy's fingerprint.
+                if getattr(g, 'current_role', 'viewer') != 'operator':
+                    payload = {**payload, 'tuner': {'last_run': payload['tuner']['last_run'],
+                                                    'params': {}, 'log': [], 'restricted': True}}
+                return jsonify(payload), 200
+            except Exception as e:
+                logger.error(f"Error building the strategies view: {e}")
+                return jsonify({'error': 'Failed to build the strategies view'}), 500
+
+        @self.app.route('/api/ai/budget', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_ai_budget():
+            """The paid AI tier: whether it is on, and this month's spending
+            against its cap (llm_orchestrator.ai_budget)."""
+            llm = self.trading_agent.components.get('llm_orchestrator')
+            if llm is None or not hasattr(llm, 'ai_budget'):
+                return jsonify({'paid_tier': False, 'note': 'The AI layer is not running.'}), 200
+            try:
+                return jsonify(llm.ai_budget()), 200
+            except Exception as e:
+                logger.error(f"Error reading the AI budget: {e}")
+                return jsonify({'error': 'Failed to read the AI budget'}), 500
+
+        @self.app.route('/api/ai/scorecard', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_ai_scorecard():
+            """Signals the AI approved versus those it vetoed, measured 5 and
+            20 trading days later (ai_scorecard.py). Cached for an hour."""
+            def produce():
+                from src.agent.ai_scorecard import scorecard
+                journal = getattr(self.trading_agent, 'decision_journal', None)
+                since = (datetime.utcnow() - timedelta(days=365)).isoformat()
+                decisions = journal.reviewed(since) if journal else []
+                return scorecard(decisions, self._daily_closes, tz_for=self._exchange_tz)
+            try:
+                return jsonify(self._cached('ai_scorecard', 3600, produce)), 200
+            except Exception as e:
+                logger.error(f"Error building the AI scorecard: {e}")
+                return jsonify({'error': 'Failed to build the AI scorecard'}), 500
 
         @self.app.route('/api/chart/<symbol>', methods=['GET'])
         @require_rate_limit

@@ -104,15 +104,21 @@ export default function UnifiedPortfolio({ onDrill }) {
     })).filter(d => d.value > 0);
   }, [portfolioData]);
 
-  // Aggregate total net worth in USD (USD holdings + KES holdings converted at KES_FX_RATE)
+  // Cash held by the NSE paper account, in KES (null when it is off).
+  const nseCashKES = portfolioData.nse_account?.cash_kes ?? null;
+  // The core-satellite split of the US account ({enabled: false} when off).
+  const core = portfolioData.core || null;
+
+  // Aggregate total net worth in USD: US cash, NSE paper cash and every
+  // holding, KES converted at KES_FX_RATE.
   const totalNetWorthUSD = useMemo(() => {
     const usdCash = portfolioData.account?.cash || 0;
     const positionsUSD = positions.reduce((sum, p) => {
       const val = p.market_value || 0;
       return sum + (p.currency === 'KES' ? val / KES_FX_RATE : val);
     }, 0);
-    return usdCash + positionsUSD;
-  }, [portfolioData, positions, KES_FX_RATE]);
+    return usdCash + (nseCashKES || 0) / KES_FX_RATE + positionsUSD;
+  }, [portfolioData, positions, KES_FX_RATE, nseCashKES]);
 
   const totalNetWorthKES = useMemo(() => totalNetWorthUSD * KES_FX_RATE, [totalNetWorthUSD, KES_FX_RATE]);
 
@@ -213,8 +219,26 @@ export default function UnifiedPortfolio({ onDrill }) {
           <h3 style={{ fontSize: '24px', fontWeight: '800', color: '#fff', margin: '6px 0 0 0' }}>
             ${(portfolioData.account?.cash || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
           </h3>
-          <span style={{ fontSize: '11px', color: theme.colors.primary, display: 'block', marginTop: '4px' }}>USD Primary Account</span>
+          <span style={{ fontSize: '11px', color: theme.colors.primary, display: 'block', marginTop: '4px' }}>
+            {nseCashKES === null ? 'USD Primary Account'
+              : `US account · plus KES ${nseCashKES.toLocaleString(undefined, { maximumFractionDigits: 0 })} in the NSE paper account`}
+          </span>
         </div>
+
+        {core?.enabled && (
+          <div style={{ ...glassCard, padding: '20px', borderLeft: `4px solid ${theme.colors.accent}` }}>
+            {/* The core-satellite split (src/agent/core_portfolio.py): index
+                funds held for the long run, and the share the strategies trade. */}
+            <span style={{ fontSize: '11px', fontWeight: '800', color: theme.colors.textMuted, textTransform: 'uppercase' }}>Core / Active Split</span>
+            <h3 style={{ fontSize: '24px', fontWeight: '800', color: '#fff', margin: '6px 0 0 0' }}>
+              {Math.round((1 - core.active_share) * 100)}% / {Math.round(core.active_share * 100)}%
+            </h3>
+            <span style={{ fontSize: '11px', color: theme.colors.textSecondary, display: 'block', marginTop: '4px' }}>
+              Core {(core.symbols || []).join(', ')}: ${(core.value_usd || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} of ${(core.target_usd || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} target
+              {core.last_rebalance ? ` · rebalanced ${core.last_rebalance}` : ' · first rebalance at the next US session'}
+            </span>
+          </div>
+        )}
 
         <div style={{ ...glassCard, padding: '20px', borderLeft: `4px solid ${totalUnrealizedPLUSD >= 0 ? theme.colors.primary : theme.colors.danger}` }}>
           <span style={{ fontSize: '11px', fontWeight: '800', color: theme.colors.textMuted, textTransform: 'uppercase' }}>Unrealized Floating P&L</span>

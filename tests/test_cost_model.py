@@ -70,9 +70,13 @@ def test_works_with_no_config_at_all():
     assert costs_for('AAPL')['market'] == 'us_equity'
 
 
-def test_shipped_config_parses_and_flags_nse_as_unverified():
+def test_shipped_config_carries_the_confirmed_aib_axys_schedule():
     with open('config/config.json') as f:
         cfg = json.load(f)
-    assert costs_for('SCOM', cfg)['market'] == 'nse'
-    assert round_trip_pct('SCOM', cfg) > 0.02
-    assert 'nse' in unverified_markets(cfg)
+    nse = costs_for('SCOM', cfg)
+    assert nse['market'] == 'nse' and 'nse' not in unverified_markets(cfg)
+    # commission_pct is the sum of the broker's parts, per side.
+    assert nse['commission_pct'] == pytest.approx(sum(nse['breakdown'].values()))
+    assert nse['breakdown']['brokerage_pct'] == 0.013
+    assert nse['annual_fee_kes'] == 200
+    assert round_trip_pct('SCOM', cfg) == pytest.approx(2 * (0.0166 + 0.003))

@@ -41,6 +41,10 @@ SKIP_REASONS = {
     'max_adds',           # holding already added to the maximum times
     'position_cap',       # holding at its maximum share of the account
     'trimmed_today',      # weak sell signal, position already trimmed today
+    'min_holding',        # NSE: held for less than the minimum holding period
+    'turnover_budget',    # NSE: this week's allowance of new positions is used up
+    'liquidity_cap',      # NSE: too little trading volume for even one share
+    'stale_price',        # NSE: the latest real price is too old to act on
 }
 
 _SCHEMA = """
@@ -139,6 +143,31 @@ class DecisionJournal:
                     "SELECT * FROM decisions ORDER BY id DESC LIMIT ?", (limit,))
             cur.row_factory = sqlite3.Row
             rows = [dict(r) for r in cur.fetchall()]
+        return self._decode(rows)
+
+    def reviewed(self, since: Optional[str] = None, limit: int = 20000) -> List[Dict[str, Any]]:
+        """Buy and sell decisions that carry an AI verdict, newest first.
+
+        The scorecard needs signals a month old and more. Holds are most of
+        the journal (every symbol is re-recorded every heartbeat), so the
+        newest N rows of everything cover only days.
+        """
+        query = ("SELECT * FROM decisions WHERE action IN ('buy', 'sell')"
+                 " AND llm_verdict_json IS NOT NULL AND llm_verdict_json NOT IN ('', '{}')")
+        params: List[Any] = []
+        if since:
+            query += " AND ts >= ?"
+            params.append(since)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            cur = self._conn.execute(query, params)
+            cur.row_factory = sqlite3.Row
+            rows = [dict(r) for r in cur.fetchall()]
+        return self._decode(rows)
+
+    @staticmethod
+    def _decode(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         for r in rows:
             r['per_strategy'] = json.loads(r.pop('per_strategy_json') or '{}')
             r['llm_verdict'] = json.loads(r.pop('llm_verdict_json') or '{}')

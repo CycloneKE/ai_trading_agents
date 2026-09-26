@@ -81,7 +81,7 @@ def test_agent_warm_start_seeds_what_it_can_and_logs_the_rest(monkeypatch, tmp_p
     cfg['data_manager']['symbols'] = ['SPY', 'NVDA']
     cfg['data_manager']['nse_symbols'] = ['SCOM']
     monkeypatch.setattr(hw, 'fetch_daily_history',
-                        lambda syms: {s: {'close': [100.0 + i for i in range(60)],
+                        lambda syms, bars=60: {s: {'close': [100.0 + i for i in range(60)],
                                           'high': [101.0 + i for i in range(60)],
                                           'low': [99.0 + i for i in range(60)]}
                                       for s in syms if s == 'SPY'})

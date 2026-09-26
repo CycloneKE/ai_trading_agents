@@ -49,6 +49,7 @@ bcrypt==5.0.0
 
 # PDF Ingest
 pdfplumber>=0.11.0
+pypdf>=4.0
 
 # Technical indicators (optional). The only pandas_ta releases still on PyPI
 # require Python >= 3.12, so it is version-gated here. src/agent/indicators.py
@@ -67,3 +68,4 @@ yfinance>=0.2.60
 textblob>=0.18.0
 vaderSentiment>=3.3.2
 nltk>=3.9
+anthropic>=1.8,<2  # Paid AI tier (src/agent/claude_provider.py); used only when ANTHROPIC_API_KEY is set

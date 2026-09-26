@@ -6,8 +6,13 @@ import logging
 logger = logging.getLogger(__name__)
 
 class HeartbeatMonitor:
-    def __init__(self, risk_manager, broker_manager, audit_journal, timeout_seconds=180):
+    def __init__(self, risk_manager, broker_manager, audit_journal, timeout_seconds=180,
+                 on_trigger=None):
         self.risk_manager = risk_manager
+        # Called with the reason when the watchdog fires. The agent passes its
+        # own halt, so the loop stops submitting orders; without it the
+        # switch was only written to the database and nothing read it.
+        self.on_trigger = on_trigger
         self.broker_manager = broker_manager
         self.audit_journal = audit_journal
         self._timeout = timeout_seconds
@@ -23,6 +28,11 @@ class HeartbeatMonitor:
     def ping(self):
         self.last_ping = time.time()
         self._armed = True
+
+    def reset(self):
+        """Re-arm after an operator resumes trading, so a later freeze trips it again."""
+        self._triggered = False
+        self.last_ping = time.time()
 
     def elapsed(self) -> float:
         return time.time() - self.last_ping
@@ -47,9 +57,17 @@ class HeartbeatMonitor:
     def _check_timeout(self):
         if self._armed and self.elapsed() > self._timeout and not self._triggered:
             self._triggered = True
-            logger.critical("HEARTBEAT_TIMEOUT: Agent loop unresponsive for >{}s".format(self._timeout))
-            if hasattr(self.risk_manager, 'set_persistent_kill_switch'):
-                self.risk_manager.set_persistent_kill_switch(True, "HEARTBEAT_TIMEOUT: Agent loop unresponsive for >{}s".format(self._timeout))
+            reason = "HEARTBEAT_TIMEOUT: Agent loop unresponsive for >{}s".format(self._timeout)
+            logger.critical(reason)
+            if self.on_trigger is not None:
+                try:
+                    self.on_trigger(reason)
+                except Exception as e:
+                    logger.error(f"Heartbeat halt callback failed: {e}")
+                    if hasattr(self.risk_manager, 'set_persistent_kill_switch'):
+                        self.risk_manager.set_persistent_kill_switch(True, reason)
+            elif hasattr(self.risk_manager, 'set_persistent_kill_switch'):
+                self.risk_manager.set_persistent_kill_switch(True, reason)
             
             try:
                 if hasattr(self.broker_manager, 'get_broker'):

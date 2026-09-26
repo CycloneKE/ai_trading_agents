@@ -1,7 +1,7 @@
 // The agent's NSE paper account: KES cash, holdings with their stops, the
 // trade history and a daily equity curve. Nothing here is real money; the
 // account replays the agent's paper fills from /api/nse/paper.
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
+import { ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } from 'recharts';
 import { Wallet, PiggyBank, Briefcase, TrendingUp, Receipt, Activity, ShieldAlert, History, BookOpen } from 'lucide-react';
 import { theme } from '../DashboardStyles';
 import {
@@ -42,39 +42,64 @@ const when = (iso) => {
 
 const strategyName = (s) => (s ? String(s).replace(/_/g, ' ') : '');
 
+const SERIES_NAME = { equity_kes: 'Account value', tbill_kes: 'Treasury bills (after tax)', basket_kes: 'NSE basket (buy and hold)' };
+
+// How the account did against each benchmark over the same days.
+export function versus(points, start) {
+  const last = points[points.length - 1] || {};
+  const r = (v) => (v && start ? (v / start - 1) * 100 : null);
+  return { account: r(last.equity_kes), tbill: r(last.tbill_kes), basket: r(last.basket_kes) };
+}
+
 function EquityCurve({ points, start, mobile }) {
   if (points.length < 2) {
     return (
       <Empty>
         The curve starts at {money(start, 'KES', 0)}. One reading is added each trading day, so it
-        takes shape over the coming sessions.
+        takes shape over the coming sessions, drawn against Treasury bills and a buy-and-hold basket.
       </Empty>
     );
   }
-  const lo = Math.min(start, ...points.map((p) => p.equity_kes));
-  const hi = Math.max(start, ...points.map((p) => p.equity_kes));
+  const all = points.flatMap((p) => [p.equity_kes, p.tbill_kes, p.basket_kes]).filter((v) => typeof v === 'number');
+  const lo = Math.min(start, ...all);
+  const hi = Math.max(start, ...all);
   const pad = Math.max((hi - lo) * 0.15, start * 0.005);
+  const vs = versus(points, start);
   return (
-    <ResponsiveContainer width="100%" height={mobile ? 200 : 260}>
-      <AreaChart data={points} margin={{ left: 0, right: 8, top: 8, bottom: 0 }}>
-        <defs>
-          <linearGradient id="paperEq" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="5%" stopColor={theme.colors.primary} stopOpacity={0.3} />
-            <stop offset="95%" stopColor={theme.colors.primary} stopOpacity={0} />
-          </linearGradient>
-        </defs>
-        <CartesianGrid strokeDasharray="3 3" stroke={theme.colors.border} vertical={false} />
-        <XAxis dataKey="day" stroke={theme.colors.textMuted} fontSize={10} tickFormatter={(d) => d.slice(5)} minTickGap={24} />
-        <YAxis stroke={theme.colors.textMuted} fontSize={10} width={mobile ? 44 : 60}
-               domain={[Math.floor(lo - pad), Math.ceil(hi + pad)]}
-               tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(0)}k` : v)} />
-        <Tooltip contentStyle={{ backgroundColor: theme.colors.bgSecondary, border: `1px solid ${theme.colors.border}`, color: '#fff', fontSize: '12px' }}
-                 formatter={(v, name) => [money(v, 'KES'), name === 'equity_kes' ? 'Account value' : name]} />
-        <ReferenceLine y={start} stroke={theme.colors.textMuted} strokeDasharray="4 4"
-                       label={{ value: 'Start', fill: theme.colors.textMuted, fontSize: 10, position: 'insideTopLeft' }} />
-        <Area type="monotone" dataKey="equity_kes" stroke={theme.colors.primary} fill="url(#paperEq)" strokeWidth={2} />
-      </AreaChart>
-    </ResponsiveContainer>
+    <>
+      <ResponsiveContainer width="100%" height={mobile ? 220 : 280}>
+        <ComposedChart data={points} margin={{ left: 0, right: 8, top: 8, bottom: 0 }}>
+          <defs>
+            <linearGradient id="paperEq" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor={theme.colors.primary} stopOpacity={0.3} />
+              <stop offset="95%" stopColor={theme.colors.primary} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke={theme.colors.border} vertical={false} />
+          <XAxis dataKey="day" stroke={theme.colors.textMuted} fontSize={10} tickFormatter={(d) => d.slice(5)} minTickGap={24} />
+          <YAxis stroke={theme.colors.textMuted} fontSize={10} width={mobile ? 44 : 60}
+                 domain={[Math.floor(lo - pad), Math.ceil(hi + pad)]}
+                 tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(0)}k` : v)} />
+          <Tooltip contentStyle={{ backgroundColor: theme.colors.bgSecondary, border: `1px solid ${theme.colors.border}`, color: '#fff', fontSize: '12px' }}
+                   formatter={(v, name) => [money(v, 'KES'), SERIES_NAME[name] || name]} />
+          <Legend formatter={(name) => SERIES_NAME[name] || name} wrapperStyle={{ fontSize: '11px' }} />
+          <ReferenceLine y={start} stroke={theme.colors.textMuted} strokeDasharray="4 4" />
+          <Area type="monotone" dataKey="equity_kes" stroke={theme.colors.primary} fill="url(#paperEq)" strokeWidth={2} />
+          <Line type="monotone" dataKey="tbill_kes" stroke={theme.colors.warning} strokeDasharray="5 4" dot={false} strokeWidth={1.5} />
+          <Line type="monotone" dataKey="basket_kes" stroke={theme.colors.secondary} dot={false} strokeWidth={1.5} connectNulls />
+        </ComposedChart>
+      </ResponsiveContainer>
+      {vs.account != null && (
+        <div style={{ fontSize: '12px', color: theme.colors.textSecondary, marginTop: '8px' }}>
+          Since the start: account <strong style={{ color: gainColor(vs.account) }}>{pct(vs.account)}</strong>
+          {vs.tbill != null && <>, Treasury bills <strong>{pct(vs.tbill)}</strong></>}
+          {vs.basket != null && <>, NSE basket <strong style={{ color: gainColor(vs.basket) }}>{pct(vs.basket)}</strong></>}.
+          {vs.tbill != null && (vs.account >= vs.tbill
+            ? ' The account is ahead of risk-free bills.'
+            : ' The account is behind risk-free bills.')}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -158,10 +183,26 @@ function TradeHistory({ fills, mobile, onDrill }) {
   );
 }
 
+// "1.30% brokerage, 0.34% levies and 0.02% stamp duty (AIB-AXYS schedule)…"
+function costText(costs, verified) {
+  const c = costs || {};
+  const f = (v) => `${((v || 0) * 100).toFixed(2)}%`;
+  const b = c.breakdown;
+  const fees = b
+    ? `${f(b.brokerage_pct)} brokerage, ${f(b.statutory_levies_pct)} statutory levies and ${f(b.stamp_duty_pct)} stamp duty`
+    : `${f(c.commission_pct)} in fees`;
+  const annual = c.annual_fee_kes ? `, plus KES ${c.annual_fee_kes} a year for the account` : '';
+  const slip = c.slippage_pct ? ` An estimated ${f(c.slippage_pct)} slippage is added to each price.` : '';
+  return verified
+    ? `Each trade pays ${fees} per side, from the AIB-AXYS schedule${annual}.${slip}`
+    : `Each trade is charged an estimated ${fees} per side until the broker's schedule is confirmed.${slip}`;
+}
+
 function Rules({ rules, costsVerified }) {
   const stop = rules.stop_loss || {};
   const add = rules.add_to_winners || {};
   const exit = rules.exits || {};
+  const limits = rules.limits || {};
   const p = (v) => `${Math.round((v || 0) * 100)}%`;
   return (
     <div style={{ fontSize: '12px', color: theme.colors.textSecondary, lineHeight: 1.6 }}>
@@ -173,13 +214,19 @@ function Rules({ rules, costsVerified }) {
         <strong style={{ color: '#fff' }}>Adding to winners.</strong>{' '}
         {add.enabled === false ? 'Off.' : `Only when the holding is in profit after selling costs and the price is at least ${p(add.min_gain_pct)} above the last purchase. Each add is ${p(add.add_size_pct)} of a normal order, at most ${add.max_adds} adds, and no stock above ${p(add.max_position_pct)} of the account.`}
       </p>
+      {limits.min_holding_days != null && (
+        <p style={{ margin: '0 0 8px' }}>
+          <strong style={{ color: '#fff' }}>Trading limits.</strong>{' '}
+          {`Each holding is kept at least ${limits.min_holding_days} days unless a stop triggers; at most ${limits.max_new_positions_per_week} new holdings a week; no order above ${p(limits.max_adv_fraction)} of the stock's average daily volume; sale proceeds are spendable ${limits.settlement_days} trading days after the sale.`}
+        </p>
+      )}
       <p style={{ margin: '0 0 8px' }}>
         <strong style={{ color: '#fff' }}>Selling.</strong>{' '}
         {exit.partial_exits === false ? 'A sell signal closes the whole holding.' : `A strong sell signal (${p(exit.full_exit_confidence)} confidence or more) closes the holding; a weaker one sells ${p(exit.trim_fraction)} of it, at most once a day.`}
       </p>
       <p style={{ margin: 0 }}>
         <strong style={{ color: '#fff' }}>Costs.</strong>{' '}
-        {costsVerified ? 'Brokerage costs match the confirmed broker schedule.' : 'Each trade is charged an estimated 0.3% slippage and 1.7% commission until the AIB-AXYS schedule is confirmed.'}
+        {costText(rules.costs, costsVerified)}
       </p>
     </div>
   );
@@ -213,11 +260,20 @@ export default function NsePaperAccount({ view, error, mobile, onDrill }) {
         <HUDCard title="Account value" value={money(a.equity_kes, 'KES', 0)} subValue={`${signedMoney(pnl, 'KES', 0)} (${pct(a.return_pct)})`}
                  tone={gainColor(pnl)} icon={Wallet} color={theme.colors.primary}
                  footer={`Started with ${money(start, 'KES', 0)}${a.started_at ? ` on ${new Date(a.started_at).toLocaleDateString()}` : ''}`} />
-        <HUDCard title="Cash" value={money(a.cash_kes, 'KES', 0)} subValue={start ? `${((a.cash_kes / (a.equity_kes || start)) * 100).toFixed(0)}% of the account` : null}
-                 tone={theme.colors.textSecondary} icon={PiggyBank} color={theme.colors.secondary} />
+        <HUDCard title="Cash" value={money(a.cash_kes, 'KES', 0)}
+                 subValue={a.unsettled_kes > 0
+                   ? `${money(a.unsettled_kes, 'KES', 0)} awaiting settlement`
+                   : (start ? `${((a.cash_kes / (a.equity_kes || start)) * 100).toFixed(0)}% of the account` : null)}
+                 tone={a.unsettled_kes > 0 ? theme.colors.warning : theme.colors.textSecondary} icon={PiggyBank} color={theme.colors.secondary}
+                 footer={a.cash_yield_pct > 0
+                   ? `Earns ${(a.cash_yield_pct * 100).toFixed(2)}% a year before tax (money market / T-bills); ${money(a.interest_net_kes, 'KES', 0)} so far after tax`
+                   : null} />
         <HUDCard title="Invested" value={money(a.holdings_value_kes, 'KES', 0)} subValue={`${holdings.length} holding${holdings.length === 1 ? '' : 's'}`}
                  tone={theme.colors.textSecondary} icon={Briefcase} color={theme.colors.accent} />
-        <HUDCard title="Realised profit" value={signedMoney(a.realised_pnl_kes, 'KES', 0)} subValue="from closed and trimmed trades"
+        <HUDCard title="Realised profit" value={signedMoney(a.realised_pnl_kes, 'KES', 0)}
+                 subValue={a.dividends_net_kes > 0
+                   ? `plus ${money(a.dividends_net_kes, 'KES', 0)} dividends after ${money(a.dividend_tax_kes, 'KES', 0)} tax`
+                   : 'from closed and trimmed trades'}
                  tone={theme.colors.textMuted} icon={TrendingUp} color={gainColor(a.realised_pnl_kes)} />
         <HUDCard title="Fees paid" value={money(a.fees_paid_kes, 'KES', 0)} subValue={a.costs_verified ? 'broker schedule' : 'estimated costs'}
                  tone={theme.colors.textMuted} icon={Receipt} color={theme.colors.warning} />
