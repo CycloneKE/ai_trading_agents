@@ -34,33 +34,55 @@ class LLMOrchestrator:
         self.cooldown_seconds = config.get('llm_cooldown_seconds', 60)
         self._cooldown_until: Dict[str, float] = {}  # provider -> epoch
 
-        if not self.openrouter_api_key and not self.gemini_api_key:
+        # Paid tier: Claude, off unless ANTHROPIC_API_KEY is set, and then
+        # held to a monthly budget (claude_provider.py, ai_budget.py). The
+        # free providers above stay as the fallback.
+        self.claude = None
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        if anthropic_key:
+            from src.agent.ai_budget import AiBudget
+            from src.agent.claude_provider import ClaudeProvider
+            from src.utils.paths import DATA_DIR
+            ccfg = config.get('claude', {}) or {}
+            budget = AiBudget(DATA_DIR / 'ai_spend.json', ccfg.get('monthly_budget_usd', 20),
+                              ccfg.get('prices'))
+            self.claude = ClaudeProvider(anthropic_key, budget, ccfg)
+            logger.info(f"Claude paid tier on: {self.claude.review_model} reviews trades, "
+                        f"{self.claude.volume_model} does volume work, "
+                        f"${budget.cap:.2f}/month cap")
+
+        if not self.openrouter_api_key and not self.gemini_api_key and self.claude is None:
             logger.warning("No LLM API keys found. LLM Orchestrator will be disabled.")
             self.enabled = False
 
     def _provider_order(self):
-        """Primary provider first, then the other — each included only if its
-        key is set. Enables bidirectional fallback regardless of which is
-        primary (the old code only fell back openrouter->gemini)."""
+        """Claude first while it has budget left this month; then the primary
+        free provider, then the other, each only if its key is set. Enables
+        bidirectional fallback regardless of which is primary (the old code
+        only fell back openrouter->gemini)."""
         order = ([self.primary_provider] +
                  [p for p in ('gemini', 'openrouter') if p != self.primary_provider])
-        return [p for p in order
+        free = [p for p in order
                 if (p == 'gemini' and self.gemini_api_key)
                 or (p == 'openrouter' and self.openrouter_api_key)]
+        paid = ['anthropic'] if self.claude is not None and self.claude.available() else []
+        return paid + free
 
     def _status_code(self, err) -> Optional[int]:
         resp = getattr(err, 'response', None)
         return getattr(resp, 'status_code', None) if resp is not None else None
 
     def _complete(self, system_prompt: str, user_prompt: str,
-                  fallback, model_override: Optional[str] = None):
+                  fallback, model_override: Optional[str] = None, purpose: str = 'volume'):
         """Try each usable provider in order; on 429 put that provider on
         cooldown and try the next; on any other error try the next. Returns
         the first success, else `fallback`. Providers on cooldown are skipped
-        without a call."""
+        without a call. `purpose` ('review' or 'volume') picks Claude's model."""
         import time as _time
         now = _time.time()
-        callers = {'gemini': self._call_gemini, 'openrouter': self._call_openrouter}
+        callers = {'gemini': self._call_gemini, 'openrouter': self._call_openrouter,
+                   'anthropic': lambda s, u, fb, model_override=None:
+                       self._call_claude(s, u, fb, model_override, purpose)}
         for provider in self._provider_order():
             if self._cooldown_until.get(provider, 0) > now:
                 continue
@@ -166,7 +188,8 @@ class LLMOrchestrator:
         # All-providers-down returns the base signal: a trade is never
         # force-held by an LLM outage.
         return _remember(self._complete(system_prompt, user_prompt,
-                                        strategy_signal, model_override=model))
+                                        strategy_signal, model_override=model,
+                                        purpose='review'))
 
     def propose_json(self, system_prompt: str, user_prompt: str, model_override: Optional[str] = None):
         """Generic JSON completion (used by the weight allocator and sector specialists).
@@ -196,7 +219,8 @@ class LLMOrchestrator:
         
         secondary = providers[1]
         try:
-            dispatch = {'openrouter': self._call_openrouter, 'gemini': self._call_gemini}
+            dispatch = {'openrouter': self._call_openrouter, 'gemini': self._call_gemini,
+                        'anthropic': self._call_claude}
             fn = dispatch.get(secondary)
             if fn:
                 result = fn(system_prompt, user_prompt, None)
@@ -209,6 +233,26 @@ class LLMOrchestrator:
         except Exception as e:
             logger.warning(f"Secondary LLM provider ({secondary}) consensus call failed: {e}")
         return None
+
+    def _call_claude(self, system_prompt: str, user_prompt: str,
+                     fallback_signal: Optional[Dict[str, Any]],
+                     model_override: Optional[str] = None,
+                     purpose: str = 'volume') -> Optional[Dict[str, Any]]:
+        """Claude's JSON answer. Raises when Claude gives none (budget spent,
+        a refusal, an API error), so _complete moves on to the free models."""
+        result = self.claude.complete_json(system_prompt, user_prompt, purpose=purpose,
+                                           model_override=model_override)
+        if fallback_signal is not None:
+            result['strategy'] = 'llm_orchestrated'
+        return result
+
+    def ai_budget(self) -> Dict[str, Any]:
+        """The paid tier's state for the dashboard."""
+        if self.claude is None:
+            return {'paid_tier': False,
+                    'note': 'Claude is off (no ANTHROPIC_API_KEY); trade reviews use the free models.'}
+        return {'paid_tier': True, 'review_model': self.claude.review_model,
+                'volume_model': self.claude.volume_model, **self.claude.budget.summary()}
 
     def _call_openrouter(self, system_prompt: str, user_prompt: str, fallback_signal: Optional[Dict[str, Any]], model_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
         url = "https://openrouter.ai/api/v1/chat/completions"

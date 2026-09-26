@@ -10,19 +10,39 @@ const cell = (g) => (g && g.n
       <span style={{ color: theme.colors.textMuted }}> · {Math.round((g.win_rate || 0) * 100)}% up · {g.n}</span></>
   : <span style={{ color: theme.colors.textMuted }}>no results yet</span>);
 
+// Which AI reviews trades, and this month's spending against the cap
+// (/api/ai/budget). Claude is the paid tier, off without ANTHROPIC_API_KEY.
+function budgetLine(b) {
+  if (!b) return null;
+  if (!b.paid_tier) return b.note;
+  const used = b.cap_usd ? Math.round((b.spent_usd / b.cap_usd) * 100) : 0;
+  return `Paid tier on: ${b.review_model} reviews trades, ${b.volume_model} does volume work. `
+    + `${b.month}: $${Number(b.spent_usd || 0).toFixed(2)} of $${Number(b.cap_usd || 0).toFixed(2)} spent (${used}%) over ${b.calls} call${b.calls === 1 ? '' : 's'}`
+    + (b.remaining_usd <= 0 ? '; the cap is reached, so the free models review trades until next month.' : '.');
+}
+
 export default function AiScorecard({ mobile }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [budget, setBudget] = useState(null);
 
   useEffect(() => {
     apiGet('/api/ai/scorecard')
       .then(({ ok, status, json }) => (ok ? setData(json) : setError((json && json.error) || `HTTP ${status}`)))
       .catch((e) => setError(e.message));
+    apiGet('/api/ai/budget')
+      .then(({ ok, json }) => ok && setBudget(json))
+      .catch(() => {});
   }, []);
 
   return (
     <div style={card(mobile, { marginBottom: mobile ? '16px' : '24px' })}>
       <SectionHeader title="Does the AI's review help?" icon={Scale} />
+      {budget && (
+        <div style={{ fontSize: '12px', color: budget.paid_tier && budget.remaining_usd <= 0 ? theme.colors.warning : theme.colors.textMuted, marginBottom: '10px' }}>
+          {budgetLine(budget)}
+        </div>
+      )}
       {!data && (error ? <Empty>The scorecard could not load ({error}).</Empty> : <Empty>Scoring past reviews…</Empty>)}
       {data && (
         <>

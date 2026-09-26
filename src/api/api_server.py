@@ -1530,6 +1530,21 @@ class TradingAPI:
                 logger.error(f"Error building NSE paper view: {e}")
                 return jsonify({'error': 'Failed to build NSE paper view'}), 500
 
+        @self.app.route('/api/ai/budget', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_ai_budget():
+            """The paid AI tier: whether it is on, and this month's spending
+            against its cap (llm_orchestrator.ai_budget)."""
+            llm = self.trading_agent.components.get('llm_orchestrator')
+            if llm is None or not hasattr(llm, 'ai_budget'):
+                return jsonify({'paid_tier': False, 'note': 'The AI layer is not running.'}), 200
+            try:
+                return jsonify(llm.ai_budget()), 200
+            except Exception as e:
+                logger.error(f"Error reading the AI budget: {e}")
+                return jsonify({'error': 'Failed to read the AI budget'}), 500
+
         @self.app.route('/api/ai/scorecard', methods=['GET'])
         @require_rate_limit
         @token_required

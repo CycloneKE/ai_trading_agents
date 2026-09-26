@@ -433,6 +433,13 @@
     "fast_period": 20,
     "slow_period": 50
   },
+  "claude": {
+    "_comment": "Paid AI tier (src/agent/claude_provider.py), off unless ANTHROPIC_API_KEY is set in the environment. Then trade_review_model reviews every trade signal and volume_model does the high-volume JSON work, and the free Gemini/OpenRouter models become the fallback. Spending is priced from each reply's token counts and capped at monthly_budget_usd per calendar month (UTC); once the cap would be passed, only the free models are used until the next month. Spending is kept in data/ai_spend.json.",
+    "trade_review_model": "claude-sonnet-5",
+    "volume_model": "claude-haiku-4-5",
+    "review_effort": "medium",
+    "monthly_budget_usd": 20
+  },
   "strategy_markets": {
     "_comment": "For each market listed, only these strategies vote on its symbols; a market not listed is open to every strategy (a strategy's own `markets` still applies). Crypto trades on the 200-day trend alone, as the gap analysis recommends: the fast strategies' daily signals cost too much there. Delete the crypto line to let every strategy vote on crypto again.",
     "crypto": ["crypto_trend"]

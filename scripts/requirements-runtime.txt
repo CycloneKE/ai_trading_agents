@@ -70,6 +70,12 @@ scipy>=1.9.0
 # ModuleNotFoundError. Exactly the failure PyJWT and bcrypt caused before it.
 yfinance>=0.2.60
 
+# --- Paid AI tier ---------------------------------------------------------
+# Claude, via the official SDK. Imported only when ANTHROPIC_API_KEY is set
+# (src/agent/claude_provider.py), so the agent starts without it; it is here
+# so that setting the key is all it takes to switch the paid tier on.
+anthropic>=1.8,<2
+
 # --- Brokers ----------------------------------------------------------------
 # No broker SDK is listed, and none is needed. All three connectors
 # (alpaca, coinbase, oanda) talk to their REST APIs with `requests`, above.

@@ -43,7 +43,7 @@ def test_fallback_verdict_is_not_cached(monkeypatch):
     orch = _orch(monkeypatch)
     calls = {'n': 0}
 
-    def fake_complete(sysp, usrp, fallback, model_override=None):
+    def fake_complete(sysp, usrp, fallback, model_override=None, purpose='volume'):
         calls['n'] += 1
         return fallback  # same object identity as strategy_signal
 
