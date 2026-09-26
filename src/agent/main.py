@@ -2022,9 +2022,16 @@ class TradingAgent:
                             self.event_calendar = EventCalendar()
                         target_pos_value *= self.event_calendar.risk_multiplier()
                         
-                        # Fetch price
+                        # The price the decision was made on this cycle, from
+                        # the same feed the strategies read; the separate
+                        # Yahoo lookup only when that is missing. Relying on
+                        # Yahoo first left orders unsized ("no_price")
+                        # whenever it throttled the server, although a good
+                        # price was already in hand.
                         from src.utils.real_price_feed import price_feed
-                        price = signal_data.get('price') or price_feed.get_price(symbol)
+                        price = (signal_data.get('price')
+                                 or (cycle_dec.get(symbol) or {}).get('price')
+                                 or price_feed.get_price(symbol))
                         if not price or price <= 0:
                             logger.warning(f"No valid price for {symbol} — skipping order")
                             _note(symbol, 'no_price')

@@ -203,7 +203,7 @@ def test_without_claude_the_free_gemini_model_reads_it(monkeypatch):
 
     def post(url, headers=None, json=None, timeout=None):
         posted.update(json)
-        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {
+        return SimpleNamespace(status_code=200, raise_for_status=lambda: None, json=lambda: {
             'candidates': [{'content': {'parts': [{'text': __import__('json').dumps(SHEET)}]}}]})
     monkeypatch.setattr(lo.requests, 'post', post)
     llm = lo.LLMOrchestrator({})

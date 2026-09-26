@@ -8,8 +8,39 @@ import { card, SectionHeader, Empty } from '../ui';
 
 const DOT = { high: theme.colors.danger, medium: theme.colors.warning, low: theme.colors.textMuted, info: theme.colors.accent };
 
+const PROVIDER = { anthropic: 'Claude', gemini: 'Gemini', openrouter: 'OpenRouter' };
+const clock = (ts) => (ts ? new Date(ts * 1000).toLocaleString() : '');
+
+// What the AI services are doing: failing ones need a look when nothing else
+// answers; otherwise they are information, as are the ones answering.
+function aiItems(ai) {
+  if (!ai) return [];
+  if (!ai.enabled || !(ai.providers || []).length) {
+    return [{
+      key: 'ai-none', severity: 'medium', attention: true,
+      message: 'No AI service is set up: trades are reviewed and pictures read without AI.',
+      hint: 'Add GEMINI_API_KEY (free) in Coolify, and ANTHROPIC_API_KEY if you want Claude.',
+    }];
+  }
+  const answering = ai.providers.filter((p) => p.status === 'ok');
+  const items = ai.providers.filter((p) => p.status === 'failing').map((p) => ({
+    key: `ai-${p.provider}`, severity: answering.length ? 'info' : 'high', attention: !answering.length,
+    message: `${PROVIDER[p.provider] || p.provider} is not answering${p.model ? ` (${p.model})` : ''}: ${p.last_error || 'no reply'}.`,
+    hint: `${p.advice || ''} ${answering.length
+      ? `${answering.map((a) => PROVIDER[a.provider] || a.provider).join(' and ')} is answering, so reviews continue.`
+      : 'Until one answers, trades go ahead without an AI review and pictures cannot be read.'}`.trim(),
+  }));
+  if (answering.length) {
+    items.push({
+      key: 'ai-ok', severity: 'info', attention: false,
+      message: `AI answering: ${answering.map((a) => `${PROVIDER[a.provider] || a.provider}${a.model ? ` (${a.model})` : ''}, last at ${clock(a.last_ok)}`).join('; ')}.`,
+    });
+  }
+  return items;
+}
+
 // The one list the bell counts and this page shows.
-export function notificationItems({ anomalies = [], pendingApprovals = 0, status = {}, staleDashboard = false }) {
+export function notificationItems({ anomalies = [], pendingApprovals = 0, status = {}, staleDashboard = false, ai = null }) {
   const items = [];
   if (staleDashboard) {
     items.push({
@@ -32,6 +63,7 @@ export function notificationItems({ anomalies = [], pendingApprovals = 0, status
       hint: 'Open Research to approve or reject.',
     });
   }
+  items.push(...aiItems(ai));
   anomalies.forEach((a, i) => items.push({
     key: `a${i}`, severity: a.severity, attention: a.attention ?? ['high', 'medium'].includes(a.severity),
     message: a.message, hint: a.hint, symbol: a.symbol,

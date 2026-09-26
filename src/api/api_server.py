@@ -1715,6 +1715,19 @@ class TradingAPI:
                 logger.error(f"Error building the strategies view: {e}")
                 return jsonify({'error': 'Failed to build the strategies view'}), 500
 
+        @self.app.route('/api/ai/health', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_ai_health():
+            """Whether each AI service is answering, and if not, why and what
+            to do (llm_orchestrator.provider_health). Errors are shown as the
+            provider's own message, never with a key."""
+            llm = self.trading_agent.components.get('llm_orchestrator')
+            if llm is None or not hasattr(llm, 'provider_health'):
+                return jsonify({'enabled': False, 'providers': []}), 200
+            return jsonify({'enabled': bool(getattr(llm, 'enabled', False)),
+                            'providers': llm.provider_health()}), 200
+
         @self.app.route('/api/ai/budget', methods=['GET'])
         @require_rate_limit
         @token_required

@@ -94,6 +94,7 @@ const AdvancedDashboard = ({ onLogout }) => {
   const [drilldownSector, setDrilldownSector] = useState(null);
   const [anomalies, setAnomalies] = useState([]);
   const [pendingApprovals, setPendingApprovals] = useState(0);
+  const [aiHealth, setAiHealth] = useState(null);
   const [heartbeat, setHeartbeat] = useState({ healthy: true, elapsed_seconds: 0, triggered: false });
   const [searchOpen, setSearchOpen] = useState(false);
 
@@ -155,11 +156,28 @@ const AdvancedDashboard = ({ onLogout }) => {
     return () => { alive = false; clearInterval(id); };
   }, [isOperator]);
 
+  // Whether the AI services are answering (llm_orchestrator.provider_health).
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const token = localStorage.getItem('trading_token');
+        const res = await fetch(`${getApiBase()}/api/ai/health`, { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok) return;
+        const json = await res.json();
+        if (alive) setAiHealth(json);
+      } catch (e) { /* transient */ }
+    };
+    load();
+    const id = setInterval(load, 60000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
   // Built from different code than the server: an old copy of the page, or
   // only one of the two images rebuilt.
   const serverBuilt = data.status.dashboard_source;
   const staleDashboard = !!(serverBuilt && BUILT_FROM && serverBuilt !== BUILT_FROM);
-  const notices = notificationItems({ anomalies, pendingApprovals, status: data.status, staleDashboard });
+  const notices = notificationItems({ anomalies, pendingApprovals, status: data.status, staleDashboard, ai: aiHealth });
   const needsYou = notices.filter((n) => n.attention).length;
 
   // Heartbeat monitor polling

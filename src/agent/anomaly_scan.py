@@ -24,7 +24,7 @@ DEFAULTS = {
 # normal 'hold' / 'below_confidence' quiet).
 SYSTEMIC_REASONS = {
     'fallback_price': 'price feed is serving synthetic fallback data',
-    'no_price': 'no valid price available',
+    'no_price': 'no current price to size an order with',
     'no_account_info': 'broker account info unavailable',
     'min_notional': 'orders sized below the minimum notional',
     'pdt_guard': 'pattern-day-trader limit blocking exits',
@@ -67,7 +67,9 @@ BLOCKED = {
     'no_account_info': ("the broker account could not be read", "Check the broker connection on the Risk & System page."),
     'fallback_price': ("the price was not a real market price", "Check the price feeds on the Risk & System page."),
     'stale_price': ("the latest price is too old (the stock may be suspended)", "No action unless the stock trades again."),
-    'no_price': ("there was no valid price", "Check the price feeds on the Risk & System page."),
+    'no_price': ("the agent could not get a current price to size the order, so it placed nothing",
+                 "Harmless while the market is closed. If it continues during trading hours, the price "
+                 "source is not answering; check the data feeds on the Risk & System page."),
     'duplicate': ("the same order was already sent", "Usually harmless; if it keeps happening, check the order journal."),
 }
 
@@ -221,5 +223,11 @@ def scan(decisions: List[Dict[str, Any]], orders: List[Dict[str, Any]],
     anomalies += detect_persistent_skip(decisions, cfg['persistent_skip_min'])
     anomalies += detect_strategy_disagreement(decisions, cfg['disagreement_conf'])
     anomalies += detect_drawdown(risk_report, cfg['drawdown_warn_frac'], max_drawdown_cap)
+    # A stock blocked for a reason already says so once; the same reason
+    # counted again as a "persistent skip" would only repeat it.
+    said = {(a['symbol'], r) for a in anomalies if a['type'] == 'blocked_intent'
+            for r in a['detail'].get('reasons', {})}
+    anomalies = [a for a in anomalies if not (a['type'] == 'persistent_skip'
+                                              and (a['symbol'], a['detail'].get('reason')) in said)]
     anomalies.sort(key=lambda a: SEVERITY_RANK.get(a['severity'], 9))
     return anomalies
