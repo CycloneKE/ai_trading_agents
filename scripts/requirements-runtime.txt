@@ -95,7 +95,7 @@ anthropic>=1.8,<2
 # --- Optional features the dashboard offers --------------------------------
 # Guarded imports, so the agent starts without them, but then the feature is
 # silently off on the server. Both are small (about 40 MB together).
-pdfplumber>=0.11.0       # Research page: reading uploaded broker research PDFs
+pdfplumber>=0.11.10       # Research page: reading uploaded broker research PDFs
 pypdf>=4.0               # Research page: the Market Pulse scorecard keeps its numbers whole
                          # with pypdf (src/agent/market_pulse.py); pdfplumber is the fallback.
                          # (src/utils/pdf_parser.py). Without it every upload
