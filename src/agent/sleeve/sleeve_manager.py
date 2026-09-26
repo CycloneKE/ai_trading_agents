@@ -99,10 +99,10 @@ class SleeveManager:
         # is the benchmarks' one unless the sleeve sets its own.
         ts = sc.get('tbill_switch', {}) or {}
         self.tbill_switch = bool(ts.get('enabled', False))
-        from src.agent.benchmarks import TBILL_RATE_DEFAULT, TBILL_TAX_DEFAULT
+        from src.agent.benchmarks import TBILL_TAX_DEFAULT
         bench = config.get('benchmarks', {}) if isinstance(config.get('benchmarks'), dict) else {}
-        self.tbill_rate_pct = 100 * float(ts.get('tbill_rate_pct') or
-                                          bench.get('tbill_rate_pct', TBILL_RATE_DEFAULT))
+        self._config = config
+        self._tbill_set = ts.get('tbill_rate_pct')
         self.tbill_withholding = float(bench.get('tbill_withholding_pct', TBILL_TAX_DEFAULT))
 
         self.nse_order_queue = nse_order_queue
@@ -117,6 +117,15 @@ class SleeveManager:
         self._conn.execute('PRAGMA journal_mode=WAL')
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+
+    @property
+    def tbill_rate_pct(self) -> float:
+        """The bill rate in percent: the sleeve's own setting, else the
+        current rate (the latest Market Pulse, else the benchmarks')."""
+        if self._tbill_set:
+            return 100 * float(self._tbill_set)
+        from src.agent.benchmarks import tbill_rate
+        return 100 * tbill_rate(self._config)[0]
 
     def _get_state(self, key: str) -> Optional[str]:
         with self._lock:

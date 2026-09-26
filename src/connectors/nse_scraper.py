@@ -61,9 +61,11 @@ DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "nse_histori
 # not a market price. The API, the warm-start and the dashboard all judge
 # NSE prices by this one list. nse_website stays although that scraper is
 # gone: bars it wrote before the NSE site was rebuilt are still real.
-# nse_pricelist is the checked OCR backfill (src/connectors/nse_pricelist.py).
+# nse_pricelist is the checked OCR backfill (src/connectors/nse_pricelist.py);
+# aib_market_pulse is the closing price in AIB-AXYS's daily Market Pulse
+# (src/agent/market_pulse.py), stored only where no live source recorded one.
 REAL_NSE_SOURCES = frozenset({"nse_ticker", "nse_pricelist", "nse_website",
-                              "afx_kwayisi", "afx_history"})
+                              "afx_kwayisi", "afx_history", "aib_market_pulse"})
 
 
 @dataclass

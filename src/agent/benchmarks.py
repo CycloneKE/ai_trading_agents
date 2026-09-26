@@ -8,10 +8,11 @@ at each account's own starting value, on its own dates, so the dashboard
 can draw them on the same chart.
 """
 import csv
+import time
 from bisect import bisect_right
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from src.connectors.nse_scraper import REAL_NSE_SOURCES
 
@@ -20,6 +21,34 @@ from src.connectors.nse_scraper import REAL_NSE_SOURCES
 # config-overridable (benchmarks.tbill_rate_pct / tbill_withholding_pct).
 TBILL_RATE_DEFAULT = 0.0878
 TBILL_TAX_DEFAULT = 0.15
+
+
+_rate_cache: Dict[str, Any] = {}
+
+
+def tbill_rate(config: Optional[Dict[str, Any]] = None) -> Tuple[float, str]:
+    """The 91-day T-bill rate and where it came from.
+
+    The rate in the latest AIB-AXYS Market Pulse (market_pulse.py) when one
+    from the last 30 days was uploaded, else benchmarks.tbill_rate_pct from
+    the config, else the default. Read at most once a minute.
+    """
+    now = time.time()
+    if _rate_cache.get('at', 0) > now - 60 and 'pulse' in _rate_cache:
+        pulse = _rate_cache['pulse']
+    else:
+        try:
+            from src.agent.market_pulse import latest_rates
+            pulse = latest_rates()
+        except Exception:
+            pulse = {}
+        _rate_cache.update(at=now, pulse=pulse)
+    if pulse.get('tbill_91'):
+        return float(pulse['tbill_91']), f"AIB-AXYS Market Pulse {pulse.get('as_of')}"
+    cfg = (config or {}).get('benchmarks') or {}
+    if cfg.get('tbill_rate_pct') is not None:
+        return float(cfg['tbill_rate_pct']), 'config'
+    return TBILL_RATE_DEFAULT, 'default'
 
 
 def _day(value: Any) -> date:

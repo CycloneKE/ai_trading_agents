@@ -252,13 +252,28 @@ def ai_review(llm, shortlist: Shortlist, ranked: List[StockMetrics],
     """The AI's removals, or None when no AI answered."""
     if llm is None or not getattr(llm, 'enabled', False):
         return None
+    from src.agent import market_pulse
     by_sym = {m.symbol: m for m in ranked}
     lines = []
     for sym in shortlist.symbols:
         m = by_sym.get(sym)
-        lines.append(f"- {sym} ({m.name if m else sym}, {m.sector if m else '?'}): role "
-                     f"{shortlist.roles[sym]}, price {m.price if m else '?'} KES, "
-                     f"momentum {m.momentum_pct if m else '?'}%")
+        line = (f"- {sym} ({m.name if m else sym}, {m.sector if m else '?'}): role "
+                f"{shortlist.roles[sym]}, price {m.price if m else '?'} KES, "
+                f"momentum {m.momentum_pct if m else '?'}%")
+        # The broker's own figures and the company's recent announcements
+        # (an AGM, results, a suspension or listing notice) are the concrete
+        # facts this review is for.
+        try:
+            f = market_pulse.fundamentals(sym)
+            news = market_pulse.announcements(sym)
+        except Exception:
+            f, news = {}, []
+        if f:
+            line += (f", P/E {f.get('pe') or 'n/a'}, dividend yield {f.get('dividend_yield_pct')}%"
+                     f" (AIB-AXYS {f.get('as_of')})")
+        if news:
+            line += '; announcements: ' + '; '.join(f"{a['date']} {a['text']}" for a in news[-3:])
+        lines.append(line)
     user = (f"Proposed list ({len(shortlist.symbols)} stocks). Holdings cannot be removed. "
             f"Remove at most {max_removals}.\n" + "\n".join(lines))
     try:

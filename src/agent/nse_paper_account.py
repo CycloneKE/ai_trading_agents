@@ -160,11 +160,7 @@ class NsePaperAccount:
         self.limits = rule(LIMIT_DEFAULTS, cfg.get('trading_limits'))
         self.dividend_wht = float(cfg.get('dividend_withholding_pct', DIVIDEND_WHT_DEFAULT))
         self.dividend_events_path = cfg.get('dividend_events_path', DIVIDEND_EVENTS_DEFAULT)
-        rate = cfg.get('cash_yield_pct')
-        if rate is None:
-            from src.agent.benchmarks import TBILL_RATE_DEFAULT
-            rate = (config.get('benchmarks') or {}).get('tbill_rate_pct', TBILL_RATE_DEFAULT)
-        self.cash_yield = float(rate or 0.0)
+        self._cash_yield_set = cfg.get('cash_yield_pct')
         self.interest_wht = float(cfg.get('interest_withholding_pct', INTEREST_WHT_DEFAULT))
         self.started_at = queue.paper_account_started_at() if self.enabled else None
         if self.enabled and not queue.paper_equity_history():
@@ -174,6 +170,15 @@ class NsePaperAccount:
     @property
     def enabled(self) -> bool:
         return self.starting_capital > 0
+
+    @property
+    def cash_yield(self) -> float:
+        """The rate idle cash earns: cash_yield_pct if set, else the current
+        T-bill rate (the latest Market Pulse, else benchmarks.tbill_rate_pct)."""
+        if self._cash_yield_set is not None:
+            return float(self._cash_yield_set or 0.0)
+        from src.agent.benchmarks import tbill_rate
+        return tbill_rate(self.config)[0]
 
     # ------------------------------------------------------------ pricing
 

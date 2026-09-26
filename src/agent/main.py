@@ -1375,7 +1375,8 @@ class TradingAgent:
                     dec['skip_reason'] = blocked
                     validated = {'action': 'hold', 'confidence': 0.0}
                 elif signals and proposed != 'hold' and llm:
-                    validated = llm.validate_trade(symbol, signals, symbol_data, None)
+                    validated = llm.validate_trade(symbol, signals, symbol_data, None,
+                                                   research_context=TradingAgent._nse_research(self, symbol))
                     dec['llm_verdict'] = {
                         'action': validated.get('action'),
                         'confidence': validated.get('confidence'),
@@ -1450,6 +1451,34 @@ class TradingAgent:
                     paper.record_equity(real_prices)
             except Exception as e:
                 logger.debug(f"NSE paper equity snapshot failed: {e}")
+
+    def _nse_research(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """What AIB-AXYS says about an NSE stock, for the AI's trade review:
+        an analyst's rating from an uploaded note (the watchlist), and the
+        Market Pulse's fundamentals and announcements (market_pulse.py).
+        The NSE review used to be given no research at all, although the
+        broker covers only NSE stocks."""
+        from src.agent.market_pulse import research_context
+        rated = None
+        em = self.components.get('escalation_manager')
+        if em is not None:
+            try:
+                rated = next((w for w in em.get_active_watchlist()
+                              if str(w.get('symbol', '')).upper() == symbol.upper()), None)
+            except Exception as e:
+                logger.debug(f"Watchlist unavailable for {symbol}: {e}")
+        try:
+            pulse = research_context(symbol)
+        except Exception as e:
+            logger.debug(f"Market Pulse context unavailable for {symbol}: {e}")
+            pulse = None
+        if not rated:
+            return pulse
+        ctx = {'recommendation': rated.get('recommendation'), 'target_price': rated.get('target_price'),
+               'rationale': rated.get('rationale') or ''}
+        if pulse:
+            ctx['rationale'] = f"{ctx['rationale']} {pulse['rationale']}".strip()
+        return ctx
 
     def nse_trading_symbols(self) -> List[str]:
         """The NSE stocks the agent evaluates: the screener's short list

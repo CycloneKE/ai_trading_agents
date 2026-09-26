@@ -108,6 +108,7 @@ export default function NseMarketScan({ active, mobile, onDrill }) {
                   {!mobile && <th style={th}>1 MONTH</th>}
                   {!mobile && <th style={th}>TREND</th>}
                   {!mobile && <th style={th}>TRADED A DAY</th>}
+                  {!mobile && <th style={th} title="From the latest AIB-AXYS Market Pulse uploaded">P/E · YIELD</th>}
                   <th style={th}>STATUS</th>
                 </tr>
               </thead>
@@ -125,6 +126,12 @@ export default function NseMarketScan({ active, mobile, onDrill }) {
                     {!mobile && <td style={{ ...td, color: gainColor(s.return_1m_pct) }}>{s.return_1m_pct == null ? '—' : pct(s.return_1m_pct, 1)}</td>}
                     {!mobile && <td style={td}>{s.above_sma50 == null ? '—' : (s.above_sma50 ? 'Up' : 'Down')}</td>}
                     {!mobile && <td style={{ ...td, whiteSpace: 'nowrap' }}>{kes(s.avg_value_kes)}</td>}
+                    {!mobile && (
+                      <td style={{ ...td, whiteSpace: 'nowrap', color: theme.colors.textSecondary }}
+                          title={s.fundamentals_as_of ? `AIB-AXYS Market Pulse, ${s.fundamentals_as_of}` : 'Upload a Market Pulse to fill this in'}>
+                        {s.fundamentals_as_of ? `${s.pe ? `${s.pe.toFixed(1)}x` : 'loss'} · ${(s.dividend_yield_pct || 0).toFixed(1)}%` : '—'}
+                      </td>
+                    )}
                     <td style={{ ...td, fontSize: '11px', color: s.eligible ? theme.colors.primary : theme.colors.textMuted }}>
                       {traded.has(s.symbol) ? (ROLE[scan.roles?.[s.symbol]] || ROLE.configured).label : (s.eligible ? 'Eligible' : s.reason)}
                     </td>

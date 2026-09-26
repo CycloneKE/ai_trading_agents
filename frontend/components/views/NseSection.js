@@ -13,7 +13,7 @@ import { getApiBase } from '../../utils/apiBase';
 
 // Sources the scraper stamps on prices it actually fetched. Mirrors
 // REAL_NSE_SOURCES in src/connectors/nse_scraper.py.
-const REAL_NSE_SOURCES = ['nse_ticker', 'nse_pricelist', 'nse_website', 'afx_kwayisi', 'afx_history'];
+const REAL_NSE_SOURCES = ['nse_ticker', 'nse_pricelist', 'nse_website', 'afx_kwayisi', 'afx_history', 'aib_market_pulse'];
 const NSE_SOURCE_NOTE = {
   synthetic: 'Generated seed data, not a market price. No live source has answered for this symbol yet.',
   none: 'No price available for this symbol.',

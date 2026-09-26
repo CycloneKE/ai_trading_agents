@@ -243,7 +243,7 @@ class _LLM:
     def __init__(self):
         self.calls = 0
 
-    def validate_trade(self, symbol, signals, data, news):
+    def validate_trade(self, symbol, signals, data, news, **context):
         self.calls += 1
         return dict(signals, reasoning='approved')
 

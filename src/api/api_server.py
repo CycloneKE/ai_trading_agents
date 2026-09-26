@@ -318,10 +318,11 @@ class TradingAPI:
         from src.agent import benchmarks as bm
         bcfg = self._benchmark_config()
         rate, tax = bm.TBILL_RATE_DEFAULT, bm.TBILL_TAX_DEFAULT
+        rate_source = 'default'
         days = [p['day'] for p in curve]
         symbols = []
         try:
-            rate = float(bcfg.get('tbill_rate_pct', rate))
+            rate, rate_source = bm.tbill_rate(getattr(self.trading_agent, 'config', None) or self.config)
             tax = float(bcfg.get('tbill_withholding_pct', tax))
         except (TypeError, ValueError):
             logger.warning(f"Bad benchmarks settings {bcfg}; using the defaults")
@@ -334,7 +335,8 @@ class TradingAPI:
             bm.overlay(curve, 'basket_kes', bm.basket_values(days, closes, start_value))
         except Exception as e:
             logger.debug(f"NSE benchmarks unavailable: {e}")
-        return {'tbill_rate_pct': rate, 'tbill_withholding_pct': tax, 'basket_symbols': symbols}
+        return {'tbill_rate_pct': rate, 'tbill_rate_source': rate_source,
+                'tbill_withholding_pct': tax, 'basket_symbols': symbols}
 
     def _daily_closes(self, symbol: str) -> Dict[Any, float]:
         """Real daily closes by date: the NSE CSVs for NSE symbols, two
@@ -1572,12 +1574,19 @@ class TradingAPI:
                 roles = dict(sl.roles) if sl else {}
                 for sym in traded:
                     roles.setdefault(sym, 'holding' if sl else 'configured')
+                from src.agent import market_pulse
+                funds = market_pulse.fundamentals()
+                stocks = nse_screener.as_dicts(ranked)
+                for st in stocks:
+                    f = funds.get(st['symbol']) or {}
+                    st['pe'], st['dividend_yield_pct'] = f.get('pe'), f.get('dividend_yield_pct')
+                    st['fundamentals_as_of'] = f.get('as_of')
                 return {
                     'enabled': bool(cfg.get('enabled')),
                     'rules': {k: cfg[k] for k in ('max_symbols', 'max_per_sector', 'exploration_slots',
                                                   'min_history_days', 'min_avg_value_kes',
                                                   'refresh_days', 'llm_review')},
-                    'stocks': nse_screener.as_dicts(ranked),
+                    'stocks': stocks,
                     'traded': traded,
                     'roles': roles,
                     'shortlist': asdict(sl) if sl else None,
@@ -1588,6 +1597,28 @@ class TradingAPI:
             except Exception as e:
                 logger.error(f"Error building the NSE scan: {e}")
                 return jsonify({'error': 'Failed to build the NSE scan'}), 500
+
+        @self.app.route('/api/research/market-pulse', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_market_pulse():
+            """What the uploaded AIB-AXYS Market Pulse reports gave the agent:
+            the latest report, T-bill rates and recent announcements."""
+            try:
+                from src.agent import market_pulse
+                reports = market_pulse.reports()
+                funds = market_pulse.fundamentals(max_age_days=3650)
+                news = market_pulse.recent_announcements(20)
+                return jsonify({
+                    'latest': reports[-1] if reports else None,
+                    'reports': len(reports),
+                    'rates': market_pulse.latest_rates(max_age_days=3650),
+                    'stocks_with_fundamentals': len(funds),
+                    'announcements': news,
+                }), 200
+            except Exception as e:
+                logger.error(f"Error reading Market Pulse data: {e}")
+                return jsonify({'error': 'Failed to read Market Pulse data'}), 500
 
         @self.app.route('/api/strategies/learning', methods=['GET'])
         @require_rate_limit
