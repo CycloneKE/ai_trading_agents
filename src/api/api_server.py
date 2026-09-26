@@ -478,6 +478,9 @@ class TradingAPI:
                 status = self.trading_agent.get_status()
                 # Surface the caller's role so the UI can gate operator controls.
                 status['role'] = getattr(g, 'current_role', 'viewer')
+                # Lets the dashboard tell when it was built from other code.
+                from src.utils.build_info import dashboard_source_hash
+                status['dashboard_source'] = dashboard_source_hash()
                 return jsonify(status)
             except Exception as e:
                 logger.error(f"Error getting status: {e}")
