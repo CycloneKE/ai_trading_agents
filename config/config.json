@@ -94,6 +94,38 @@
       "rsi_oversold": 30,
       "weight": 0.8,
       "max_position_size": 0.05
+    },
+    "crypto_trend": {
+      "_comment": "Crypto only (src/agent/slow_strategies.py). Holds a coin while its close is more than `band` above its sma_period-day average, sells when it is more than `band` below, and otherwise has no view. Long-only, no leverage; sized by volatility like every trade. strategy_markets makes it crypto's only voter.",
+      "type": "trend_following",
+      "enabled": true,
+      "markets": ["crypto"],
+      "sma_period": 200,
+      "band": 0.02,
+      "weight": 1.0,
+      "max_position_size": 0.05
+    },
+    "nse_rotation": {
+      "_comment": "NSE only. Ranks the NSE stocks by their return over `lookback` trading days ending `skip` days ago (about six months, skipping the latest month); the top_n with a positive return are buys, and a holding outside the top exit_rank, or with a negative return, is a sell. Abstains until at least min_universe stocks have lookback + skip + 1 days of real history.",
+      "type": "rotation",
+      "enabled": true,
+      "markets": ["nse"],
+      "lookback": 120,
+      "skip": 20,
+      "top_n": 3,
+      "exit_rank": 6,
+      "weight": 1.0,
+      "max_position_size": 0.05
+    },
+    "us_earnings_drift": {
+      "_comment": "US shares only. After an earnings beat of at least min_surprise (actual versus the analysts' estimate), a buy for hold_days calendar days, fading over the window; after a miss of that size, a sell. Needs TRADING_FINNHUB_API_KEY; without it, and outside a report's window, it abstains.",
+      "type": "earnings_drift",
+      "enabled": true,
+      "markets": ["us_equity"],
+      "min_surprise": 0.05,
+      "hold_days": 40,
+      "weight": 1.0,
+      "max_position_size": 0.05
     }
   },
   "risk_management": {
@@ -130,8 +162,10 @@
     ],
     "scoring": {
       "yield_cap_pct": 12.0,
-      "yield_weight": 0.5,
-      "quality_weight": 0.5,
+      "yield_weight": 0.4,
+      "quality_weight": 0.3,
+      "value_weight": 0.3,
+      "earnings_yield_cap_pct": 25.0,
       "payout_ratio_min": 0.3,
       "payout_ratio_max": 0.7,
       "years_paid_target": 5,
@@ -143,6 +177,10 @@
       "min_years_paid": 3,
       "max_per_sector": 2,
       "ex_date_tilt": 0.1
+    },
+    "tbill_switch": {
+      "_comment": "Value against Treasury bills: when the median earnings yield (earnings per share / price) of the stocks the sleeve can buy is below the T-bill rate after 15% withholding tax, the sleeve skips that month and the money stays in bills. The rate is benchmarks.tbill_rate_pct unless tbill_rate_pct is set here.",
+      "enabled": true
     },
     "sectors": {
       "KCB": "banking",
@@ -394,6 +432,10 @@
     "enabled": true,
     "fast_period": 20,
     "slow_period": 50
+  },
+  "strategy_markets": {
+    "_comment": "For each market listed, only these strategies vote on its symbols; a market not listed is open to every strategy (a strategy's own `markets` still applies). Crypto trades on the 200-day trend alone, as the gap analysis recommends: the fast strategies' daily signals cost too much there. Delete the crypto line to let every strategy vote on crypto again.",
+    "crypto": ["crypto_trend"]
   },
   "core_satellite": {
     "_comment": "US account only (src/agent/core_portfolio.py). The strategies trade active_share of equity, sizing every trade from that share; the rest is a core of low-cost index funds (S&P 500, 7-10 year Treasuries, gold) weighted so each carries about the same risk, rebalanced on the first session of each month or when a fund drifts more than drift_band from its target. The core never uses margin and has no stop-losses. Core funds must not be in data_manager.symbols (VOO, not SPY); any that are get dropped from the core. The gap analysis puts active_share at 0.50-0.60 for paper trading; when real money starts, begin lower and raise it in steps only while live results stay within tolerance of paper.",

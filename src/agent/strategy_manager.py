@@ -38,6 +38,9 @@ except ImportError as e:
     logger.warning(f"Supervised learning strategy unavailable: {e}")
     SupervisedLearningStrategy = None
 
+from .cost_model import classify as classify_market
+from .slow_strategies import SLOW_STRATEGIES
+
 try:
     from .technical_strategy import TechnicalStrategy
 except ImportError as e:
@@ -143,6 +146,9 @@ class StrategyManager:
                 logger.warning(f"Could not read strategy param overlay: {e}")
 
             for strategy_name, strategy_config in strategies_config.items():
+                if strategy_config.get('enabled', True) is False:
+                    logger.info(f"Strategy {strategy_name} is disabled in config")
+                    continue
                 if strategy_name in overlay:
                     strategy_config = {**strategy_config, **overlay[strategy_name]}
                 strategy_type = strategy_config.get('type', 'supervised_learning')
@@ -154,6 +160,8 @@ class StrategyManager:
                         strategy = SupervisedLearningStrategy(strategy_name, strategy_config)
                     elif strategy_type == 'technical' and TechnicalStrategy:
                         strategy = TechnicalStrategy(strategy_name, strategy_config)
+                    elif strategy_type in SLOW_STRATEGIES:
+                        strategy = SLOW_STRATEGIES[strategy_type](strategy_name, strategy_config)
                     else:
                         # Fallback to technical if unknown or supervised/reinforcement not ready
                         if TechnicalStrategy:
@@ -238,6 +246,30 @@ class StrategyManager:
                 'timestamp': datetime.utcnow().isoformat()
             }
     
+    def in_scope(self, name: str, symbol: str) -> bool:
+        """Whether strategy `name` votes on `symbol`'s market.
+
+        A strategy with `markets` in its settings votes only there. The
+        top-level `strategy_markets` map lists, for a market, the strategies
+        that vote on it; a market it does not mention is open to all.
+        """
+        market = classify_market(symbol, self.config)
+        own = (self.config.get('strategies', {}).get(name, {}) or {}).get('markets')
+        if own and market not in own:
+            return False
+        voters = (self.config.get('strategy_markets') or {}).get(market)
+        return voters is None or name in voters
+
+    def history_needed(self, symbol: str, required_only: bool = False) -> int:
+        """Daily bars `symbol` needs before every strategy voting on it can
+        signal. With `required_only`, strategies that abstain until they have
+        their history (slow_strategies.py) are left out: the answer is then
+        what the symbol needs to trade at all."""
+        need = [int(getattr(s, 'lookback_period', 0) or 0)
+                for n, s in self.strategies.items() if self.in_scope(n, symbol)
+                and not (required_only and getattr(s, 'abstains', False))]
+        return max(need + [1])
+
     def warm_start(self, bars_by_symbol: Dict[str, list]) -> int:
         """Seed every strategy that supports it with historical closes so
         signals start immediately instead of after lookback_period live
@@ -256,6 +288,8 @@ class StrategyManager:
             if not hasattr(strategy, 'seed_history'):
                 continue
             for symbol, closes in bars_by_symbol.items():
+                if not self.in_scope(name, symbol):
+                    continue
                 try:
                     if strategy.seed_history(symbol, closes):
                         seeded += 1
@@ -306,8 +340,13 @@ class StrategyManager:
         keyed by strategy name. A strategy error degrades to 'hold'."""
         strategy_signals = {}
         futures = {}
+        symbol = data.get('symbol', 'UNKNOWN')
 
         for name, strategy in self.strategies.items():
+            # A strategy scoped to other markets is not asked at all, so it
+            # neither votes nor keeps price history for this symbol.
+            if not self.in_scope(name, symbol):
+                continue
             future = self.executor.submit(strategy.generate_signals, data)
             futures[name] = future
 
@@ -348,6 +387,15 @@ class StrategyManager:
                 }
             
             symbol = data.get('symbol', 'UNKNOWN')
+
+            # A strategy with no view (not enough history, nothing to act on)
+            # abstains: left out, so its silence does not water down the
+            # others' votes. If every strategy abstains there is no signal.
+            strategy_signals = {n: sig for n, sig in strategy_signals.items()
+                                if not (isinstance(sig, dict) and sig.get('abstain'))}
+            if not strategy_signals:
+                return {'symbol': symbol, 'action': 'hold', 'confidence': 0.0,
+                        'position_size': 0.0, 'timestamp': datetime.utcnow().isoformat()}
 
             # Let only the strategies suited to this regime vote, before the
             # blend runs. Momentum buys strength and mean reversion buys

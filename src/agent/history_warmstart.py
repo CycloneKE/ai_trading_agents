@@ -55,11 +55,20 @@ def _to_history(rows: Iterable[Row], today: date, bars: int) -> Optional[Dict[st
             'low': [r[2] for r in kept]}
 
 
+def _period_for(bars: int) -> str:
+    """A yfinance period long enough for `bars` trading days (stocks trade
+    about 21 days a month; crypto every day, so it always has enough)."""
+    return '6mo' if bars <= 100 else '1y' if bars <= 230 else '2y'
+
+
 def fetch_daily_history(symbols: Iterable[str], bars: int = 60,
                         today: Optional[date] = None,
-                        fetch: Callable[[str], List[Row]] = _yfinance_daily) -> History:
+                        fetch: Optional[Callable[[str], List[Row]]] = None) -> History:
     """Completed daily bars per symbol from a vendor (yfinance by default)."""
     today = today or datetime.now(timezone.utc).date()
+    if fetch is None:
+        period = _period_for(bars)
+        fetch = lambda s: _yfinance_daily(s, period=period)
     out: History = {}
     for sym in symbols:
         try:

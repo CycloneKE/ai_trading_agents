@@ -401,11 +401,20 @@ class TradingAgent:
         # position has earned one (position_rules.plan_add).
         return True, None, held, avg_entry
 
-    def _history_needed(self) -> int:
-        """Daily bars a symbol needs before every strategy can signal."""
+    def _history_needed(self, symbol: Optional[str] = None, required_only: bool = True) -> int:
+        """Daily bars a symbol needs before every strategy can signal.
+
+        Per symbol when the strategy manager scopes strategies to markets:
+        crypto's 200-day trend strategy does not make an NSE stock "short".
+        `required_only` leaves out strategies that abstain until their
+        history is deep enough (slow_strategies.py).
+        """
         sm = self.components.get('strategy_manager')
+        if symbol is not None and hasattr(sm, 'history_needed'):
+            return sm.history_needed(symbol, required_only=required_only)
         need = [int(getattr(s, 'lookback_period', 0) or 0)
-                for s in (getattr(sm, 'strategies', {}) or {}).values()]
+                for s in (getattr(sm, 'strategies', {}) or {}).values()
+                if not (required_only and getattr(s, 'abstains', False))]
         return max(need + [1])
 
     def _warm_start_history(self) -> None:
@@ -423,26 +432,32 @@ class TradingAgent:
         if sm is None:
             return
         dm_cfg = self.config.get('data_manager', {})
-        need = self._history_needed()
         live = [s for s in dm_cfg.get('symbols', []) if s not in self._history_seeded]
         nse = [s for s in dm_cfg.get('nse_symbols', []) if s not in self._history_seeded]
+        # What each symbol must have to trade, and how deep to fetch so the
+        # slower strategies (a 200-day average, six-month ranking) can vote.
+        need_for = {s: self._history_needed(s) for s in live + nse}
+        need = max(list(need_for.values()) + [1])
+        want = lambda syms: max([self._history_needed(s, required_only=False) for s in syms] + [60])
 
         histories = {}
         if live:
-            histories.update(fetch_daily_history(live))
+            histories.update(fetch_daily_history(live, bars=want(live)))
         if nse:
             from src.connectors.nse_connector import NSE_CSV_DIR
-            nse_history = read_nse_history(nse, NSE_CSV_DIR)
+            nse_bars = want(nse)
+            nse_history = read_nse_history(nse, NSE_CSV_DIR, bars=nse_bars)
             # afx only tops up a symbol that is short. Asking it for every
             # symbol on every start, when the stored NSE history already
             # covers them, held the loop for minutes whenever afx was
             # unreachable and tripped the heartbeat watchdog.
-            short_nse = [s for s in nse if len(nse_history.get(s, {}).get('close', [])) < need]
+            short_nse = [s for s in nse
+                         if len(nse_history.get(s, {}).get('close', [])) < need_for[s]]
             if short_nse:
                 try:
                     from src.connectors.nse_scraper import backfill_afx_history
                     if backfill_afx_history(short_nse):
-                        nse_history.update(read_nse_history(short_nse, NSE_CSV_DIR))
+                        nse_history.update(read_nse_history(short_nse, NSE_CSV_DIR, bars=nse_bars))
                 except Exception as e:
                     logger.warning(f"NSE real-history backfill failed: {e}")
             histories.update(nse_history)
@@ -457,7 +472,7 @@ class TradingAgent:
                         logger.debug(f"ATR warm-start failed for {s}: {e}")
 
         depth = {s: len(h['close']) for s, h in histories.items()}
-        self._history_seeded |= {s for s, n in depth.items() if n >= need}
+        self._history_seeded |= {s for s, n in depth.items() if n >= need_for.get(s, need)}
         short = {s: depth.get(s, 0) for s in live + nse if s not in self._history_seeded}
         if short:
             logger.error(

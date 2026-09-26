@@ -37,6 +37,22 @@ class ScoringConfig:
     # ex-date, so buying just before pays for a payout you then receive and
     # are taxed on; just after buys the same business cheaper.
     ex_date_tilt: float = 0.10
+    # Value: earnings yield (earnings per share / price, the inverse of the
+    # P/E). Cheap, profitable companies score higher. 0 leaves it out.
+    value_weight: float = 0.0
+    earnings_yield_cap_pct: float = 25.0
+
+
+def earnings_yield_pct(f: Fundamentals) -> Optional[float]:
+    """Earnings per share over price, in percent, or None if unknown.
+
+    The price is the one the dividend yield was measured at: price =
+    dividend / yield, so earnings / price = yield x earnings / dividend.
+    """
+    if not f.dividend_per_share_kes or f.dividend_per_share_kes <= 0 or f.yield_ttm_pct <= 0 \
+            or f.eps_kes is None:
+        return None
+    return f.yield_ttm_pct * f.eps_kes / f.dividend_per_share_kes
 
 
 @dataclass
@@ -49,6 +65,8 @@ class ScoredCandidate:
     ex_date_timing: str = 'unknown'
     dividend_cover: Optional[float] = None
     sustainability: str = 'not assessed'
+    value_score: float = 0.0
+    earnings_yield_pct: Optional[float] = None
 
 
 def score_symbol(f: Fundamentals, cfg: ScoringConfig,
@@ -87,7 +105,11 @@ def score_symbol(f: Fundamentals, cfg: ScoringConfig,
         # but genuine payers.
         return None
 
-    combined = cfg.yield_weight * yield_score + cfg.quality_weight * quality_score
+    ey = earnings_yield_pct(f)
+    value_score = round(min(max(ey or 0.0, 0.0), cfg.earnings_yield_cap_pct)
+                        / cfg.earnings_yield_cap_pct, 4) if cfg.earnings_yield_cap_pct > 0 else 0.0
+    combined = (cfg.yield_weight * yield_score + cfg.quality_weight * quality_score
+                + cfg.value_weight * value_score)
 
     # Timing tilt, applied after the fundamental score so it can reorder
     # near-equals without ever promoting a weaker business.
@@ -105,6 +127,8 @@ def score_symbol(f: Fundamentals, cfg: ScoringConfig,
         ex_date_timing=timing,
         dividend_cover=verdict.cover,
         sustainability=verdict.summary,
+        value_score=value_score,
+        earnings_yield_pct=round(ey, 2) if ey is not None else None,
     )
 
 
