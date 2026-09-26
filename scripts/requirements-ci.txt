@@ -18,7 +18,7 @@ PyJWT>=2.8.0
 bcrypt>=4.0.0
 
 # Imported transitively: paper_trading -> real_price_feed
-yfinance>=0.2.60
+yfinance>=1.7.0
 
 # Broker research ingest: tests/test_pdf_parser.py
 pdfplumber>=0.11.0
