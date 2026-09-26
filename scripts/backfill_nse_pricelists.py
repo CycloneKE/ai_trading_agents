@@ -159,7 +159,8 @@ def learn(entries: Dict[date, dict]) -> Dict[str, str]:
     known = nse_isin.load()
     by_isin = {d: readings_of(e, by_isin=True) for d, e in entries.items()}
     tickers = sorted(p.stem.upper() for p in NSE_CSV_DIR.glob("*.csv"))
-    found = pl.learn_isins(by_isin, pl.recorded_closes(tickers), known)
+    found = pl.learn_isins(by_isin, pl.recorded_closes(tickers), known,
+                           volumes=pl.recorded_volumes(tickers))
     return nse_isin.remember(found, "price lists matched to the NSE ticker feed")
 
 
@@ -202,7 +203,8 @@ def main() -> int:
         added = learn(entries)
         say(f"\nISINs learned this run: {len(added)}"
             + (f" ({', '.join(f'{s} {i}' for i, s in sorted(added.items(), key=lambda kv: kv[1]))})"
-               if added else " (a stock needs 3 sessions the ticker feed also recorded)"))
+               if added else " (a stock needs 10 sessions the ticker feed also recorded, "
+                             "3 of them with a price move of over 2%)"))
     isin_map = nse_isin.load()
     symbols = sorted(set(isin_map.values()))
     readings = {d: readings_of(e, isin_map) for d, e in entries.items()}
@@ -236,8 +238,16 @@ def main() -> int:
         say(f"\nNothing written. Run again with --write to store the {total} accepted bars.")
         return 0
     say("\nWriting (never over a bar a live source already recorded):")
+    recorded = pl.recorded_closes(symbols)
     for sym in symbols:
         bars = [v.bar for v in verdicts if v.symbol == sym and v.bar]
+        # A stock whose list prices disagree with what the ticker feed itself
+        # recorded for it is on the wrong ISIN: write none of its bars.
+        agree, disagree = pl.feed_agreement(bars, recorded.get(sym, {}))
+        if disagree > agree:
+            say(f"  {sym:5} NOT written: {disagree} of {agree + disagree} sessions disagree with "
+                f"the ticker feed's own record; check its ISIN in data/nse_isin_map.json")
+            continue
         written, skipped = pl.merge_into_csv(sym, bars)
         say(f"  {sym:5} {written} written, {skipped} kept as already recorded")
     say("\nDone. The agent retries its history warm-start hourly and will pick these "

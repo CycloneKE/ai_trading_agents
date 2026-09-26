@@ -183,54 +183,107 @@ def _read_rows(boxes, width, anchors, key_of):
 
 def learn_isins(readings: Dict[date, Dict[str, Reading]],
                 recorded: Dict[str, Dict[date, Tuple[float, Optional[float]]]],
-                known: Dict[str, str], min_sessions: int = 3,
-                tolerance: float = 0.01) -> Dict[str, str]:
+                known: Dict[str, str], min_sessions: int = 10,
+                tolerance: float = 0.01, min_moving: int = 3,
+                volumes: Optional[Dict[str, Dict[date, float]]] = None) -> Dict[str, str]:
     """ISIN -> ticker for ISINs the lists print but the map does not know.
 
     `readings` are the lists' rows keyed by ISIN (read_isin_rows), by
     session. `recorded` is each ticker's close and previous close as the NSE
     ticker feed stored them, by session: an independent source, so an OCR
-    misreading cannot confirm itself. On each session where an unknown ISIN
-    has a readable VWAP, the candidates are the tickers whose recorded close
-    is within `tolerance` of it (and whose previous close agrees too, when
-    both are readable). A ticker is learned only if it is the one candidate
-    left after intersecting every such session, at least `min_sessions`
-    sessions support it, and no session contradicts it. Tickers that
-    already have an ISIN are never candidates.
+    misreading cannot confirm itself. `volumes`, when given, is the volume
+    the feed recorded for each ticker by session.
+
+    On each session where an unknown ISIN has a readable VWAP, a ticker
+    matches when its recorded close is within `tolerance` of it, its
+    previous close agrees too (when both are readable), and the feed did not
+    record more shares traded than the list reports for the whole day (the
+    feed's last reading can be before the close, so less is allowed). A
+    ticker recorded at anything else that session is ruled out.
+
+    A ticker is learned only if it is the one candidate left, it matched on
+    at least `min_sessions` sessions, and on at least `min_moving` of them
+    the price moved by more than twice the tolerance. A flat price proves
+    nothing: an ISIN the feed does not record at all (a preference share, a
+    suspended stock) could otherwise be matched to whichever stock happened
+    to sit at the same price. Tickers that already have an ISIN are never
+    candidates.
     """
     taken = set(known.values())
     free = {sym: days for sym, days in recorded.items() if sym not in taken}
+    vols = volumes or {}
     near = lambda a, b: a is not None and b is not None and b > 0 and abs(a / b - 1) <= tolerance
     learned: Dict[str, str] = {}
     unknown = {isin for day in readings.values() for isin in day if isin not in known}
     for isin in sorted(unknown):
-        # Every free ticker starts as a candidate; a session on which a
-        # ticker was recorded at a different price rules it out.
         candidates = set(free)
         support: Dict[str, int] = {}
+        moving: Dict[str, int] = {}
         for d, rows in readings.items():
             row = rows.get(isin)
             if not row or row.get("vwap") is None:
                 continue
+            listed_prev, listed_vol = row.get("previous"), row.get("volume")
+            moved = (listed_prev is not None and listed_prev > 0
+                     and abs(row["vwap"] / listed_prev - 1) > 2 * tolerance)
             for sym in list(candidates):
                 if d not in free[sym]:
                     continue
                 close, prev = free[sym][d]
-                if near(row["vwap"], close) and (row.get("previous") is None or prev is None
-                                                 or near(row["previous"], prev)):
+                fed_vol = vols.get(sym, {}).get(d)
+                ok = (near(row["vwap"], close)
+                      and (listed_prev is None or prev is None or near(listed_prev, prev))
+                      and (fed_vol is None or listed_vol is None or fed_vol <= listed_vol * 1.1))
+                if ok:
                     support[sym] = support.get(sym, 0) + 1
+                    moving[sym] = moving.get(sym, 0) + moved
                 else:
                     candidates.discard(sym)
         supported = {sym for sym in candidates if support.get(sym, 0) > 0}
         if len(supported) == 1:
             sym = supported.pop()
-            if support[sym] >= min_sessions:
+            if support[sym] >= min_sessions and moving.get(sym, 0) >= min_moving:
                 learned[isin] = sym
     # One ISIN per ticker: two ISINs landing on one ticker are both dropped.
     counts: Dict[str, int] = {}
     for sym in learned.values():
         counts[sym] = counts.get(sym, 0) + 1
     return {isin: sym for isin, sym in learned.items() if counts[sym] == 1}
+
+
+def feed_agreement(bars: List[DailyBar], recorded: Dict[date, Tuple[float, Optional[float]]],
+                   tolerance: float = 0.01) -> Tuple[int, int]:
+    """(agree, disagree): how many of these bars' closes match the close the
+    NSE ticker feed recorded for the stock on the same session. A stock whose
+    list prices mostly disagree with its own feed record is mapped to the
+    wrong ISIN, and none of its bars should be written."""
+    agree = disagree = 0
+    for bar in bars:
+        rec = recorded.get(date.fromisoformat(bar.date))
+        if not rec or not rec[0]:
+            continue
+        if abs(bar.close / rec[0] - 1) <= tolerance:
+            agree += 1
+        else:
+            disagree += 1
+    return agree, disagree
+
+
+def recorded_volumes(symbols: Iterable[str]) -> Dict[str, Dict[date, float]]:
+    """Each ticker's volume as the NSE ticker feed stored it, by session."""
+    out: Dict[str, Dict[date, float]] = {}
+    for sym in symbols:
+        days: Dict[date, float] = {}
+        for r in load_csv(sym):
+            if r.get("source") != "nse_ticker":
+                continue
+            try:
+                days[date.fromisoformat(str(r.get("date"))[:10])] = float(r.get("volume") or 0)
+            except ValueError:
+                continue
+        if days:
+            out[sym.upper()] = days
+    return out
 
 
 def recorded_closes(symbols: Iterable[str]) -> Dict[str, Dict[date, Tuple[float, Optional[float]]]]:

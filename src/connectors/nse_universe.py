@@ -12,12 +12,22 @@ exchange cannot fill the whole shortlist.
 """
 import csv
 import logging
+import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
 UNCLASSIFIED = 'Unclassified'
+
+# What an NSE equity ticker looks like. The feed also lists bonds under
+# codes such as "IFB1/2023/17"; those, and anything that could name a path
+# outside the data folder, are not stocks and are never stored.
+TICKER_RE = re.compile(r'^[A-Z0-9][A-Z0-9.&-]{0,15}$')
+
+
+def valid_ticker(symbol: str) -> bool:
+    return bool(TICKER_RE.match(symbol or '')) and '..' not in symbol
 
 # ticker: (company, sector). Names are for display only.
 LISTED: Dict[str, Tuple[str, str]] = {
@@ -101,12 +111,26 @@ _seen: Set[str] = set()
 
 def register(symbols: Iterable[str]) -> None:
     """Record tickers known, from the data, to be NSE stocks."""
-    _seen.update(s.upper() for s in symbols if s)
+    _seen.update(s.upper() for s in symbols if s and valid_ticker(s.upper()))
 
 
 def is_nse_symbol(symbol: str) -> bool:
+    """A listed stock, one the feed has reported, or one with NSE history on
+    disk. The last check keeps the answer the same right after a restart,
+    before the scraper has reported anything."""
     s = (symbol or '').upper()
-    return s in LISTED or s in _seen
+    if s in LISTED or s in _seen:
+        return True
+    if not valid_ticker(s):
+        return False
+    try:
+        from src.connectors.nse_connector import NSE_CSV_DIR
+        if (Path(NSE_CSV_DIR) / f"{s}.csv").exists():
+            _seen.add(s)
+            return True
+    except Exception as e:  # never let a lookup break costing
+        logger.debug(f"NSE universe: history lookup for {s} failed: {e}")
+    return False
 
 
 def name_of(symbol: str) -> str:
@@ -131,16 +155,26 @@ def symbols_with_real_data(csv_dir: Path) -> List[str]:
         return out
     for path in paths:
         try:
-            with open(path, newline='', encoding='utf-8') as f:
-                last: Optional[dict] = None
-                for last in csv.DictReader(f):
-                    pass
+            last = _last_row(path)
             if last and last.get('source') in REAL_NSE_SOURCES:
                 out.append(path.stem.upper())
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, csv.Error) as e:
             logger.debug(f"NSE universe: cannot read {path.name}: {e}")
     register(out)
     return out
+
+
+def _last_row(path: Path, block: int = 4096) -> Optional[dict]:
+    """The file's last data row, read from its end rather than in full."""
+    with open(path, 'rb') as f:
+        header = f.readline().decode('utf-8').strip()
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(max(size - block, 0))
+        lines = [l for l in f.read().decode('utf-8', 'replace').splitlines() if l.strip()]
+    if not header or not lines or lines[-1].strip() == header:
+        return None
+    return next(csv.DictReader([header, lines[-1]]), None)
 
 
 def market_symbols(csv_dir: Path, watched: Iterable[str] = ()) -> List[str]:

@@ -302,6 +302,25 @@ class StrategyManager:
             logger.info(f"Warm-started {seeded} strategy/symbol history buffers")
         return seeded
 
+    def forget(self, symbols) -> int:
+        """Drop the price buffers of symbols the agent no longer trades.
+
+        A stock that leaves the NSE short list would otherwise keep its
+        frozen history: the rotation strategy would go on ranking it against
+        the stocks still traded, and if it came back weeks later its buffer
+        would resume from old bars plus one gap. Returns the buffers dropped.
+        """
+        dropped = 0
+        for symbol in symbols:
+            for strategy in self.strategies.values():
+                for attr in ('historical_data', '_bar_dates'):
+                    store = getattr(strategy, attr, None)
+                    if isinstance(store, dict) and store.pop(symbol, None) is not None:
+                        dropped += attr == 'historical_data'
+            if self.regime_detector is not None:
+                self.regime_detector.forget(symbol)
+        return dropped
+
     def update_performance_from_attribution(self, attribution: Dict[str, Dict[str, Any]]):
         """Replace tracked strategy performance with REAL realized results
         from the order journal (win rate, realized return, per-trade Sharpe,

@@ -1569,11 +1569,22 @@ class TradingAPI:
                 cfg_all = getattr(self.trading_agent, 'config', None) or self.config or {}
                 cfg = nse_screener.settings(cfg_all)
                 ranked = nse_screener.screen(self._nse_market_symbols(), NSE_CSV_DIR, cfg)
+                enabled = bool(cfg.get('enabled'))
                 sl = nse_screener.ShortlistStore(DATA_DIR / 'nse_shortlist.json').load()
+                # An old short list left on disk says nothing while the
+                # screener is off, and an empty one says nothing at all.
+                if not (enabled and sl and sl.symbols):
+                    sl = None
                 traded = self._nse_trading_list()
-                roles = dict(sl.roles) if sl else {}
-                for sym in traded:
-                    roles.setdefault(sym, 'holding' if sl else 'configured')
+                held_fn = getattr(self.trading_agent, '_nse_held', None)
+                try:
+                    held = set(held_fn()) if callable(held_fn) else set()
+                except Exception as e:
+                    logger.debug(f"NSE holdings unavailable for the scan: {e}")
+                    held = set()
+                listed_roles = dict(sl.roles) if sl else {}
+                roles = {sym: listed_roles.get(sym) or ('holding' if sym in held else 'configured')
+                         for sym in traded}
                 from src.agent import market_pulse
                 funds = market_pulse.fundamentals()
                 stocks = nse_screener.as_dicts(ranked)
@@ -1582,7 +1593,7 @@ class TradingAPI:
                     st['pe'], st['dividend_yield_pct'] = f.get('pe'), f.get('dividend_yield_pct')
                     st['fundamentals_as_of'] = f.get('as_of')
                 return {
-                    'enabled': bool(cfg.get('enabled')),
+                    'enabled': enabled,
                     'rules': {k: cfg[k] for k in ('max_symbols', 'max_per_sector', 'exploration_slots',
                                                   'min_history_days', 'min_avg_value_kes',
                                                   'refresh_days', 'llm_review')},
@@ -1684,7 +1695,13 @@ class TradingAPI:
                     },
                 }
             try:
-                return jsonify(self._cached('strategies_learning', 60, produce)), 200
+                payload = self._cached('strategies_learning', 60, produce)
+                # Viewers see which strategies run and how they did, not the
+                # settings the tuner chose: those are the strategy's fingerprint.
+                if getattr(g, 'current_role', 'viewer') != 'operator':
+                    payload = {**payload, 'tuner': {'last_run': payload['tuner']['last_run'],
+                                                    'params': {}, 'log': [], 'restricted': True}}
+                return jsonify(payload), 200
             except Exception as e:
                 logger.error(f"Error building the strategies view: {e}")
                 return jsonify({'error': 'Failed to build the strategies view'}), 500

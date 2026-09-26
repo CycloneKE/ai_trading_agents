@@ -122,6 +122,11 @@ class VolatilityTracker:
     def bars(self, symbol: str) -> int:
         return len(self._close.get(symbol, ()))
 
+    def forget(self, symbol: str) -> None:
+        """Drop a symbol the agent no longer trades."""
+        for store in (self._close, self._high, self._low, self._have_hl, self._bar_dates):
+            store.pop(symbol, None)
+
     def atr(self, symbol: str) -> Optional[float]:
         """Latest ATR in price units, or None without enough history."""
         c = self._close.get(symbol)

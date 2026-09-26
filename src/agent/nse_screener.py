@@ -80,6 +80,8 @@ class StockMetrics:
     volatility_pct: Optional[float] = None
     eligible: bool = False
     reason: Optional[str] = None   # why not eligible
+    stale: bool = False            # no price for longer than stale_after_days
+    thin: bool = False             # five or more sessions, all too thin for an order
     score: Optional[float] = None
     rank: Optional[int] = None
 
@@ -96,14 +98,16 @@ def real_rows(symbol: str, csv_dir: Path) -> List[Dict[str, Any]]:
                     continue
                 try:
                     close = float(r.get('close') or 0)
-                except ValueError:
+                    volume = float(r.get('volume') or 0)
+                    change = float(r.get('change_pct') or 0)
+                except (TypeError, ValueError):
                     continue
                 if close > 0 and r.get('date'):
                     by_date[str(r['date'])[:10]] = {
                         'date': str(r['date'])[:10], 'close': close,
-                        'volume': float(r.get('volume') or 0),
-                        'change_pct': float(r.get('change_pct') or 0)}
-    except OSError:
+                        'volume': volume, 'change_pct': change}
+    except (OSError, csv.Error, UnicodeDecodeError) as e:
+        logger.warning(f"Could not read the NSE history for {symbol}: {e}")
         return []
     return [by_date[d] for d in sorted(by_date)]
 
@@ -111,8 +115,13 @@ def real_rows(symbol: str, csv_dir: Path) -> List[Dict[str, Any]]:
 def metrics_for(symbol: str, rows: List[Dict[str, Any]], cfg: Dict[str, Any],
                 today: Optional[date] = None) -> StockMetrics:
     from src.connectors.nse_universe import name_of, sector_of
+    today = today or datetime.now(timezone.utc).date()
+    # The warm-start loads only sessions before today (today's bar is still
+    # forming), so history is counted the same way here: a stock passing the
+    # screen on exactly the minimum must also be able to signal.
+    completed = sum(1 for r in rows if r['date'] < today.isoformat())
     m = StockMetrics(symbol=symbol.upper(), name=name_of(symbol), sector=sector_of(symbol),
-                     days=len(rows))
+                     days=completed)
     if not rows:
         m.reason = 'no real prices yet'
         return m
@@ -137,9 +146,10 @@ def metrics_for(symbol: str, rows: List[Dict[str, Any]], cfg: Dict[str, Any],
         m.volatility_pct = round(math.sqrt(sum((x - mean) ** 2 for x in rets) / len(rets))
                                  * math.sqrt(252) * 100, 1)
 
-    today = today or datetime.now(timezone.utc).date()
     age = (today - date.fromisoformat(m.last_date)).days
-    if age > cfg['stale_after_days']:
+    m.stale = age > cfg['stale_after_days']
+    m.thin = len(recent) >= 5 and (m.avg_value_kes or 0) < cfg['min_avg_value_kes']
+    if m.stale:
         m.reason = f'no price for {age} days'
     elif m.days < cfg['min_history_days']:
         m.reason = f"{m.days} of {cfg['min_history_days']} days of history"
@@ -228,11 +238,16 @@ def build(ranked: List[StockMetrics], holdings: Iterable[str], cfg: Dict[str, An
                 break
         else:
             break
+    # The configured list fills gaps, but never with a stock the screen
+    # found suspended (no recent price) or too thin to take one order.
+    screened = {m.symbol: m for m in ranked}
     for sym in (s.upper() for s in fallback):
         if len(picked) >= cfg['max_symbols']:
             break
-        if sym not in excluded:
-            take(sym, 'fallback')
+        m = screened.get(sym)
+        if sym in excluded or (m is not None and (m.stale or m.thin)):
+            continue
+        take(sym, 'fallback')
     return Shortlist(symbols=picked, roles=roles)
 
 

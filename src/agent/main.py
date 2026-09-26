@@ -433,7 +433,10 @@ class TradingAgent:
             return
         dm_cfg = self.config.get('data_manager', {})
         live = [s for s in dm_cfg.get('symbols', []) if s not in self._history_seeded]
-        nse = [s for s in TradingAgent.nse_trading_symbols(self) if s not in self._history_seeded]
+        trading = TradingAgent.nse_trading_symbols(self)
+        if getattr(self, '_nse_active', None) is None:
+            self._nse_active = set(trading)
+        nse = [s for s in trading if s not in self._history_seeded]
         # What each symbol must have to trade, and how deep to fetch so the
         # slower strategies (a 200-day average, six-month ranking) can vote.
         need_for = {s: self._history_needed(s) for s in live + nse}
@@ -1157,6 +1160,12 @@ class TradingAgent:
                                 from src.agent.universe_scout import propose_candidates
                                 nse = self.components.get('data_manager')
                                 em = self.components.get('escalation_manager')
+                                from src.agent import nse_screener
+                                # With the screener on, every listed stock is
+                                # already screened weekly; proposing one would
+                                # only ask the operator to approve a no-op.
+                                if nse_screener.settings(self.config).get('enabled'):
+                                    em = None
                                 if em and nse:
                                     tracked = set(self.nse_trading_symbols())
                                     movers = []
@@ -1258,6 +1267,12 @@ class TradingAgent:
         except Exception as e:
             logger.error(f"NSE shortlist refresh failed; keeping the last list: {e}")
         nse_symbols = TradingAgent.nse_trading_symbols(self)
+        from src.agent import nse_screener
+        stale_days = int(nse_screener.settings(self.config)['stale_after_days'])
+        try:
+            TradingAgent._sync_nse_state(self, nse_symbols)
+        except Exception as e:
+            logger.error(f"NSE trading list sync failed: {e}")
         real_prices = {}  # this cycle's real quotes, for the equity snapshot
 
         for symbol in nse_symbols:
@@ -1287,6 +1302,23 @@ class TradingAgent:
                             self.decision_journal.record({
                                 'symbol': symbol, 'cycle': cycle, 'action': 'hold',
                                 'skip_reason': 'fallback_price', 'price': price,
+                                'ensemble_confidence': 0.0, 'per_strategy': {},
+                                'llm_verdict': {}, 'executed': False,
+                            })
+                        except Exception as e:
+                            logger.debug(f"NSE decision record error: {e}")
+                    continue
+
+                # Never act on an old price. A suspended or untraded stock
+                # keeps its last bar for weeks; a stop or a fill at that
+                # price is not one the market would give.
+                age = TradingAgent._nse_price_age_days(quote)
+                if age is not None and age > stale_days:
+                    if self.decision_journal:
+                        try:
+                            self.decision_journal.record({
+                                'symbol': symbol, 'cycle': cycle, 'action': 'hold',
+                                'skip_reason': 'stale_price', 'price': price,
                                 'ensemble_confidence': 0.0, 'per_strategy': {},
                                 'llm_verdict': {}, 'executed': False,
                             })
@@ -1480,27 +1512,78 @@ class TradingAgent:
             ctx['rationale'] = f"{ctx['rationale']} {pulse['rationale']}".strip()
         return ctx
 
+    @staticmethod
+    def _nse_price_age_days(quote: Dict[str, Any], today=None) -> Optional[int]:
+        """Calendar days since the quote's bar, or None when it has no date."""
+        from src.connectors.nse_connector import EAT_OFFSET
+        try:
+            bar_day = datetime.fromisoformat(str(quote.get('timestamp') or '')[:10]).date()
+        except ValueError:
+            return None
+        today = today or datetime.now(EAT_OFFSET).date()
+        return (today - bar_day).days
+
+    def _nse_held(self) -> List[str]:
+        """Every NSE stock held for trading: the paper account's positions
+        when it is on, otherwise the trading book's recorded fills (the
+        manual AIB-AXYS workflow, where real shares are bought by ticket)."""
+        try:
+            paper = self.components.get('nse_paper_account')
+            if paper is not None and getattr(paper, 'enabled', False):
+                return [s.upper() for s in paper.positions()]
+            queue = self.components.get('nse_order_queue')
+            if queue is not None:
+                from src.agent.nse_paper_account import BOOK
+                return [s.upper() for s, p in queue.positions(book=BOOK).items()
+                        if (p or {}).get('quantity', 0) > 0]
+        except Exception as e:
+            logger.warning(f"NSE holdings unavailable for the trading list: {e}")
+        return []
+
     def nse_trading_symbols(self) -> List[str]:
-        """The NSE stocks the agent evaluates: the screener's short list
-        plus everything the paper account holds, or the configured list
-        (data_manager.nse_symbols) while the screener is off or has not run."""
+        """The NSE stocks the agent evaluates: the screener's short list, or
+        the configured list (data_manager.nse_symbols) while the screener is
+        off or has not run, plus every stock held. Holdings are always in,
+        whatever the list says, because their stops and exits are checked
+        only for the stocks evaluated here."""
         from src.agent import nse_screener
         from src.connectors.nse_universe import register
         configured = [s.upper() for s in self.config.get('data_manager', {}).get('nse_symbols', [])]
-        if not nse_screener.settings(self.config).get('enabled'):
-            return configured
-        sl = nse_screener.ShortlistStore(DATA_DIR / 'nse_shortlist.json').load()
-        symbols = list(sl.symbols) if sl and sl.symbols else configured
-        paper = self.components.get('nse_paper_account')
-        held = []
-        if paper is not None and getattr(paper, 'enabled', False):
-            try:
-                held = list(paper.positions())
-            except Exception as e:
-                logger.debug(f"NSE holdings unavailable for the trading list: {e}")
+        symbols = configured
+        if nse_screener.settings(self.config).get('enabled'):
+            sl = nse_screener.ShortlistStore(DATA_DIR / 'nse_shortlist.json').load()
+            if sl and sl.symbols:
+                symbols = list(sl.symbols)
+        held = TradingAgent._nse_held(self)
         out = symbols + [h for h in held if h not in symbols]
         register(out)
         return out
+
+    def _sync_nse_state(self, symbols: List[str]) -> None:
+        """Forget stocks that left the NSE trading list and warm-start the
+        ones that joined, so the strategies only ever compare the stocks
+        traded now, each on a continuous history."""
+        current = set(symbols)
+        previous = getattr(self, '_nse_active', None)
+        self._nse_active = current
+        if previous is None:
+            return
+        gone = previous - current
+        if gone:
+            sm = self.components.get('strategy_manager')
+            if sm is not None and hasattr(sm, 'forget'):
+                sm.forget(gone)
+            tracker = getattr(self, 'volatility', None)
+            for symbol in gone:
+                if tracker is not None:
+                    tracker.forget(symbol)
+                getattr(self, '_nse_last_price', {}).pop(symbol, None)
+            self._history_seeded -= gone
+            logger.info(f"NSE trading list: dropped {sorted(gone)}")
+        joined = current - previous
+        if joined - self._history_seeded:
+            logger.info(f"NSE trading list: added {sorted(joined)}; loading their history")
+            self._warm_start_history()
 
     def _refresh_nse_shortlist(self, now: Optional[datetime] = None, llm=None):
         """Rebuild the NSE short list when it is due (weekly by default)."""
@@ -1515,8 +1598,7 @@ class TradingAgent:
             return None
         configured = [s.upper() for s in self.config.get('data_manager', {}).get('nse_symbols', [])]
         ranked = nse_screener.screen(market_symbols(NSE_CSV_DIR, configured), NSE_CSV_DIR, cfg)
-        paper = self.components.get('nse_paper_account')
-        held = list(paper.positions()) if paper is not None and getattr(paper, 'enabled', False) else []
+        held = TradingAgent._nse_held(self)
         sl = nse_screener.refresh(ranked, held, cfg, configured,
                                   llm or self.components.get('llm_orchestrator'), now)
         store.save(sl)

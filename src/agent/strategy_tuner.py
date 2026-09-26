@@ -36,7 +36,7 @@ import logging
 import math
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -244,7 +244,7 @@ class StrategyTuner:
         return report
 
     def tune_one(self, name: str, series: Series) -> Dict[str, Any]:
-        entry = {'strategy': name, 'at': datetime.utcnow().isoformat(timespec='seconds'),
+        entry = {'strategy': name, 'at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
                  'symbols': len(series)}
         if not series:
             entry['outcome'] = f"no symbol has {self.rule['min_bars']} daily bars yet"

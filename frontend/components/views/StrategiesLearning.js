@@ -14,7 +14,9 @@ const params = (p) => (p && typeof p === 'object'
 
 function when(ts) {
   if (!ts) return 'never';
-  const d = typeof ts === 'number' ? new Date(ts * 1000) : new Date(ts);
+  // The tuner's older log entries are UTC without a zone mark; read them as UTC.
+  const iso = typeof ts === 'string' && !/(Z|[+-]\d\d:?\d\d)$/.test(ts) ? `${ts}Z` : ts;
+  const d = typeof iso === 'number' ? new Date(iso * 1000) : new Date(iso);
   return Number.isNaN(d.getTime()) ? String(ts) : d.toLocaleString();
 }
 
@@ -88,7 +90,9 @@ export default function StrategiesLearning({ mobile }) {
             </Note>
           </div>
         )}
-        {log.length ? (
+        {data.tuner?.restricted ? (
+          <Empty>The tuner's settings and changes are shown to the operator only.</Empty>
+        ) : log.length ? (
           <div style={{ display: 'grid', gap: '6px' }}>
             {log.map((e, i) => (
               <div key={i} style={{ fontSize: '12px', padding: '6px 0', borderBottom: `1px solid ${theme.colors.border}` }}>

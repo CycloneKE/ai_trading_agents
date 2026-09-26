@@ -85,6 +85,11 @@ class RegimeDetector:
     def bars(self, symbol: str) -> int:
         return len(self._closes.get(symbol, ()))
 
+    def forget(self, symbol: str) -> None:
+        """Drop a symbol the agent no longer trades."""
+        self._closes.pop(symbol, None)
+        self._bar_dates.pop(symbol, None)
+
     def regime(self, symbol: str) -> str:
         buf = self._closes.get(symbol)
         if not buf or len(buf) < self.slow_period:

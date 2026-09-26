@@ -11,6 +11,7 @@ const REASON_LABEL = {
   bias_downgrade: 'Bias detector downgrade',
   llm_veto: 'LLM vetoed the trade',
   fallback_price: 'Price was synthetic fallback',
+  stale_price: 'Latest price is too old (stock suspended or not trading)',
   halted: 'Trading halted (kill switch)',
   risk_limits: 'Portfolio risk limit hit',
   pdt_guard: 'Pattern-day-trader block',
