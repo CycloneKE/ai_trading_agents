@@ -253,7 +253,10 @@ class StrategyManager:
         top-level `strategy_markets` map lists, for a market, the strategies
         that vote on it; a market it does not mention is open to all.
         """
-        market = classify_market(symbol, self.config)
+        return self.votes_in(name, classify_market(symbol, self.config))
+
+    def votes_in(self, name: str, market: str) -> bool:
+        """Whether strategy `name` votes on `market` (see in_scope)."""
         own = (self.config.get('strategies', {}).get(name, {}) or {}).get('markets')
         if own and market not in own:
             return False

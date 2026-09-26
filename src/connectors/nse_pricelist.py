@@ -32,11 +32,8 @@ _MONTHS = "JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC".split()
 
 # Rows are matched by ISIN, which the OCR read correctly for every watched
 # stock, rather than by company name, which it garbles ("Co-openative").
-ISIN_TO_SYMBOL = {
-    "KE1000001402": "SCOM", "KE0000000554": "EQTY", "KE0000000315": "KCB",
-    "KE1000001568": "COOP", "KE0000000448": "SCBK", "KE0000000067": "ABSA",
-    "KE0000000075": "BAT", "KE0000000216": "EABL", "KE0000000406": "NCBA",
-}
+# The nine checked by hand; the rest are learned (nse_isin.py, learn_isins).
+from src.connectors.nse_isin import VERIFIED as ISIN_TO_SYMBOL  # noqa: E402
 
 COLUMNS = ("high", "low", "vwap", "previous", "volume")
 _HEADINGS = {"HIGH": "high", "LOW": "low", "VWAP": "vwap", "PREVIOUS": "previous",
@@ -134,16 +131,30 @@ def _parse(text: str, column: str) -> Optional[float]:
     return float(t.replace(",", "")) if pattern.match(t) else None
 
 
+def read_isin_rows(boxes: List[Box], width: float,
+                   anchors: Optional[Dict[str, float]] = None) -> Tuple[Dict[str, Reading], Optional[Dict[str, float]]]:
+    """Readings for every row on the page that carries exactly one ISIN,
+    keyed by the ISIN, known or not. What learn_isins works from."""
+    return _read_rows(boxes, width, anchors, lambda isin: isin)
+
+
 def read_page(boxes: List[Box], width: float,
-              anchors: Optional[Dict[str, float]] = None) -> Tuple[Dict[str, Reading], Optional[Dict[str, float]]]:
-    """Readings per watched symbol on one page, and the anchors used.
+              anchors: Optional[Dict[str, float]] = None,
+              isin_map: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, Reading], Optional[Dict[str, float]]]:
+    """Readings per mapped symbol on one page, and the anchors used.
 
     Pass the previous page's anchors for a page without a heading row. A row
-    counts only if one cell on it is exactly a watched ISIN; the dividend
-    notes quote ISINs inside longer text, so they never match. A column with
-    no cell, two cells, or a cell that is not a well-formed number reads as
-    None: unreadable, never guessed.
+    counts only if one cell on it is exactly a mapped ISIN (`isin_map`, the
+    hand-checked nine by default); the dividend notes quote ISINs inside
+    longer text, so they never match. A column with no cell, two cells, or
+    a cell that is not a well-formed number reads as None: unreadable, never
+    guessed.
     """
+    mapping = isin_map if isin_map is not None else ISIN_TO_SYMBOL
+    return _read_rows(boxes, width, anchors, mapping.get)
+
+
+def _read_rows(boxes, width, anchors, key_of):
     lines = group_lines(boxes)
     anchors = find_anchors(lines) or anchors or {k: v * width for k, v in DEFAULT_ANCHORS.items()}
     slack = 0.005 * width
@@ -151,9 +162,11 @@ def read_page(boxes: List[Box], width: float,
     seen: Dict[str, int] = {}
     for line in lines:
         isins = [b for b in line if _ISIN_RE.match(_norm(b.text))]
-        if len(isins) != 1 or _norm(isins[0].text) not in ISIN_TO_SYMBOL:
+        if len(isins) != 1:
             continue
-        sym = ISIN_TO_SYMBOL[_norm(isins[0].text)]
+        sym = key_of(_norm(isins[0].text))
+        if not sym:
+            continue
         seen[sym] = seen.get(sym, 0) + 1
         cells: Dict[str, List[str]] = {c: [] for c in COLUMNS}
         for b in line:
@@ -166,6 +179,82 @@ def read_page(boxes: List[Box], width: float,
         if n > 1:  # two rows claim one stock: trust neither
             out[sym] = {c: None for c in COLUMNS}
     return out, anchors
+
+
+def learn_isins(readings: Dict[date, Dict[str, Reading]],
+                recorded: Dict[str, Dict[date, Tuple[float, Optional[float]]]],
+                known: Dict[str, str], min_sessions: int = 3,
+                tolerance: float = 0.01) -> Dict[str, str]:
+    """ISIN -> ticker for ISINs the lists print but the map does not know.
+
+    `readings` are the lists' rows keyed by ISIN (read_isin_rows), by
+    session. `recorded` is each ticker's close and previous close as the NSE
+    ticker feed stored them, by session: an independent source, so an OCR
+    misreading cannot confirm itself. On each session where an unknown ISIN
+    has a readable VWAP, the candidates are the tickers whose recorded close
+    is within `tolerance` of it (and whose previous close agrees too, when
+    both are readable). A ticker is learned only if it is the one candidate
+    left after intersecting every such session, at least `min_sessions`
+    sessions support it, and no session contradicts it. Tickers that
+    already have an ISIN are never candidates.
+    """
+    taken = set(known.values())
+    free = {sym: days for sym, days in recorded.items() if sym not in taken}
+    near = lambda a, b: a is not None and b is not None and b > 0 and abs(a / b - 1) <= tolerance
+    learned: Dict[str, str] = {}
+    unknown = {isin for day in readings.values() for isin in day if isin not in known}
+    for isin in sorted(unknown):
+        # Every free ticker starts as a candidate; a session on which a
+        # ticker was recorded at a different price rules it out.
+        candidates = set(free)
+        support: Dict[str, int] = {}
+        for d, rows in readings.items():
+            row = rows.get(isin)
+            if not row or row.get("vwap") is None:
+                continue
+            for sym in list(candidates):
+                if d not in free[sym]:
+                    continue
+                close, prev = free[sym][d]
+                if near(row["vwap"], close) and (row.get("previous") is None or prev is None
+                                                 or near(row["previous"], prev)):
+                    support[sym] = support.get(sym, 0) + 1
+                else:
+                    candidates.discard(sym)
+        supported = {sym for sym in candidates if support.get(sym, 0) > 0}
+        if len(supported) == 1:
+            sym = supported.pop()
+            if support[sym] >= min_sessions:
+                learned[isin] = sym
+    # One ISIN per ticker: two ISINs landing on one ticker are both dropped.
+    counts: Dict[str, int] = {}
+    for sym in learned.values():
+        counts[sym] = counts.get(sym, 0) + 1
+    return {isin: sym for isin, sym in learned.items() if counts[sym] == 1}
+
+
+def recorded_closes(symbols: Iterable[str]) -> Dict[str, Dict[date, Tuple[float, Optional[float]]]]:
+    """Each ticker's close and previous close as the NSE ticker feed stored
+    them (source nse_ticker only), by session, from the history files."""
+    out: Dict[str, Dict[date, Tuple[float, Optional[float]]]] = {}
+    for sym in symbols:
+        days: Dict[date, Tuple[float, Optional[float]]] = {}
+        prev_close = None
+        for r in load_csv(sym):
+            try:
+                d = date.fromisoformat(str(r.get("date"))[:10])
+                close = float(r.get("close") or 0)
+            except ValueError:
+                continue
+            if close > 0 and r.get("source") == "nse_ticker":
+                pct = float(r.get("change_pct") or 0)
+                prev = round(close / (1 + pct / 100), 2) if pct else prev_close
+                days[d] = (close, prev)
+            if close > 0:
+                prev_close = close
+        if days:
+            out[sym.upper()] = days
+    return out
 
 
 @dataclass

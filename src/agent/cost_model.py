@@ -89,6 +89,15 @@ def classify(symbol: str, config: Optional[Dict[str, Any]] = None) -> str:
     # config (BTC-USD, ETH-USD); plain tickers are US equities.
     if '-' in sym and sym.rsplit('-', 1)[-1] in {'USD', 'USDT', 'USDC', 'EUR'}:
         return 'crypto'
+    # Any other listed NSE stock (the screener trades beyond the configured
+    # list), unless the config names it as a US holding or core fund.
+    us = {s.upper() for s in dm.get('symbols', []) or []}
+    core = {s.upper() for s in ((config or {}).get('core_satellite') or {}).get('core_symbols', [])
+            } if isinstance(config, dict) else set()
+    if sym not in us and sym not in core:
+        from src.connectors.nse_universe import is_nse_symbol
+        if is_nse_symbol(sym):
+            return 'nse'
     return DEFAULT_MARKET
 
 

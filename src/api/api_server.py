@@ -375,12 +375,36 @@ class TradingAPI:
         return {'nse': 'Africa/Nairobi', 'crypto': 'UTC'}.get(market, 'America/New_York')
 
     def _tracked_symbols(self) -> set:
-        """Every symbol the agent trades, for validating per-symbol requests."""
+        """Every symbol the agent trades or Market Watch lists, for
+        validating per-symbol requests."""
         out = set()
         for cfg in (self.config, getattr(self.trading_agent, 'config', {}) or {}):
             dm = (cfg or {}).get('data_manager', {}) or {}
             out |= {s.upper() for s in (dm.get('symbols', []) or []) + (dm.get('nse_symbols', []) or [])}
-        return out
+        return out | set(self._nse_trading_list()) | set(self._nse_market_symbols())
+
+    def _nse_trading_list(self) -> List[str]:
+        """The NSE stocks the agent trades now (its screener's short list)."""
+        fn = getattr(self.trading_agent, 'nse_trading_symbols', None)
+        if callable(fn):
+            try:
+                return [s.upper() for s in fn()]
+            except Exception as e:
+                logger.debug(f"NSE trading list unavailable: {e}")
+        cfg = getattr(self.trading_agent, 'config', None) or self.config or {}
+        return [s.upper() for s in cfg.get('data_manager', {}).get('nse_symbols', [])]
+
+    def _nse_market_symbols(self) -> List[str]:
+        """Every NSE stock with real data, plus the ones traded (cached a minute)."""
+        def produce():
+            from src.connectors.nse_connector import NSE_CSV_DIR
+            from src.connectors.nse_universe import market_symbols
+            return market_symbols(NSE_CSV_DIR, self._nse_trading_list())
+        try:
+            return self._cached('nse_market_symbols', 60, produce)
+        except Exception as e:
+            logger.debug(f"NSE market symbols unavailable: {e}")
+            return []
 
     def _setup_routes(self):
         """Setup API routes with authentication and rate limiting."""
@@ -555,11 +579,8 @@ class TradingAPI:
             execution quality, and alpha-vs-hold (Phase 1 of the drill-down)."""
             symbol = (symbol or '').upper()
             # Validate against configured symbols to avoid unbounded lookups.
-            allowed = set(self.config.get('data_manager', {}).get('symbols', [])) | \
-                      set(self.config.get('data_manager', {}).get('nse_symbols', [])) | \
-                      set(self.trading_agent.config.get('data_manager', {}).get('symbols', [])) | \
-                      set(self.trading_agent.config.get('data_manager', {}).get('nse_symbols', []))
-            if allowed and symbol not in {s.upper() for s in allowed}:
+            allowed = self._tracked_symbols()
+            if allowed and symbol not in allowed:
                 return jsonify({'error': f'Unknown or untracked symbol: {symbol}'}), 404
 
             def produce():
@@ -1328,18 +1349,21 @@ class TradingAPI:
                     scraper_status = {}
                     if hasattr(self.trading_agent, 'nse_scraper') and self.trading_agent.nse_scraper:
                         scraper_status = self.trading_agent.nse_scraper.get_status()
-                    # Only the configured universe: those are the symbols
-                    # the scraper fetches and the agent evaluates. Listing
-                    # the full 18 showed nine rows of 0.00 for symbols
-                    # nothing fetches.
-                    agent_cfg = getattr(self.trading_agent, 'config', {}) or {}
-                    watched = [s.upper() for s in
-                               agent_cfg.get('data_manager', {}).get('nse_symbols', [])] or None
-                    quotes = nse.get_all_quotes(watched)
+                    # Every stock with a real price (the scraper records
+                    # the whole exchange), plus the ones the agent trades.
+                    # A stock with no real bar is left out, rather than shown
+                    # as a row of 0.00.
+                    traded = set(self._nse_trading_list())
+                    listed = self._nse_market_symbols() or sorted(traded) or None
+                    quotes = nse.get_all_quotes(listed)
+                    for q in quotes:
+                        q['traded'] = q.get('symbol') in traded
+                    real = [q['symbol'] for q in quotes if q.get('source') in REAL_NSE_SOURCES]
                     return {
                         'quotes': quotes,
-                        'movers': nse.get_top_movers(watched),
-                        'sectors': nse.get_sector_performance(watched),
+                        'traded_count': len(traded),
+                        'movers': nse.get_top_movers(real or listed),
+                        'sectors': nse.get_sector_performance(listed),
                         'status': nse.get_status(),
                         'scraper': scraper_status,
                         'kes_usd_rate': nse.get_kes_usd_rate(),
@@ -1529,6 +1553,110 @@ class TradingAPI:
             except Exception as e:
                 logger.error(f"Error building NSE paper view: {e}")
                 return jsonify({'error': 'Failed to build NSE paper view'}), 500
+
+        @self.app.route('/api/nse/scan', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_nse_scan():
+            """The screen of every NSE stock and this week's short list
+            (nse_screener.py). Cached for ten minutes."""
+            def produce():
+                from dataclasses import asdict
+                from src.agent import nse_screener
+                from src.connectors.nse_connector import NSE_CSV_DIR
+                cfg_all = getattr(self.trading_agent, 'config', None) or self.config or {}
+                cfg = nse_screener.settings(cfg_all)
+                ranked = nse_screener.screen(self._nse_market_symbols(), NSE_CSV_DIR, cfg)
+                sl = nse_screener.ShortlistStore(DATA_DIR / 'nse_shortlist.json').load()
+                traded = self._nse_trading_list()
+                roles = dict(sl.roles) if sl else {}
+                for sym in traded:
+                    roles.setdefault(sym, 'holding' if sl else 'configured')
+                return {
+                    'enabled': bool(cfg.get('enabled')),
+                    'rules': {k: cfg[k] for k in ('max_symbols', 'max_per_sector', 'exploration_slots',
+                                                  'min_history_days', 'min_avg_value_kes',
+                                                  'refresh_days', 'llm_review')},
+                    'stocks': nse_screener.as_dicts(ranked),
+                    'traded': traded,
+                    'roles': roles,
+                    'shortlist': asdict(sl) if sl else None,
+                    'eligible': sum(1 for m in ranked if m.eligible),
+                }
+            try:
+                return jsonify(self._cached('nse_scan', 600, produce)), 200
+            except Exception as e:
+                logger.error(f"Error building the NSE scan: {e}")
+                return jsonify({'error': 'Failed to build the NSE scan'}), 500
+
+        @self.app.route('/api/strategies/learning', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_strategies_learning():
+            """Which strategies vote where, their weights and results, and
+            what the agent has changed about them (the tuner's log)."""
+            def produce():
+                from src.agent.strategy_attribution import compute_attribution
+                cfg = getattr(self.trading_agent, 'config', None) or self.config or {}
+                sm = self.trading_agent.components.get('strategy_manager')
+                journal = getattr(self.trading_agent, 'order_journal', None)
+                results = {}
+                if journal is not None:
+                    try:
+                        from src.agent.cost_model import classify
+                        fx = self._fx_snapshot()
+                        kes_per_usd = (fx or {}).get('kes_per_usd') or 130.0
+                        # One currency: NSE results are in KES, the rest in USD.
+                        results = compute_attribution(
+                            journal.filled_orders(),
+                            fx=lambda sym: 1 / kes_per_usd if classify(sym, cfg) == 'nse' else 1.0)
+                    except Exception as e:
+                        logger.debug(f"Attribution unavailable: {e}")
+                strategies = []
+                weights = dict(getattr(sm, 'strategy_weights', {}) or {})
+                total = sum(weights.values()) or 1.0
+                for name, strat in (getattr(sm, 'strategies', {}) or {}).items():
+                    scfg = (cfg.get('strategies') or {}).get(name, {}) or {}
+                    r = results.get(name) or {}
+                    markets = ([m for m in ('us_equity', 'crypto', 'nse') if sm.votes_in(name, m)]
+                               if hasattr(sm, 'votes_in') else [])
+                    strategies.append({
+                        'name': name, 'type': scfg.get('type', 'technical'),
+                        'markets': markets,
+                        'weight_pct': round(100 * weights.get(name, 0.0) / total, 1),
+                        'history_days': int(getattr(strat, 'lookback_period', 0) or 0),
+                        'closed_trades': int(r.get('closed_trades') or 0),
+                        'win_rate': r.get('win_rate'),
+                        'realized_pnl': r.get('realized_pnl'),
+                        'note': scfg.get('_comment'),
+                    })
+                for name, r in results.items():
+                    if name not in {s['name'] for s in strategies}:
+                        strategies.append({'name': name, 'type': 'other', 'markets': [],
+                                           'weight_pct': None, 'history_days': None,
+                                           'closed_trades': int(r.get('closed_trades') or 0),
+                                           'win_rate': r.get('win_rate'),
+                                           'realized_pnl': r.get('realized_pnl'), 'note': None})
+                tuner = getattr(self.trading_agent, 'strategy_tuner', None)
+                state = dict(getattr(tuner, 'state', {}) or {})
+                return {
+                    'strategies': strategies,
+                    'strategy_markets': {k: v for k, v in (cfg.get('strategy_markets') or {}).items()
+                                         if not k.startswith('_')},
+                    'ensemble_method': cfg.get('ensemble_method'),
+                    'min_trade_confidence': cfg.get('min_trade_confidence'),
+                    'regime_filter': bool((cfg.get('regime_filter') or {}).get('enabled', True)),
+                    'tuner': {
+                        'last_run': state.get('last_run') or None,
+                        'params': state.get('params') or {},
+                        'log': (state.get('log') or [])[-15:][::-1],
+                    },
+                }
+            try:
+                return jsonify(self._cached('strategies_learning', 60, produce)), 200
+            except Exception as e:
+                logger.error(f"Error building the strategies view: {e}")
+                return jsonify({'error': 'Failed to build the strategies view'}), 500
 
         @self.app.route('/api/ai/budget', methods=['GET'])
         @require_rate_limit

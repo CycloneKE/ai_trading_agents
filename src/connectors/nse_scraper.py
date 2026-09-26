@@ -207,8 +207,9 @@ def _post_ticker(account: str):
         data=json.dumps({"nopage": "true", "isinno": account}), timeout=20)
 
 
-def scrape_nse_ticker(symbols: List[str]) -> Dict[str, DailyBar]:
-    """Current prices from the NSE's own ticker feed, as DailyBars."""
+def scrape_nse_ticker(symbols: Optional[List[str]] = None) -> Dict[str, DailyBar]:
+    """Current prices from the NSE's own ticker feed, as DailyBars: for
+    `symbols`, or for every listed issuer when `symbols` is None."""
     account = _nse_ticker_account()
     if not account:
         return {}
@@ -227,7 +228,35 @@ def scrape_nse_ticker(symbols: List[str]) -> Dict[str, DailyBar]:
     except Exception as e:
         logger.warning(f"NSE ticker feed error: {e}")
         return {}
+    try:
+        found = ticker_isins(payload)
+        if found:
+            from src.connectors import nse_isin
+            nse_isin.remember(found, "nse_ticker feed")
+    except Exception as e:
+        logger.debug(f"NSE ticker ISINs not recorded: {e}")
     return parse_ticker_reply(payload, symbols, _eat_now().date())
+
+
+def _snapshot_rows(payload: Any) -> Optional[List[Any]]:
+    msg = payload.get("message") if isinstance(payload, dict) else None
+    parts = [m for m in msg if isinstance(m, dict)] if isinstance(msg, list) else []
+    return next((p["snapshot"] for p in parts if isinstance(p.get("snapshot"), list)), None)
+
+
+def ticker_isins(payload: Any) -> Dict[str, str]:
+    """ISIN -> ticker for feed rows that carry an ISIN beside the issuer."""
+    from src.connectors.nse_isin import ISIN_RE
+    out: Dict[str, str] = {}
+    for item in _snapshot_rows(payload) or []:
+        if not isinstance(item, dict):
+            continue
+        sym = str(item.get("issuer", "")).strip().upper()
+        isins = {str(v).strip().upper() for k, v in item.items()
+                 if k != "issuer" and isinstance(v, str) and ISIN_RE.match(v.strip().upper())}
+        if sym and len(isins) == 1:
+            out[isins.pop()] = sym
+    return out
 
 
 # Longer than any NSE closure (Easter is four days) plus a weekend. A feed
@@ -251,8 +280,9 @@ def _plausible(item: Dict[str, Any], field: str, ref: float) -> Optional[float]:
     return v if v > 0 and abs(v / ref - 1) <= MAX_SESSION_MOVE else None
 
 
-def parse_ticker_reply(payload: Any, symbols: List[str], today) -> Dict[str, DailyBar]:
-    """Turn a ticker feed reply into one DailyBar per watched symbol.
+def parse_ticker_reply(payload: Any, symbols: Optional[List[str]], today) -> Dict[str, DailyBar]:
+    """Turn a ticker feed reply into one DailyBar per watched symbol, or per
+    listed issuer when `symbols` is None.
 
     The reply is {"message": [{"snapshot": [...]}, {"updated_at": {...}}]},
     each snapshot row carrying issuer, price, prev_price, today_open/high/low
@@ -263,7 +293,7 @@ def parse_ticker_reply(payload: Any, symbols: List[str], today) -> Dict[str, Dai
     """
     msg = payload.get("message") if isinstance(payload, dict) else None
     parts = [m for m in msg if isinstance(m, dict)] if isinstance(msg, list) else []
-    snapshot = next((p["snapshot"] for p in parts if isinstance(p.get("snapshot"), list)), None)
+    snapshot = _snapshot_rows(payload)
     if snapshot is None:
         logger.warning("NSE ticker feed answered without a price snapshot; "
                        "the feed format may have changed")
@@ -280,13 +310,13 @@ def parse_ticker_reply(payload: Any, symbols: List[str], today) -> Dict[str, Dai
                        f"the feed may be stuck, nothing stored")
         return {}
 
-    wanted = {s.upper() for s in symbols}
+    wanted = {s.upper() for s in symbols} if symbols is not None else None
     results: Dict[str, DailyBar] = {}
     for item in snapshot:
         if not isinstance(item, dict):
             continue
         sym = str(item.get("issuer", "")).strip().upper()
-        if sym not in wanted:
+        if not sym or (wanted is not None and sym not in wanted):
             continue
         price = _parse_num(str(item.get("price"))) or _parse_num(str(item.get("ltp")))
         prev = _parse_num(str(item.get("prev_price")))
@@ -626,8 +656,15 @@ class NSEPeriodicScraper:
         nse_connector=None,
         interval_minutes: int = 30,
         symbols: Optional[List[str]] = None,
+        record_all_listed: bool = True,
     ):
         self.db = database_manager
+        # Store a bar for every stock the ticker feed lists, not only the
+        # watched ones, so every NSE stock builds real history and Market
+        # Watch and the screener can cover the whole exchange. The feed is
+        # one request either way.
+        self.record_all_listed = record_all_listed
+        self._last_listed_count: Optional[int] = None
         self.nse_connector = nse_connector
         self.interval = interval_minutes * 60  # to seconds
         self.off_hours_interval = 6 * 3600     # 6 hours
@@ -664,8 +701,16 @@ class NSEPeriodicScraper:
         results: Dict[str, int] = {}
 
         # 1. The NSE's own ticker feed
-        web_bars = scrape_nse_ticker(self.symbols)
+        web_bars = scrape_nse_ticker(None if self.record_all_listed else self.symbols)
         logger.info(f"  NSE ticker: {len(web_bars)} symbols")
+        extra = {s: b for s, b in web_bars.items() if s not in self.symbols}
+        for sym, bar in extra.items():
+            save_bars_csv(sym, [bar])
+            save_bars_db([bar], self.db)
+        if self.record_all_listed:
+            self._last_listed_count = len(web_bars)
+            from src.connectors.nse_universe import register
+            register(web_bars)
 
         # 2. Try AFX Kwayisi aggregator for symbols we didn't get
         missing = [s for s in self.symbols if s not in web_bars]
@@ -773,6 +818,8 @@ class NSEPeriodicScraper:
             "last_run": datetime.fromtimestamp(self._last_run, tz=EAT).isoformat() if self._last_run else None,
             "interval_minutes": self.interval // 60,
             "symbols_count": len(self.symbols),
+            # Every stock the feed listed last cycle (all of them get a bar).
+            "last_cycle_listed": self._last_listed_count,
             # None until the first cycle finishes.
             "last_cycle_real_prices": self._last_real_count,
             "last_cycle_missing": self._last_missing,

@@ -433,6 +433,18 @@
     "fast_period": 20,
     "slow_period": 50
   },
+  "nse_screener": {
+    "_comment": "Which NSE stocks the agent trades (src/agent/nse_screener.py). Every listed stock is screened weekly from its real history; the agent trades its holdings plus the best-ranked eligible stocks, at most max_per_sector from one sector, plus exploration_slots stocks ranked just below the cut (rotating weekly), up to max_symbols in all. Eligible: at least min_history_days real daily bars (what the strategies need to signal) and an average traded value of at least min_avg_value_kes a day (null: ten times nse_order_tickets.trade_notional_kes, since an order is capped at 10% of a day's volume). While too few stocks qualify, data_manager.nse_symbols fills the gaps. With llm_review, an AI may remove up to llm_max_removals names for a concrete reason (a suspension, a takeover offer). Set enabled to false to trade data_manager.nse_symbols as before.",
+    "enabled": true,
+    "max_symbols": 9,
+    "max_per_sector": 3,
+    "exploration_slots": 1,
+    "min_history_days": 50,
+    "min_avg_value_kes": null,
+    "refresh_days": 7,
+    "llm_review": true,
+    "llm_max_removals": 2
+  },
   "claude": {
     "_comment": "Paid AI tier (src/agent/claude_provider.py), off unless ANTHROPIC_API_KEY is set in the environment. Then trade_review_model reviews every trade signal and volume_model does the high-volume JSON work, and the free Gemini/OpenRouter models become the fallback. Spending is priced from each reply's token counts and capped at monthly_budget_usd per calendar month (UTC); once the cap would be passed, only the free models are used until the next month. Spending is kept in data/ai_spend.json.",
     "trade_review_model": "claude-sonnet-5",

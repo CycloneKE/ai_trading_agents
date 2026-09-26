@@ -433,7 +433,7 @@ class TradingAgent:
             return
         dm_cfg = self.config.get('data_manager', {})
         live = [s for s in dm_cfg.get('symbols', []) if s not in self._history_seeded]
-        nse = [s for s in dm_cfg.get('nse_symbols', []) if s not in self._history_seeded]
+        nse = [s for s in TradingAgent.nse_trading_symbols(self) if s not in self._history_seeded]
         # What each symbol must have to trade, and how deep to fetch so the
         # slower strategies (a 200-day average, six-month ranking) can vote.
         need_for = {s: self._history_needed(s) for s in live + nse}
@@ -1158,7 +1158,7 @@ class TradingAgent:
                                 nse = self.components.get('data_manager')
                                 em = self.components.get('escalation_manager')
                                 if em and nse:
-                                    tracked = set(self.config.get('data_manager', {}).get('nse_symbols', []))
+                                    tracked = set(self.nse_trading_symbols())
                                     movers = []
                                     nse_conn = getattr(nse, 'connectors', {}).get('nse')
                                     if nse_conn:
@@ -1176,7 +1176,7 @@ class TradingAgent:
                 # otherwise leave those symbols unable to signal for weeks.
                 try:
                     configured = (set(self.config.get('data_manager', {}).get('symbols', []))
-                                  | set(self.config.get('data_manager', {}).get('nse_symbols', [])))
+                                  | set(self.nse_trading_symbols()))
                     if (configured - getattr(self, '_history_seeded', set())
                             and time.time() - getattr(self, '_last_history_attempt', 0) > 3600):
                         self._warm_start_history()
@@ -1251,7 +1251,13 @@ class TradingAgent:
                       and paper is not None and paper.enabled)
         base_notional = nse_cfg.get('trade_notional_kes', 50000)
         cycle = int(now // interval)
-        nse_symbols = self.config.get('data_manager', {}).get('nse_symbols', [])
+        # This week's short list from the screen of the whole exchange, plus
+        # every holding (nse_screener.py); the configured list if it is off.
+        try:
+            TradingAgent._refresh_nse_shortlist(self)
+        except Exception as e:
+            logger.error(f"NSE shortlist refresh failed; keeping the last list: {e}")
+        nse_symbols = TradingAgent.nse_trading_symbols(self)
         real_prices = {}  # this cycle's real quotes, for the equity snapshot
 
         for symbol in nse_symbols:
@@ -1444,6 +1450,51 @@ class TradingAgent:
                     paper.record_equity(real_prices)
             except Exception as e:
                 logger.debug(f"NSE paper equity snapshot failed: {e}")
+
+    def nse_trading_symbols(self) -> List[str]:
+        """The NSE stocks the agent evaluates: the screener's short list
+        plus everything the paper account holds, or the configured list
+        (data_manager.nse_symbols) while the screener is off or has not run."""
+        from src.agent import nse_screener
+        from src.connectors.nse_universe import register
+        configured = [s.upper() for s in self.config.get('data_manager', {}).get('nse_symbols', [])]
+        if not nse_screener.settings(self.config).get('enabled'):
+            return configured
+        sl = nse_screener.ShortlistStore(DATA_DIR / 'nse_shortlist.json').load()
+        symbols = list(sl.symbols) if sl and sl.symbols else configured
+        paper = self.components.get('nse_paper_account')
+        held = []
+        if paper is not None and getattr(paper, 'enabled', False):
+            try:
+                held = list(paper.positions())
+            except Exception as e:
+                logger.debug(f"NSE holdings unavailable for the trading list: {e}")
+        out = symbols + [h for h in held if h not in symbols]
+        register(out)
+        return out
+
+    def _refresh_nse_shortlist(self, now: Optional[datetime] = None, llm=None):
+        """Rebuild the NSE short list when it is due (weekly by default)."""
+        from src.agent import nse_screener
+        from src.connectors.nse_connector import NSE_CSV_DIR
+        from src.connectors.nse_universe import market_symbols
+        cfg = nse_screener.settings(self.config)
+        if not cfg.get('enabled'):
+            return None
+        store = nse_screener.ShortlistStore(DATA_DIR / 'nse_shortlist.json')
+        if not store.due(cfg, now):
+            return None
+        configured = [s.upper() for s in self.config.get('data_manager', {}).get('nse_symbols', [])]
+        ranked = nse_screener.screen(market_symbols(NSE_CSV_DIR, configured), NSE_CSV_DIR, cfg)
+        paper = self.components.get('nse_paper_account')
+        held = list(paper.positions()) if paper is not None and getattr(paper, 'enabled', False) else []
+        sl = nse_screener.refresh(ranked, held, cfg, configured,
+                                  llm or self.components.get('llm_orchestrator'), now)
+        store.save(sl)
+        logger.info(f"NSE short list rebuilt from {sum(m.eligible for m in ranked)} eligible of "
+                    f"{len(ranked)} stocks: {', '.join(f'{s} ({sl.roles[s]})' for s in sl.symbols)}"
+                    + (f"; the AI removed {[r['symbol'] for r in sl.removed]}" if sl.removed else ''))
+        return sl
 
     @staticmethod
     def _nse_adv(symbol: str, days: int = 20) -> Optional[float]:

@@ -26,6 +26,14 @@ Then, from /app:
 
 What each list said is cached in data/nse_pricelists/, one file per session,
 so an interrupted run resumes where it stopped.
+
+Every NSE stock, not only the watched ones: the lists identify stocks by
+ISIN, and the ISINs of all but nine are learned by matching the lists'
+prices against what the NSE ticker feed recorded on the same sessions
+(src/connectors/nse_pricelist.learn_isins). The agent records every listed
+stock from the feed, so after a few sessions of that, run this again
+(cached lists are not read twice) and it learns the rest and fills their
+history. Learned ISINs are kept in data/nse_isin_map.json.
 """
 import argparse
 import json
@@ -37,7 +45,9 @@ from typing import Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.connectors import nse_isin  # noqa: E402
 from src.connectors import nse_pricelist as pl  # noqa: E402
+from src.connectors.nse_scraper import DATA_DIR as NSE_CSV_DIR  # noqa: E402
 from src.connectors.nse_scraper import EAT  # noqa: E402
 from src.utils.paths import DATA_DIR  # noqa: E402
 
@@ -129,15 +139,28 @@ class Reader:
         return entry
 
 
-def readings_of(entry: dict) -> Dict[str, pl.Reading]:
+def readings_of(entry: dict, isin_map: Optional[Dict[str, str]] = None,
+                by_isin: bool = False) -> Dict[str, pl.Reading]:
+    """One list's rows, keyed by ticker (mapped ISINs only) or by ISIN."""
     out: Dict[str, pl.Reading] = {}
     anchors = None
     for page in entry.get("pages", []):
-        rows, anchors = pl.read_page([pl.Box(*b) for b in page["boxes"]], page["width"], anchors)
-        for sym, row in rows.items():
+        boxes = [pl.Box(*b) for b in page["boxes"]]
+        rows, anchors = (pl.read_isin_rows(boxes, page["width"], anchors) if by_isin
+                         else pl.read_page(boxes, page["width"], anchors, isin_map))
+        for key, row in rows.items():
             # A stock on two pages is two rows claiming it: trust neither.
-            out[sym] = {c: None for c in pl.COLUMNS} if sym in out else row
+            out[key] = {c: None for c in pl.COLUMNS} if key in out else row
     return out
+
+
+def learn(entries: Dict[date, dict]) -> Dict[str, str]:
+    """Learn unknown ISINs from the lists read and the ticker feed's record."""
+    known = nse_isin.load()
+    by_isin = {d: readings_of(e, by_isin=True) for d, e in entries.items()}
+    tickers = sorted(p.stem.upper() for p in NSE_CSV_DIR.glob("*.csv"))
+    found = pl.learn_isins(by_isin, pl.recorded_closes(tickers), known)
+    return nse_isin.remember(found, "price lists matched to the NSE ticker feed")
 
 
 def main() -> int:
@@ -148,15 +171,17 @@ def main() -> int:
     p.add_argument("--ocr-path", default="/tmp/nseocr")
     p.add_argument("--threads", type=int, default=2, help="CPU threads for OCR")
     p.add_argument("--pause", type=float, default=3.0, help="seconds between downloads")
+    p.add_argument("--no-learn", action="store_true",
+                   help="do not learn new ISINs; only the stocks already mapped")
     args = p.parse_args()
 
     today = datetime.now(EAT).date()
     end = date.fromisoformat(args.end) if args.end else today - timedelta(days=1)
     dates = sessions(end, args.days)
-    symbols = list(pl.ISIN_TO_SYMBOL.values())
     say(f"NSE price lists: {len(dates)} sessions, {dates[0]} to {dates[-1]}")
 
     reader = Reader(args.ocr_path, args.threads, args.pause)
+    entries: Dict[date, dict] = {}
     readings: Dict[date, Dict[str, pl.Reading]] = {}
     unpublished, failed = [], []
     for d in dates:
@@ -171,7 +196,16 @@ def main() -> int:
         elif entry["status"] == 404:
             unpublished.append(d)
         else:
-            readings[d] = readings_of(entry)
+            entries[d] = entry
+
+    if not args.no_learn:
+        added = learn(entries)
+        say(f"\nISINs learned this run: {len(added)}"
+            + (f" ({', '.join(f'{s} {i}' for i, s in sorted(added.items(), key=lambda kv: kv[1]))})"
+               if added else " (a stock needs 3 sessions the ticker feed also recorded)"))
+    isin_map = nse_isin.load()
+    symbols = sorted(set(isin_map.values()))
+    readings = {d: readings_of(e, isin_map) for d, e in entries.items()}
 
     verdicts = pl.validate(readings, symbols)
     say(f"\nRead {len(readings)} lists. Not published (holidays): "
