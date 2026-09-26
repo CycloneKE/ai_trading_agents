@@ -330,6 +330,8 @@
     },
     "dividend_withholding_pct": 0.05,
     "dividend_events_path": "config/nse_dividend_events.json",
+    "_cash_yield_note": "Idle cash earns interest daily, as if swept into a money market fund or T-bills, with 15% withholding tax on the interest. Leave cash_yield_pct out to use benchmarks.tbill_rate_pct; set it to 0 to switch interest off.",
+    "interest_withholding_pct": 0.15,
     "trading_limits": {
       "_comment": "How often and how big the paper account may trade (src/agent/nse_paper_account.py). An order is capped at max_adv_fraction of the stock's average daily volume over adv_days; a signal cannot sell a position held for less than min_holding_days (stops still can); at most max_new_positions_per_week new holdings are opened in any 7 days (adds do not count); and sale proceeds are not spendable until settlement_days trading days later (CDSC's T+3).",
       "max_adv_fraction": 0.10,
@@ -349,6 +351,12 @@
     "min_bars": 120,
     "min_closed_trades": 10,
     "poor_win_rate": 0.4
+  },
+  "benchmarks": {
+    "_comment": "What each account is compared with on the dashboard (src/agent/benchmarks.py). The NSE paper account: Kenyan 91-day Treasury bills after withholding tax, and an equal-weight basket of the watched NSE stocks bought on its first day and held (price only). The US account: us_symbol. Update tbill_rate_pct when the CBK auction rate moves.",
+    "tbill_rate_pct": 0.0878,
+    "tbill_withholding_pct": 0.15,
+    "us_symbol": "SPY"
   },
   "costs": {
     "_comment": "Per-side transaction costs by market. A single global rate cannot describe this portfolio: Alpaca is commission-free on US equities while an NSE round trip runs several percent. Set verified=true once you have confirmed a schedule with your broker.",
@@ -386,6 +394,16 @@
     "enabled": true,
     "fast_period": 20,
     "slow_period": 50
+  },
+  "core_satellite": {
+    "_comment": "US account only (src/agent/core_portfolio.py). The strategies trade active_share of equity, sizing every trade from that share; the rest is a core of low-cost index funds (S&P 500, 7-10 year Treasuries, gold) weighted so each carries about the same risk, rebalanced on the first session of each month or when a fund drifts more than drift_band from its target. The core never uses margin and has no stop-losses. Core funds must not be in data_manager.symbols (VOO, not SPY); any that are get dropped from the core. The gap analysis puts active_share at 0.50-0.60 for paper trading; when real money starts, begin lower and raise it in steps only while live results stay within tolerance of paper.",
+    "enabled": true,
+    "active_share": 0.55,
+    "core_symbols": ["VOO", "IEF", "IAU"],
+    "vol_lookback": 60,
+    "max_weight": 0.6,
+    "drift_band": 0.05,
+    "min_trade_usd": 100
   },
   "momentum_rotation": {
     "_comment": "Cross-sectional momentum: rank the universe by 12-1 return, hold the leaders, rebalance monthly. Distinct from the per-symbol `momentum` technical strategy. absolute_filter holds cash rather than buying the best-performing loser in a falling market.",

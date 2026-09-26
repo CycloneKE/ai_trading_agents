@@ -49,16 +49,23 @@ __all__ = ['NsePaperAccount', 'order_size', 'execute_stop', 'HOLDING_RULE_REASON
 # tighter than these.
 STOP_DEFAULTS = {'enabled': True, 'stop_loss_pct': 0.08, 'trailing_stop_pct': 0.10}
 
-# How often and how big the account may trade. At about 3.9% a round trip,
-# frequent NSE trading loses to costs; a paper fill for more shares than the
-# market trades in a day could never happen; and sale proceeds are not cash
-# until CDSC settles them three trading days later. Stops ignore the first
-# three: they sell whenever they trigger.
 # Kenyan withholding tax on dividends from NSE-listed companies for a
 # resident individual: final, deducted at source (KRA).
 DIVIDEND_WHT_DEFAULT = 0.05
 DIVIDEND_EVENTS_DEFAULT = 'config/nse_dividend_events.json'
 
+# Idle cash is not left at zero: like a real account's cash swept into a
+# money market fund or Treasury bills, it earns interest, daily, with 15%
+# withholding tax on the interest. The rate defaults to the T-bill rate the
+# benchmarks use (benchmarks.tbill_rate_pct), so the account is not credited
+# with more than its own benchmark earns.
+INTEREST_WHT_DEFAULT = 0.15
+
+# How often and how big the account may trade. At about 3.9% a round trip,
+# frequent NSE trading loses to costs; a paper fill for more shares than the
+# market trades in a day could never happen; and sale proceeds are not cash
+# until CDSC settles them three trading days later. Stops ignore the first
+# three: they sell whenever they trigger.
 LIMIT_DEFAULTS = {'max_adv_fraction': 0.10, 'adv_days': 20, 'min_holding_days': 30,
                   'max_new_positions_per_week': 2, 'settlement_days': 3}
 
@@ -95,6 +102,36 @@ def trading_days_since(ts: Optional[str], now: datetime) -> int:
     return n
 
 
+def cash_interest(start: datetime, now: datetime, opening: float,
+                  flows: List[Tuple[datetime, float]], annual_rate: float,
+                  withholding: float = INTEREST_WHT_DEFAULT) -> Tuple[float, float]:
+    """Interest earned on the end-of-day cash balance: (net, tax).
+
+    Accrues for each full day from the account's opening day up to, not
+    including, `now`'s day, compounding daily. `flows` are dated cash
+    movements (fills, fees, dividends); a day's flows land before its
+    interest is worked out. A negative balance earns nothing.
+    """
+    if annual_rate <= 0:
+        return 0.0, 0.0
+    daily = annual_rate / 365
+    events = sorted((d.date(), amount) for d, amount in flows)
+    balance, net, tax, i = opening, 0.0, 0.0, 0
+    day, end = start.date(), now.date()
+    while day < end:
+        while i < len(events) and events[i][0] <= day:
+            balance += events[i][1]
+            i += 1
+        if balance > 0:
+            gross = balance * daily
+            t = gross * withholding
+            balance += gross - t
+            net += gross - t
+            tax += t
+        day += timedelta(days=1)
+    return round(net, 2), round(tax, 2)
+
+
 def held_days(opened_at: Optional[str], now: datetime) -> float:
     """Calendar days since the position opened; unknown counts as long held."""
     if not opened_at:
@@ -123,6 +160,12 @@ class NsePaperAccount:
         self.limits = rule(LIMIT_DEFAULTS, cfg.get('trading_limits'))
         self.dividend_wht = float(cfg.get('dividend_withholding_pct', DIVIDEND_WHT_DEFAULT))
         self.dividend_events_path = cfg.get('dividend_events_path', DIVIDEND_EVENTS_DEFAULT)
+        rate = cfg.get('cash_yield_pct')
+        if rate is None:
+            from src.agent.benchmarks import TBILL_RATE_DEFAULT
+            rate = (config.get('benchmarks') or {}).get('tbill_rate_pct', TBILL_RATE_DEFAULT)
+        self.cash_yield = float(rate or 0.0)
+        self.interest_wht = float(cfg.get('interest_withholding_pct', INTEREST_WHT_DEFAULT))
         self.started_at = queue.paper_account_started_at() if self.enabled else None
         if self.enabled and not queue.paper_equity_history():
             # The equity curve starts where the account does.
@@ -211,15 +254,34 @@ class NsePaperAccount:
                         'gross_kes': gross, 'tax_kes': tax, 'net_kes': round(gross - tax, 2)})
         return out
 
+    def _interest(self, now: datetime, fills: List[Dict[str, Any]],
+                  paid: List[Dict[str, Any]]) -> Tuple[float, float]:
+        """Net interest and its tax on the idle cash so far."""
+        if not self.cash_yield or not self.started_at:
+            return 0.0, 0.0
+        start = _parse(self.started_at)
+        flows = [(_parse(f['fill_at']),
+                  -(f['quantity'] * f['price'] + f['fees_kes']) if f['side'] == 'buy'
+                  else f['quantity'] * f['price'] - f['fees_kes']) for f in fills]
+        flows += [(_parse(d['payment_date']), d['net_kes']) for d in paid]
+        if self.annual_fee_kes:
+            years = max((now - start).days, 0) // 365 + 1
+            flows += [(start + timedelta(days=365 * k), -self.annual_fee_kes) for k in range(years)]
+        return cash_interest(start, now, self.starting_capital, flows,
+                             self.cash_yield, self.interest_wht)
+
     def _ledger(self, now: Optional[datetime] = None) -> Dict[str, Any]:
         """Cash, fees paid, realised P&L and positions, from the fills."""
         now = now or datetime.utcnow()
         account_fees = self.account_fees(now)
         paid = self.dividends(now)
         dividends_net = round(sum(d['net_kes'] for d in paid), 2)
-        cash, fees, unsettled = self.starting_capital - account_fees + dividends_net, account_fees, 0.0
+        fills = list(self._fills())
+        interest_net, interest_tax = self._interest(now, fills, paid)
+        cash = self.starting_capital - account_fees + dividends_net + interest_net
+        fees, unsettled = account_fees, 0.0
         settle = int(self.limits.get('settlement_days') or 0)
-        for f in self._fills():
+        for f in fills:
             notional = f['quantity'] * f['price']
             fees += f['fees_kes']
             cash += -(notional + f['fees_kes']) if f['side'] == 'buy' else notional - f['fees_kes']
@@ -234,6 +296,7 @@ class NsePaperAccount:
         return {'cash': round(cash, 2), 'fees': round(fees, 2), 'account_fees': account_fees,
                 'dividends': paid, 'dividends_net': dividends_net,
                 'dividend_tax': round(sum(d['tax_kes'] for d in paid), 2),
+                'interest_net': interest_net, 'interest_tax': interest_tax,
                 'unsettled': round(unsettled, 2),
                 'available': round(cash - unsettled, 2),
                 'states': states,
@@ -434,6 +497,9 @@ class NsePaperAccount:
             'dividends_net_kes': ledger['dividends_net'],
             'dividend_tax_kes': ledger['dividend_tax'],
             'dividends': ledger['dividends'],
+            'interest_net_kes': ledger['interest_net'],
+            'interest_tax_kes': ledger['interest_tax'],
+            'cash_yield_pct': self.cash_yield,
             'holdings': holdings, 'costs_verified': self.costs_verified,
         }
 

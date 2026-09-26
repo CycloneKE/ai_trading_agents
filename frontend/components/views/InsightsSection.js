@@ -2,6 +2,7 @@
 // sector heatmap), as two tabs of one section.
 import { ExternalLink, Globe, Layers } from 'lucide-react';
 import AdvancedAnalytics from '../AdvancedAnalytics';
+import AiScorecard from './AiScorecard';
 import { theme } from '../DashboardStyles';
 import { card, columns, SectionHeader, SubTabs } from '../ui';
 
@@ -89,7 +90,9 @@ export default function InsightsSection({ sub, onSub, data, mobile, onSector }) 
   return (
     <div>
       <SubTabs tabs={tabs} active={current} onChange={onSub} />
-      {current === 'analytics' ? <AdvancedAnalytics data={data} mobile={mobile} /> : <MarketFeeds data={data} mobile={mobile} onSector={onSector} />}
+      {current === 'analytics'
+        ? <><AiScorecard mobile={mobile} /><AdvancedAnalytics data={data} mobile={mobile} /></>
+        : <MarketFeeds data={data} mobile={mobile} onSector={onSector} />}
     </div>
   );
 }

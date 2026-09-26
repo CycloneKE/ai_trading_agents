@@ -24,8 +24,11 @@ NO_LIMITS = {'min_holding_days': 0, 'max_new_positions_per_week': 1000,
              'max_adv_fraction': 0, 'settlement_days': 0}
 
 
-def _config(capital=200000, limits=NO_LIMITS):
-    return {'nse_paper_trading': {'starting_capital_kes': capital, 'trading_limits': limits},
+def _config(capital=200000, limits=NO_LIMITS, cash_yield=0.0):
+    # Interest on idle cash has its own tests; elsewhere it would move every
+    # cash figure a test computes by hand.
+    return {'nse_paper_trading': {'starting_capital_kes': capital, 'trading_limits': limits,
+                                  'cash_yield_pct': cash_yield},
             'costs': COSTS,
             'data_manager': {'nse_symbols': ['SCOM'], 'nse_eval_interval': 1800},
             'nse_order_tickets': {'trade_notional_kes': 50000}}
@@ -534,3 +537,53 @@ def test_without_an_ex_date_book_closure_less_three_trading_days_is_used(queue, 
                                   {'symbol': 'KCB', 'dividend_kes': 1.0}])  # incomplete: ignored
     paper = NsePaperAccount(queue, cfg)
     assert [e['symbol'] for e in paper.dividend_events()] == ['SCOM']
+
+
+# ------------------------------------------------------- interest on cash
+
+def test_idle_cash_earns_the_rate_daily_after_withholding_tax():
+    from datetime import datetime
+    from src.agent.nse_paper_account import cash_interest
+    start = datetime(2026, 1, 1)
+    net, tax = cash_interest(start, datetime(2027, 1, 1), 100000, [], 0.0878)
+    # 8.78% less 15% tax is 7.463% a year, compounded daily.
+    assert net == pytest.approx(100000 * ((1 + 0.0878 * 0.85 / 365) ** 365 - 1), abs=0.01)
+    assert tax == pytest.approx(net / 0.85 * 0.15, rel=1e-3)
+    assert cash_interest(start, datetime(2026, 1, 1, 23), 100000, [], 0.0878) == (0.0, 0.0)
+
+
+def test_cash_spent_on_shares_stops_earning_from_that_day():
+    from datetime import datetime
+    from src.agent.nse_paper_account import cash_interest
+    start = datetime(2026, 1, 1)
+    spent_day_one = cash_interest(start, datetime(2026, 1, 11), 100000,
+                                  [(datetime(2026, 1, 1, 9), -100000)], 0.10)
+    assert spent_day_one == (0.0, 0.0)
+    half = cash_interest(start, datetime(2026, 1, 11), 100000,
+                         [(datetime(2026, 1, 1, 9), -50000)], 0.10)
+    whole = cash_interest(start, datetime(2026, 1, 11), 100000, [], 0.10)
+    assert half[0] == pytest.approx(whole[0] / 2, rel=1e-3)
+
+
+def test_the_account_credits_interest_to_cash_and_reports_it(queue):
+    from datetime import datetime, timedelta
+    paper = NsePaperAccount(queue, _config(cash_yield=0.0878))
+    opened = datetime.fromisoformat(paper.started_at[:19])
+    ledger = paper._ledger(opened + timedelta(days=30))
+    assert ledger['interest_net'] > 0
+    assert ledger['cash'] == pytest.approx(200000 + ledger['interest_net'], abs=0.01)
+    assert paper.summary()['cash_yield_pct'] == 0.0878
+
+
+def test_the_cash_rate_defaults_to_the_benchmark_tbill_rate(queue):
+    cfg = _config()
+    del cfg['nse_paper_trading']['cash_yield_pct']
+    cfg['benchmarks'] = {'tbill_rate_pct': 0.09}
+    assert NsePaperAccount(queue, cfg).cash_yield == 0.09
+
+
+def test_a_new_position_after_a_sell_out_has_its_own_average_price(queue):
+    for side, qty, px in (('buy', 100, 40.0), ('sell', 100, 45.0), ('buy', 50, 20.0)):
+        t = queue.create_ticket('KCB', side, qty, suggested_limit_price=px, book='long_term')
+        queue.mark_filled(t, fill_price=px, fill_quantity=qty)
+    assert queue.positions(book='long_term')['KCB'] == {'quantity': 50, 'avg_entry_price_kes': 20.0}

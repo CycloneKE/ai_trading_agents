@@ -241,15 +241,18 @@ class NseOrderQueue:
             self._conn.commit()
             return cur.rowcount
 
-    def fills(self, book: Optional[str] = None,
-              since: Optional[str] = None) -> List[Dict[str, Any]]:
+    def fills(self, book: Optional[str] = None, since: Optional[str] = None,
+              until: Optional[str] = None,
+              exclude_resolved_by: Optional[str] = None) -> List[Dict[str, Any]]:
         """Filled tickets, oldest first: symbol, side, quantity, price, fees.
 
         `since` (an ISO timestamp) keeps only fills at or after it, which is
-        how a paper account ignores fills from before it opened.
+        how a paper account ignores fills from before it opened; `until`
+        keeps only fills before it. `exclude_resolved_by` drops fills booked
+        by that resolver (the auto paper trader's, for real holdings only).
         """
         query = ("SELECT symbol, side, fill_quantity, fill_price, fees_kes, fill_at, id,"
-                 " strategy, rationale"
+                 " strategy, rationale, resolved_by"
                  " FROM nse_order_tickets WHERE status = 'filled' AND fill_quantity > 0")
         params: List[Any] = []
         if book is not None:
@@ -258,12 +261,18 @@ class NseOrderQueue:
         if since is not None:
             query += " AND fill_at >= ?"
             params.append(since)
+        if until is not None:
+            query += " AND fill_at < ?"
+            params.append(until)
+        if exclude_resolved_by is not None:
+            query += " AND COALESCE(resolved_by, '') != ?"
+            params.append(exclude_resolved_by)
         query += " ORDER BY fill_at ASC, id ASC"
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
         return [{'symbol': r[0], 'side': r[1], 'quantity': int(r[2]), 'price': float(r[3]),
                  'fees_kes': float(r[4] or 0.0), 'fill_at': r[5], 'id': r[6],
-                 'strategy': r[7], 'rationale': r[8]} for r in rows]
+                 'strategy': r[7], 'rationale': r[8], 'resolved_by': r[9]} for r in rows]
 
     def paper_account_started_at(self) -> str:
         """When the NSE paper account opened, recording now on first call."""
@@ -325,14 +334,17 @@ class NseOrderQueue:
         return [{'day': r[0], 'cash_kes': r[1], 'holdings_kes': r[2], 'equity_kes': r[3]}
                 for r in rows]
 
-    def positions(self, book: Optional[str] = None,
-                  since: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    def positions(self, book: Optional[str] = None, since: Optional[str] = None,
+                  until: Optional[str] = None,
+                  exclude_resolved_by: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
         """Net position per symbol from filled tickets: signed quantity and
-        the volume-weighted average entry price (KES). Pass `book` to scope
-        to just 'trading' or 'long_term' fills; omit for the blended view.
-        `since` keeps only fills at or after that ISO timestamp."""
+        the volume-weighted average entry price (KES) of the buys since the
+        position last went flat. Pass `book` to scope to just 'trading' or
+        'long_term' fills; omit for the blended view. `since`, `until` and
+        `exclude_resolved_by` filter the fills as in `fills`."""
         rows = [(f['symbol'], f['side'], f['quantity'], f['price'])
-                for f in self.fills(book=book, since=since)]
+                for f in self.fills(book=book, since=since, until=until,
+                                    exclude_resolved_by=exclude_resolved_by)]
         book_map: Dict[str, Dict[str, Any]] = {}
         for symbol, side, qty, price in rows:
             b = book_map.setdefault(symbol, {'quantity': 0, 'buy_qty': 0, 'buy_cost': 0.0})
@@ -340,6 +352,10 @@ class NseOrderQueue:
             if side == 'buy':
                 b['buy_qty'] += qty
                 b['buy_cost'] += qty * price
+            elif b['quantity'] <= 0:
+                # Sold out: the next buy starts a new position and a new
+                # average, not one blended with a closed position's price.
+                b['buy_qty'], b['buy_cost'] = 0, 0.0
         out = {}
         for symbol, b in book_map.items():
             avg = round(b['buy_cost'] / b['buy_qty'], 2) if b['buy_qty'] > 0 else 0.0

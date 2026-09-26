@@ -17,8 +17,8 @@ import signal
 import threading
 import time
 import math
-from datetime import datetime
-from typing import Dict, Any, Optional
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -1183,6 +1183,13 @@ class TradingAgent:
                 except Exception as e:
                     logger.error(f"Sleeve cycle error: {e}")
 
+                # Core of the core-satellite split: index funds, rebalanced
+                # monthly (core_portfolio.py). Checked every 15 minutes.
+                try:
+                    self._run_core_cycle()
+                except Exception as e:
+                    logger.error(f"Core portfolio error: {e}")
+
                 # Dead-Man's Switch heartbeat ping
                 if getattr(self, 'heartbeat_monitor', None):
                     self.heartbeat_monitor.ping()
@@ -1457,6 +1464,153 @@ class TradingAgent:
             logger.info(f"Sleeve cycle generated {len(results)} accumulation "
                        f"ticket(s): {[r['symbol'] for r in results]}")
 
+    def _core(self):
+        """The core-satellite settings and saved state, read once."""
+        if getattr(self, '_core_cfg', None) is None:
+            from src.agent.core_portfolio import CoreState, config_from_dict
+            dm_cfg = self.config.get('data_manager', {})
+            self._core_cfg = config_from_dict(self.config.get('core_satellite'),
+                                              dm_cfg.get('symbols', []))
+            self._core_state = CoreState(str(DATA_DIR / 'core_portfolio.json'))
+            self._core_last_check = 0.0
+            self._core_value = 0.0
+        return self._core_cfg, self._core_state
+
+    def _core_symbols(self) -> set:
+        cfg, _ = TradingAgent._core(self)
+        return set(cfg.symbols) if cfg.enabled else set()
+
+    def _run_core_cycle(self, now: Optional[datetime] = None, fetch_history=None,
+                        price_for=None) -> List[Dict[str, Any]]:
+        """Keep the core at its target weights.
+
+        Trades only in the US regular session, never while halted, and only
+        when core_portfolio.rebalance_reason says so: the first build, the
+        first session of a month, or a fund drifting past its band. Returns
+        the orders placed.
+        """
+        from src.agent import core_portfolio as core
+        cfg, state = self._core()
+        if not cfg.enabled or self.trading_halted:
+            return []
+        if now is None and time.time() - self._core_last_check < 900:
+            return []
+        self._core_last_check = time.time()
+        now = now or datetime.now(timezone.utc)
+        bm = self.components.get('broker_manager')
+        broker = bm.get_broker() if bm else None
+        if not broker or not broker.is_connected:
+            return []
+        acct = broker.get_account_info()
+        if not acct or not acct.equity:
+            return []
+        fetch_pos = getattr(broker, 'fetch_positions', None)
+        positions = fetch_pos() if callable(fetch_pos) else (broker.get_positions() or [])
+        held, values, prices = {}, {}, {}
+        for p in positions:
+            sym = str(getattr(p, 'symbol', '')).upper()
+            if sym in cfg.symbols:
+                qty = float(getattr(p, 'quantity', 0) or 0)
+                px = float(getattr(p, 'current_price', 0) or 0)
+                held[sym] = qty
+                values[sym] = float(getattr(p, 'market_value', 0) or qty * px)
+                if px > 0:
+                    prices[sym] = px
+        # Kept fresh around the clock: crypto sizing reads it overnight.
+        self._core_value = sum(values.values())
+        if not core.us_session_open(now):
+            return []
+
+        targets = state.data.get('targets') or {s: 1 / len(cfg.symbols) for s in cfg.symbols}
+        reason = core.rebalance_reason(state.last_rebalance, now.date(), values, targets,
+                                       cfg.drift_band)
+        if not reason:
+            return []
+        fetch_open = getattr(broker, 'fetch_open_orders', None)
+        for sym in cfg.symbols:
+            pending = fetch_open(sym) if callable(fetch_open) else (broker.get_orders(sym) or [])
+            if any(getattr(o, 'symbol', '').upper() == sym for o in pending):
+                logger.info(f"Core rebalance waits: an order for {sym} is still working")
+                return []
+
+        if fetch_history is None:
+            from src.agent.history_warmstart import fetch_daily_history
+            fetch_history = fetch_daily_history
+        history = fetch_history(list(cfg.symbols), bars=cfg.vol_lookback + 1)
+        closes = {s: (history.get(s) or {}).get('close', []) for s in cfg.symbols}
+        targets = core.inverse_vol_weights(closes, cfg.vol_lookback, cfg.max_weight)
+        if price_for is None:
+            from src.utils.real_price_feed import price_feed
+            price_for = price_feed.get_price
+        for sym in cfg.symbols:
+            if sym not in prices:
+                px = price_for(sym) or (closes[sym][-1] if closes[sym] else None)
+                if px:
+                    prices[sym] = float(px)
+
+        core_value = float(acct.equity) * cfg.core_share
+        planned = core.plan_orders(targets, core_value, held, prices, cfg.min_trade_usd)
+        planned = core.fit_to_cash(planned, float(getattr(acct, 'cash', 0) or 0))
+        placed = self._place_core_orders(broker, planned, prices, now)
+        state.save(last_rebalance=now.date().isoformat(), targets=targets, reason=reason,
+                   core_value_target=round(core_value, 2))
+        logger.info(f"Core rebalance ({reason}): targets "
+                    f"{ {s: round(w, 3) for s, w in targets.items()} }, "
+                    f"{len(placed)} order(s)")
+        return placed
+
+    def _place_core_orders(self, broker, planned, prices, now) -> List[Dict[str, Any]]:
+        from src.agent import core_portfolio as core
+        from src.agent.order_journal import make_client_order_id
+        from src.agent.position_sizing import size_order
+        from src.connectors.base_broker import OrderRequest
+        sizing_cfg = self.config.get('trading', {})
+        allow_fractional = sizing_cfg.get('allow_fractional', True)
+        day_key = int(now.strftime('%Y%m%d'))
+        placed = []
+        for o in planned:
+            sym, side = o['symbol'], o['side']
+            if side == 'sell':
+                qty = o['quantity'] if allow_fractional else float(math.floor(o['quantity']))
+                tif = 'day'
+                if qty <= 0:
+                    continue
+            else:
+                sized = size_order(o['notional'], prices[sym],
+                                   min_notional=sizing_cfg.get('min_notional', 5.0),
+                                   allow_fractional=allow_fractional)
+                if not sized:
+                    continue
+                qty, tif = sized.quantity, sized.time_in_force
+            coid = make_client_order_id(core.STRATEGY, sym, side, day_key)
+            if self.order_journal and not self.order_journal.record_intent(
+                    coid, sym, side, float(qty), 'market', strategy=core.STRATEGY,
+                    strategy_weights={core.STRATEGY: 1.0}):
+                logger.info(f"Core order already journaled today ({coid}); skipping")
+                continue
+            result = broker.place_order(OrderRequest(
+                symbol=sym, quantity=float(qty), side=side, order_type='market',
+                time_in_force=tif, client_order_id=coid))
+            if self.order_journal:
+                if result:
+                    self.order_journal.mark_submitted(coid, result.order_id, result.status)
+                else:
+                    self.order_journal.mark_failed(coid, 'place_order returned no response')
+            if result:
+                placed.append({**o, 'quantity': qty, 'client_order_id': coid})
+        return placed
+
+    def _core_value_now(self) -> float:
+        """Market value of the core's funds at the last core check."""
+        cfg, _ = TradingAgent._core(self)
+        return float(getattr(self, '_core_value', 0.0) or 0.0) if cfg.enabled else 0.0
+
+    def _active_equity(self, equity: float) -> float:
+        """The strategies' share of equity under the core-satellite split."""
+        from src.agent.core_portfolio import active_equity
+        cfg, _ = TradingAgent._core(self)
+        return active_equity(equity, cfg)
+
     def _check_risk_limits(self, risk_assessment: Dict[str, Any]) -> bool:
         """
         Check if risk assessment is within acceptable limits.
@@ -1633,9 +1787,14 @@ class TradingAgent:
                             logger.warning(f"No account info for {symbol}; skipping (won't size off a default)")
                             _note(symbol, 'no_account_info')
                             continue
-                        portfolio_value = account_info.equity
+                        # Under the core-satellite split the strategies size
+                        # from their own share of equity, and "deployed" is
+                        # measured within that share, not across the core.
+                        equity = float(account_info.equity)
+                        portfolio_value = TradingAgent._active_equity(self, equity)
                         cash = float(getattr(account_info, 'cash', 0) or 0)
-                        deployed_pct = 1 - (cash / portfolio_value) if portfolio_value else 0.0
+                        active_invested = max(equity - cash - TradingAgent._core_value_now(self), 0.0)
+                        deployed_pct = active_invested / portfolio_value if portfolio_value else 0.0
                         if not hasattr(self, 'cash_policy'):
                             from src.agent.cash_policy import CashDeploymentPolicy
                             self.cash_policy = CashDeploymentPolicy(self.config)
@@ -2069,9 +2228,14 @@ class TradingAgent:
             if not positions:
                 return
             
+            core_symbols = TradingAgent._core_symbols(self)
             for position in positions:
                 try:
                     if position.quantity == 0 or position.cost_basis <= 0:
+                        continue
+                    # The core's index funds are held through drawdowns by
+                    # design; a stop would defeat the point of holding them.
+                    if str(position.symbol).upper() in core_symbols:
                         continue
 
                     unrealized_pl_pct = position.unrealized_pl / position.cost_basis
