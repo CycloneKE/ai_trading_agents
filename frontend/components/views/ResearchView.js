@@ -6,6 +6,12 @@ import { theme } from '../DashboardStyles';
 import { getApiBase } from '../../utils/apiBase';
 import { card, SectionHeader } from '../ui';
 
+const DOC_LABEL = {
+  market_pulse: 'Market Pulse',
+  recommendation_sheet: 'Rating sheet',
+  analyst_note: 'Analyst note',
+};
+
 const ResearchView = ({ active, onChanged, onDrill, mobile }) => {
   const [uploading, setUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState(null);
@@ -121,10 +127,10 @@ const ResearchView = ({ active, onChanged, onDrill, mobile }) => {
     <div style={{ display: 'flex', flexDirection: 'column', gap: mobile ? '16px' : '24px' }}>
       <div style={{ display: 'flex', gap: mobile ? '16px' : '24px', flexWrap: 'wrap' }}>
         <div style={card(mobile, { flex: '1 1 340px', minWidth: 0 })}>
-          <SectionHeader title="Research PDF Ingestion" icon={Upload} />
+          <SectionHeader title="Upload Research" icon={Upload} />
           <div style={{ border: `2px dashed ${theme.colors.border}`, borderRadius: '12px', padding: mobile ? '20px 12px' : '30px', textAlign: 'center', backgroundColor: 'rgba(255,255,255,0.01)', position: 'relative' }}>
             {!selectedFile && (
-              <input type="file" onChange={handleFileChange} accept=".pdf" style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', opacity: 0, cursor: 'pointer' }} />
+              <input type="file" onChange={handleFileChange} accept=".pdf,.jpg,.jpeg,.png,.webp" style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', opacity: 0, cursor: 'pointer' }} />
             )}
             <FileText size={40} color={selectedFile ? theme.colors.primary : theme.colors.textMuted} style={{ marginBottom: '12px' }} />
             {selectedFile ? (
@@ -132,7 +138,7 @@ const ResearchView = ({ active, onChanged, onDrill, mobile }) => {
                 <p style={{ margin: '0 0 4px 0', fontSize: '14px', fontWeight: 'bold' }}>{selectedFile.name}</p>
                 <div style={{ display: 'flex', gap: '10px' }}>
                   <button onClick={(e) => { e.stopPropagation(); handleUpload(); }} disabled={uploading} style={{ backgroundColor: theme.colors.primary, color: '#000', border: 'none', padding: '8px 20px', borderRadius: '8px', fontSize: '13px', fontWeight: '800', cursor: 'pointer' }}>
-                    {uploading ? 'Processing PDF...' : 'Audit Document'}
+                    {uploading ? 'Reading…' : 'Read Document'}
                   </button>
                   <button onClick={(e) => { e.stopPropagation(); setSelectedFile(null); }} style={{ backgroundColor: 'transparent', color: theme.colors.danger, border: `1px solid ${theme.colors.danger}`, padding: '8px 20px', borderRadius: '8px', fontSize: '13px', fontWeight: '800', cursor: 'pointer' }}>
                     Clear
@@ -141,10 +147,11 @@ const ResearchView = ({ active, onChanged, onDrill, mobile }) => {
               </div>
             ) : (
               <div>
-                <p style={{ margin: 0, fontSize: '13px', color: theme.colors.textSecondary }}>Drag & drop or click to select an AIB-AXYS report (PDF)</p>
+                <p style={{ margin: 0, fontSize: '13px', color: theme.colors.textSecondary }}>Drag & drop or click to select an AIB-AXYS report (PDF) or rating sheet (JPG, PNG)</p>
                 <p style={{ margin: '5px 0 0 0', fontSize: '11px', color: theme.colors.textMuted }}>
-                  The daily Market Pulse is read exactly: every stock's fundamentals and closing price, T-bill rates and announcements.
-                  Analyst notes: ratings, targets and rationales are extracted by the AI.
+                  Market Pulse PDF: every stock's figures and closing price, T-bill rates and announcements, read exactly.
+                  Daily Whispers picture: each BUY/HOLD rating and target, read by AI and then checked row by row.
+                  After reading, the agent lists below exactly what it did with the document.
                 </p>
               </div>
             )}
@@ -154,20 +161,12 @@ const ResearchView = ({ active, onChanged, onDrill, mobile }) => {
             <div style={{ marginTop: '20px', padding: '15px', borderRadius: '8px', border: `1px solid ${uploadResult.status === 'completed' ? theme.colors.primary : theme.colors.danger}`, backgroundColor: `${uploadResult.status === 'completed' ? theme.colors.primary : theme.colors.danger}10` }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: '700', fontSize: '14px', color: uploadResult.status === 'completed' ? theme.colors.primary : theme.colors.danger }}>
                 {uploadResult.status === 'completed' ? <CheckCircle size={16} /> : <XCircle size={16} />}
-                <span>{uploadResult.status === 'completed' ? 'Processing Complete' : 'Processing Failed'}</span>
+                <span>{uploadResult.status === 'completed' ? `${DOC_LABEL[uploadResult.document_type] || 'Document'} read: what the agent did` : 'Could not be read'}</span>
               </div>
-              {uploadResult.status === 'completed' && uploadResult.document_type === 'market_pulse' ? (
-                <div style={{ fontSize: '12px', marginTop: '5px', color: theme.colors.textSecondary }}>
-                  <p style={{ margin: '3px 0' }}>Market Pulse for <strong>{uploadResult.as_of}</strong>: {uploadResult.stocks_mapped} of {uploadResult.stocks_read} stocks read, {uploadResult.price_bars_added} closing prices added to history, {(uploadResult.announcements || []).length} announcements.</p>
-                  {uploadResult.rates?.tbill_91 && <p style={{ margin: '3px 0' }}>91-day T-bill: <strong>{(uploadResult.rates.tbill_91 * 100).toFixed(2)}%</strong> (now used for the benchmark and the interest on idle cash).</p>}
-                  {uploadResult.unmapped?.length > 0 && <p style={{ margin: '3px 0', color: theme.colors.warning }}>Not yet matched to a ticker: {uploadResult.unmapped.join(', ')}. They are matched automatically once the NSE feed has recorded them on the same day.</p>}
-                </div>
-              ) : uploadResult.status === 'completed' ? (
-                <div style={{ fontSize: '12px', marginTop: '5px', color: theme.colors.textSecondary }}>
-                  <p style={{ margin: '3px 0' }}>Successfully processed <strong>{uploadResult.signals_processed}</strong> recommendations.</p>
-                  {uploadResult.auto_followed?.length > 0 && <p style={{ margin: '3px 0' }}>Auto-followed watchlist: <span style={{ color: theme.colors.primary }}>{uploadResult.auto_followed.join(', ')}</span></p>}
-                  {uploadResult.escalated?.length > 0 && <p style={{ margin: '3px 0' }}>Escalated to Operator queue: <span style={{ color: theme.colors.warning }}>{uploadResult.escalated.map(x => x[0]).join(', ')}</span></p>}
-                </div>
+              {(uploadResult.actions || []).length > 0 ? (
+                <ul style={{ fontSize: '12px', margin: '8px 0 0 0', paddingLeft: '18px', color: theme.colors.textSecondary, display: 'grid', gap: '4px' }}>
+                  {uploadResult.actions.map((a, i) => <li key={i}>{a}</li>)}
+                </ul>
               ) : (
                 <p style={{ fontSize: '12px', margin: '5px 0 0 0', color: theme.colors.textMuted }}>{uploadResult.error || 'Check server logs for details'}</p>
               )}
@@ -201,29 +200,41 @@ const ResearchView = ({ active, onChanged, onDrill, mobile }) => {
         )}
 
         <div style={card(mobile, { flex: '1 1 340px', minWidth: 0 })}>
-          <SectionHeader title="Ingest Archives" icon={Clock} />
-          <div style={{ maxHeight: '190px', overflowY: 'auto', overflowX: 'auto' }}>
+          <SectionHeader title="Documents Read" icon={Clock} />
+          <div style={{ maxHeight: '320px', overflowY: 'auto', overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
               <thead>
                 <tr style={{ borderBottom: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, textAlign: 'left' }}>
-                  <th style={{ padding: '8px 0' }}>FILENAME</th>
-                  <th style={{ padding: '8px 0' }}>DATE</th>
-                  <th style={{ padding: '8px 0' }}>EXTRACTS</th>
+                  <th style={{ padding: '8px 0' }}>DOCUMENT AND WHAT THE AGENT DID</th>
+                  <th style={{ padding: '8px 0' }}>UPLOADED</th>
                   <th style={{ padding: '8px 0' }}>STATUS</th>
                 </tr>
               </thead>
               <tbody>
                 {uploads.length > 0 ? (
                   uploads.map(u => (
-                    <tr key={u.id} style={{ borderBottom: `1px solid ${theme.colors.border}20` }}>
-                      <td style={{ padding: '10px 0', fontWeight: 'bold' }}>{u.filename}</td>
-                      <td style={{ padding: '10px 0', color: theme.colors.textMuted }}>{new Date(u.uploaded_at).toLocaleString()}</td>
-                      <td style={{ padding: '10px 0' }}>{u.signals_count} positions</td>
+                    <tr key={u.id} style={{ borderBottom: `1px solid ${theme.colors.border}20`, verticalAlign: 'top' }}>
+                      <td style={{ padding: '10px 8px 10px 0' }}>
+                        <div style={{ fontWeight: 'bold', wordBreak: 'break-all' }}>
+                          {u.document_type && <span style={{ fontSize: '9px', fontWeight: 800, padding: '1px 5px', borderRadius: '4px', marginRight: '6px',
+                            background: `${theme.colors.accent}25`, color: theme.colors.accent }}>{(DOC_LABEL[u.document_type] || u.document_type).toUpperCase()}</span>}
+                          {u.filename}
+                        </div>
+                        {(u.summary || []).length > 0 ? (
+                          <details style={{ marginTop: '4px', color: theme.colors.textSecondary }}>
+                            <summary style={{ cursor: 'pointer' }}>{u.summary[0]}</summary>
+                            <ul style={{ margin: '4px 0 0 0', paddingLeft: '16px' }}>{u.summary.slice(1).map((a, i) => <li key={i}>{a}</li>)}</ul>
+                          </details>
+                        ) : (
+                          <div style={{ marginTop: '4px', color: theme.colors.textMuted }}>No record of what was done (uploaded before this was kept; upload it again to see).</div>
+                        )}
+                      </td>
+                      <td style={{ padding: '10px 8px 10px 0', color: theme.colors.textMuted, whiteSpace: 'nowrap' }}>{new Date(u.uploaded_at).toLocaleString()}</td>
                       <td style={{ padding: '10px 0', color: u.status === 'completed' ? theme.colors.primary : theme.colors.danger }}>{u.status.toUpperCase()}</td>
                     </tr>
                   ))
                 ) : (
-                  <tr><td colSpan="4" style={{ padding: '20px 0', textAlign: 'center', color: theme.colors.textMuted }}>No documents audited yet</td></tr>
+                  <tr><td colSpan="3" style={{ padding: '20px 0', textAlign: 'center', color: theme.colors.textMuted }}>No documents read yet</td></tr>
                 )}
               </tbody>
             </table>

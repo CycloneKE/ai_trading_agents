@@ -77,9 +77,9 @@ class BrokerResearchIngest:
                 summary = market_pulse.ingest(file_path, texts)
                 self.escalation_manager.update_upload_status(
                     upload_id, "completed", summary['stocks_mapped'])
-                return {"upload_id": upload_id, "status": "completed",
-                        "signals_processed": 0, "auto_followed": [], "escalated": [],
-                        **summary}
+                return self._summarised(upload_id, {
+                    "status": "completed", "signals_processed": 0, "auto_followed": [],
+                    "escalated": [], **summary})
 
             # 1. Parse PDF with full table & page structure
             extracted = pdf_parser.extract_all(file_path)
@@ -91,69 +91,102 @@ class BrokerResearchIngest:
             # 2. Extract signals via LLM across all page chunks
             signals = self._extract_signals_via_llm(extracted)
             logger.info(f"Extracted {len(signals)} total signals from research PDF across all pages.")
-            
-            processed_count = 0
-            auto_followed = []
-            escalated = []
-            
-            # 3. Process each signal
-            for signal in signals:
-                symbol = signal.get("symbol", "").upper()
-                if not symbol:
-                    continue
-                
-                # Record signal in DB
-                signal_id = self.escalation_manager.record_signal(upload_id, signal)
-                signal["id"] = signal_id
-                
-                # 4. Evaluate signal against auto-follow/escalation rules
-                action, reason, risk_level = self._evaluate_signal(signal)
-                
-                if action == "auto_follow":
-                    # Add to watchlist database directly
-                    self.escalation_manager.add_to_watchlist(
-                        symbol=symbol,
-                        market=signal.get("market", "kenyan"),
-                        source=f"upload_{upload_id}",
-                        recommendation=signal.get("recommendation", "HOLD"),
-                        target_price=signal.get("target_price", 0.0),
-                        rationale=signal.get("rationale", "")
-                    )
-                    auto_followed.append(symbol)
-                    logger.info(f"Auto-followed symbol: {symbol}. Reason: {reason}")
-                else:
-                    # Create escalation in DB for operator approval
-                    self.escalation_manager.create_escalation(
-                        signal_id=signal_id,
-                        symbol=symbol,
-                        action="follow",
-                        reason=reason,
-                        risk_level=risk_level
-                    )
-                    escalated.append((symbol, reason))
-                    logger.info(f"Escalated symbol {symbol} for operator approval. Reason: {reason}")
-                    
-                processed_count += 1
-                
-            # Update upload record status
-            self.escalation_manager.update_upload_status(upload_id, "completed", processed_count)
-            
-            return {
-                "upload_id": upload_id,
-                "status": "completed",
-                "signals_processed": processed_count,
-                "auto_followed": auto_followed,
-                "escalated": escalated
-            }
-            
+            return self._summarised(upload_id, {"document_type": "analyst_note",
+                                                **self._handle_signals(upload_id, signals)})
+
         except Exception as e:
             logger.error(f"Error processing research PDF {file_path}: {e}")
             self.escalation_manager.update_upload_status(upload_id, "failed", 0)
-            return {
-                "upload_id": upload_id,
-                "status": "failed",
-                "error": str(e)
-            }
+            return self._summarised(upload_id, {"status": "failed", "error": str(e)})
+
+    def process_image(self, file_path: str, source: str = 'aib_axys') -> Dict[str, Any]:
+        """A recommendation sheet sent as a picture (AIB-AXYS's Daily
+        Whispers): read by an AI that can see images, then every row checked
+        by rules before it counts (daily_whispers.py)."""
+        from src.agent import daily_whispers
+        upload_id = self.escalation_manager.record_upload(os.path.basename(file_path), source)
+        try:
+            sheet = daily_whispers.read(file_path, self.llm)
+            daily_whispers.remember(sheet['accepted'], os.path.basename(file_path))
+            signals = [{'symbol': r['symbol'], 'market': 'kenyan',
+                        'current_price': r['current_price'], 'target_price': r['target_price'],
+                        'upside_pct': r['upside_pct'], 'recommendation': r['recommendation'],
+                        'rationale': r['rationale'], 'risk_factors': [],
+                        'time_horizon': 'medium_term', 'confidence': 1.0}
+                       for r in sheet['accepted']]
+            return self._summarised(upload_id, {**sheet, **self._handle_signals(upload_id, signals)})
+        except Exception as e:
+            logger.error(f"Error processing research image {file_path}: {e}")
+            self.escalation_manager.update_upload_status(upload_id, "failed", 0)
+            return self._summarised(upload_id, {"document_type": "recommendation_sheet",
+                                                "status": "failed", "error": str(e)})
+
+    def _summarised(self, upload_id: int, result: Dict[str, Any]) -> Dict[str, Any]:
+        """The result with `actions`, what the agent did in plain words, kept
+        with the upload so the Research page can show it later too."""
+        actions = describe(result)
+        result = {"upload_id": upload_id, **result, "actions": actions}
+        try:
+            self.escalation_manager.set_upload_summary(
+                upload_id, result.get("document_type") or "unknown", actions)
+        except Exception as e:
+            logger.warning(f"Could not store the upload summary: {e}")
+        return result
+
+    def _handle_signals(self, upload_id: int, signals: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Record each signal, then follow it or ask the operator."""
+        processed_count = 0
+        auto_followed = []
+        escalated = []
+        
+        # 3. Process each signal
+        for signal in signals:
+            symbol = signal.get("symbol", "").upper()
+            if not symbol:
+                continue
+            
+            # Record signal in DB
+            signal_id = self.escalation_manager.record_signal(upload_id, signal)
+            signal["id"] = signal_id
+            
+            # 4. Evaluate signal against auto-follow/escalation rules
+            action, reason, risk_level = self._evaluate_signal(signal)
+            
+            if action == "auto_follow":
+                # Add to watchlist database directly
+                self.escalation_manager.add_to_watchlist(
+                    symbol=symbol,
+                    market=signal.get("market", "kenyan"),
+                    source=f"upload_{upload_id}",
+                    recommendation=signal.get("recommendation", "HOLD"),
+                    target_price=signal.get("target_price", 0.0),
+                    rationale=signal.get("rationale", "")
+                )
+                auto_followed.append(symbol)
+                logger.info(f"Auto-followed symbol: {symbol}. Reason: {reason}")
+            else:
+                # Create escalation in DB for operator approval
+                self.escalation_manager.create_escalation(
+                    signal_id=signal_id,
+                    symbol=symbol,
+                    action="follow",
+                    reason=reason,
+                    risk_level=risk_level
+                )
+                escalated.append((symbol, reason))
+                logger.info(f"Escalated symbol {symbol} for operator approval. Reason: {reason}")
+                
+            processed_count += 1
+            
+        # Update upload record status
+        self.escalation_manager.update_upload_status(upload_id, "completed", processed_count)
+        
+        return {
+            "status": "completed",
+            "signals_processed": processed_count,
+            "auto_followed": auto_followed,
+            "escalated": escalated
+        }
 
     def _extract_signals_fallback(self, text: str) -> List[Dict[str, Any]]:
         """Fallback heuristic matcher to extract signals across all known company names and symbols."""
@@ -415,3 +448,64 @@ class BrokerResearchIngest:
                 signal['consensus_verified'] = None
         
         return ("auto_follow", "Asset matches all auto-follow criteria.", "low")
+
+
+def _pct(v) -> str:
+    return f"{v * 100:.2f}%"
+
+
+def describe(result: Dict[str, Any]) -> List[str]:
+    """What the agent did with an upload, one plain sentence per line."""
+    kind = result.get("document_type")
+    if result.get("status") != "completed":
+        return [f"Nothing was changed: {result.get('error') or 'the document could not be read'}."]
+    followed = result.get("auto_followed") or []
+    queued = [e[0] if isinstance(e, (list, tuple)) else e for e in result.get("escalated") or []]
+    follow_lines = []
+    if followed:
+        follow_lines.append(f"Added to the research watchlist (stocks the agent trades): {', '.join(followed)}.")
+    if queued:
+        follow_lines.append(f"Sent to the approval queue for your decision, because the agent does not "
+                            f"trade them yet or the rating needs a look: {', '.join(queued)}.")
+    if kind == "market_pulse":
+        lines = [f"Read as the AIB-AXYS Market Pulse of {result.get('as_of')}."]
+        lines.append(f"Stored price, earnings, dividend, P/E and yield for {result.get('stocks_mapped', 0)} of "
+                     f"{result.get('stocks_read', 0)} stocks. The dividend sleeve ranks from these, the "
+                     f"Market Scan shows them and the AI sees them when it reviews a trade.")
+        added, kept = result.get("price_bars_added", 0), result.get("price_bars_already_recorded", 0)
+        lines.append(f"Added {added} closing prices to the price history"
+                     + (f"; {kept} days were already recorded from the live feed and were left as they were."
+                        if kept else "."))
+        rates = result.get("rates") or {}
+        if rates.get("tbill_91"):
+            lines.append(f"91-day T-bill rate {_pct(rates['tbill_91'])}: now used as the NSE benchmark, for "
+                         f"interest on idle paper cash and for the dividend sleeve's T-bill test.")
+        news = result.get("announcements") or []
+        if news:
+            lines.append(f"Kept {len(news)} company announcements; the AI sees each company's in its trade "
+                         f"reviews for 30 days.")
+        if result.get("unmapped"):
+            lines.append(f"Not yet matched to a stock code: {', '.join(result['unmapped'])}. They are matched "
+                         f"automatically once the live feed has recorded them.")
+        lines.append("This report has no buy or sell ratings, so nothing was sent to the approval queue.")
+        return lines
+    if kind == "recommendation_sheet":
+        accepted, rejected = result.get("accepted") or [], result.get("rejected") or []
+        lines = [f"Read as an AIB-AXYS rating sheet{' (' + result['title'] + ')' if result.get('title') else ''} "
+                 f"of {result.get('as_of')}, from the picture, and checked row by row."]
+        if not result.get("date_read", True):
+            lines.append("The report date could not be read, so today's date was used.")
+        if accepted:
+            lines.append("Accepted: " + "; ".join(
+                f"{r['symbol']} {r['recommendation']} at {r['current_price']}, target {r['target_price']} "
+                f"({r['upside_pct']:+.1f}%)" for r in accepted) + ".")
+            lines.append("For the next 30 days the AI sees each rating, target and rationale when it "
+                         "reviews a trade in that stock. A rating never places a trade by itself.")
+        for r in rejected:
+            lines.append(f"Not used: {r['name']}, {r['reason']}.")
+        return lines + follow_lines
+    n = result.get("signals_processed", 0)
+    lines = [f"Read as an analyst note: {n} rating{'s' if n != 1 else ''} found."]
+    if not n:
+        lines.append("Nothing was changed.")
+    return lines + follow_lines

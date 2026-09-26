@@ -1510,6 +1510,10 @@ class TradingAgent:
                'rationale': rated.get('rationale') or ''}
         if pulse:
             ctx['rationale'] = f"{ctx['rationale']} {pulse['rationale']}".strip()
+            # A dated, checked rating from the latest sheet beats the
+            # watchlist's, which is only as new as the note that added it.
+            if pulse.get('recommendation'):
+                ctx['recommendation'], ctx['target_price'] = pulse['recommendation'], pulse['target_price']
         return ctx
 
     @staticmethod

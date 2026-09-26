@@ -518,11 +518,17 @@ def announcements(symbol: str, days: int = 30, today: Optional[date] = None) -> 
 def research_context(symbol: str, today: Optional[date] = None) -> Optional[Dict[str, Any]]:
     """What the broker's reports say about a stock, for the AI's trade
     review: the latest fundamentals and the last month's announcements."""
+    from src.agent import daily_whispers
     f = fundamentals(symbol, today=today)
     news = announcements(symbol, today=today)
-    if not f and not news:
+    rated = daily_whispers.latest(symbol, today=today)
+    if not f and not news and not rated:
         return None
     parts = []
+    if rated:
+        parts.append(f"AIB-AXYS rating {rated['date']}: {rated['recommendation']} at "
+                     f"{rated['current_price']}, target {rated['target_price']} "
+                     f"({rated['upside_pct']:+.1f}%). {rated.get('rationale') or ''}".strip())
     if f:
         bits = [f"P/E {f['pe']}x" if f.get('pe') else 'no positive earnings',
                 f"P/B {f['pb']}x" if f.get('pb') else None,
@@ -532,4 +538,6 @@ def research_context(symbol: str, today: Optional[date] = None) -> Optional[Dict
         parts.append(f"AIB-AXYS Market Pulse {f['as_of']}: " + ', '.join(b for b in bits if b) + '.')
     if news:
         parts.append('Announcements: ' + '; '.join(f"{a['date']} {a['text']}" for a in news[-5:]) + '.')
-    return {'recommendation': None, 'target_price': None, 'rationale': ' '.join(parts)}
+    return {'recommendation': rated['recommendation'] if rated else None,
+            'target_price': rated['target_price'] if rated else None,
+            'rationale': ' '.join(parts)}
