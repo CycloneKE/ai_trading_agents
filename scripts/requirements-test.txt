@@ -1,6 +1,6 @@
 pytest>=7.0.0
 pytest-cov>=4.0.0
-requests-mock>=1.9.3
+requests-mock>=1.12.1
 responses>=0.23.0
 pylint>=2.16.0
 black>=23.7.0
