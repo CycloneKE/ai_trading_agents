@@ -254,6 +254,49 @@ class LLMOrchestrator:
         return {'paid_tier': True, 'review_model': self.claude.review_model,
                 'volume_model': self.claude.volume_model, **self.claude.budget.summary()}
 
+    def read_image_json(self, system_prompt: str, user_prompt: str, image_b64: str,
+                        media_type: str, schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """A JSON object read from an image by the first model that can see
+        one: Claude while it has budget, then Gemini. OpenRouter's free model
+        is text only. None when neither answers."""
+        import time as _time
+        callers = []
+        if self.claude is not None and self.claude.available():
+            callers.append(('anthropic', lambda: self.claude.read_image_json(
+                system_prompt, user_prompt, image_b64, media_type, schema)))
+        if self.gemini_api_key:
+            callers.append(('gemini', lambda: self._gemini_image(
+                system_prompt, user_prompt, image_b64, media_type)))
+        for provider, call in callers:
+            if self._cooldown_until.get(provider, 0) > _time.time():
+                continue
+            try:
+                result = call()
+                if isinstance(result, dict):
+                    return result
+            except Exception as e:
+                if self._status_code(e) == 429:
+                    self._cooldown_until[provider] = _time.time() + self.cooldown_seconds
+                logger.warning(f"Image reading by '{provider}' failed: {e}")
+        return None
+
+    def _gemini_image(self, system_prompt: str, user_prompt: str, image_b64: str,
+                      media_type: str) -> Optional[Dict[str, Any]]:
+        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+               f"{self.gemini_model}:generateContent?key={self.gemini_api_key}")
+        data = {
+            "contents": [{"parts": [
+                {"inline_data": {"mime_type": media_type, "data": image_b64}},
+                {"text": f"{system_prompt}\n\n{user_prompt}"}]}],
+            "generationConfig": {"response_mime_type": "application/json", "temperature": 0},
+        }
+        response = requests.post(url, headers={"Content-Type": "application/json"},
+                                 json=data, timeout=60)
+        response.raise_for_status()
+        text = response.json()['candidates'][0]['content']['parts'][0]['text']
+        result = json.loads(text)
+        return result if isinstance(result, dict) else None
+
     def _call_openrouter(self, system_prompt: str, user_prompt: str, fallback_signal: Optional[Dict[str, Any]], model_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
         url = "https://openrouter.ai/api/v1/chat/completions"
         headers = {

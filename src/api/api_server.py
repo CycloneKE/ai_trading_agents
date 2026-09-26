@@ -1404,7 +1404,8 @@ class TradingAPI:
         @token_required
         @role_required('operator')
         def upload_research():
-            """Upload a PDF research document and trigger ingest pipeline."""
+            """Upload a research document (a PDF, or a picture of a rating
+            sheet) and run it through the ingest pipeline."""
             from werkzeug.utils import secure_filename
             if 'file' not in request.files:
                 return jsonify({'error': 'No file part in the request'}), 400
@@ -1412,7 +1413,9 @@ class TradingAPI:
             if file.filename == '':
                 return jsonify({'error': 'No file selected'}), 400
                 
-            if file and file.filename.endswith('.pdf'):
+            from src.agent.daily_whispers import IMAGE_TYPES
+            ext = os.path.splitext(file.filename.lower())[1]
+            if file and (ext == '.pdf' or ext in IMAGE_TYPES):
                 upload_dir = self.trading_agent.config.get('research_ingest', {}).get('upload_dir', str(DATA_DIR / 'research_uploads'))
                 os.makedirs(upload_dir, exist_ok=True)
                 
@@ -1424,10 +1427,13 @@ class TradingAPI:
                 if not ingest:
                     return jsonify({'error': 'Research ingest component is not initialized'}), 500
                     
-                result = ingest.process_pdf(file_path, source='aib_axys')
+                if ext == '.pdf':
+                    result = ingest.process_pdf(file_path, source='aib_axys')
+                else:
+                    result = ingest.process_image(file_path, source='aib_axys')
                 return jsonify(result), 200
             else:
-                return jsonify({'error': 'Only PDF files are supported'}), 400
+                return jsonify({'error': 'Only PDF files and JPG, PNG or WebP pictures are supported'}), 400
 
         @self.app.route('/api/operator/escalations', methods=['GET'])
         @require_rate_limit
