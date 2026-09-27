@@ -13,7 +13,10 @@ from typing import Dict, Any, List, Optional
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 # Tried in turn when the configured Gemini model answers 404, which is what
 # Google returns once a model is retired. The first that answers is kept.
-GEMINI_FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-flash-latest", "gemini-2.5-flash-lite")
+# Flash-Lite first: on the free tier Google allows it about 500 requests a
+# day, against about 20 for the full Flash models (September 2026).
+GEMINI_FALLBACK_MODELS = ("gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
+                          "gemini-flash-latest", "gemini-2.5-flash")
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 # Free OpenRouter models come and go. When the configured one is withdrawn,
 # a free model that returns JSON is picked from OpenRouter's own list, these
@@ -23,11 +26,13 @@ QUOTA_COOLDOWN_SECONDS = 1800   # a spent daily allowance: stop asking for a whi
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models"
 # Used when Groq retires the configured model: the first of these families
-# that Groq still lists, larger context windows first. Vision reads the
-# rating-sheet pictures, so only models that accept images qualify there.
-GROQ_TEXT_FAMILIES = ("llama-3.3-70b", "openai/gpt-oss-120b", "llama-4-maverick", "qwen", "kimi",
-                      "llama-4-scout", "openai/gpt-oss", "llama")
-GROQ_VISION_FAMILIES = ("llama-4-maverick", "llama-4-scout")
+# that Groq still lists, larger context windows and then newer versions
+# first. Vision reads the rating-sheet pictures, so only models that accept
+# images qualify there: Qwen 3.x (qwen/qwen3.8-27b in September 2026; the
+# older text-only qwen/qwen3-32b does not match "qwen/qwen3.") and Llama 4.
+GROQ_TEXT_FAMILIES = ("openai/gpt-oss-120b", "qwen", "openai/gpt-oss", "kimi", "llama")
+GROQ_VISION_FAMILIES = ("qwen/qwen3.", "llama-4-maverick", "llama-4-scout", "vision", "-vl")
+GROQ_SUBSTITUTE_TRIES = 3
 GROQ_NOT_CHAT = ("whisper", "guard", "tts", "orpheus", "playai", "distil")
 
 
@@ -51,10 +56,11 @@ def advice(provider: str, error: Optional[str]) -> str:
     if 'http 404' in e:
         if provider == 'gemini':
             return ("The Gemini model named in config.json is no longer offered. The agent now tries "
-                    "newer ones on its own; if this stays, set gemini_model to gemini-2.5-flash.")
+                    "newer ones on its own; if this stays, set gemini_model to gemini-flash-lite-latest.")
         if provider == 'groq':
-            return ("The Groq model named in config.json was retired. The agent now picks a current "
-                    "one on its own; if this stays, set groq_model in config.json.")
+            return ("Groq no longer offers this model on the free plan. The agent now picks a current "
+                    "one from Groq's list on its own; if this stays, set groq_model (text) or "
+                    "groq_vision_model (pictures) in config.json.")
         if provider == 'openrouter':
             return ("The OpenRouter model is no longer offered. The agent now picks a current free "
                     "model on its own; if this stays, set swarm.agents.synthesizer in config.json.")
@@ -104,8 +110,11 @@ def describe_error(err: Exception) -> str:
         msg = getattr(err, 'message', None) or (str(err) if resp is None else '') or type(err).__name__
     # Keep the provider's own sentence; drop its links and "for more
     # information" tails, which only cut off mid-address on the dashboard.
+    limit = re.search(r'limit:\s*(\d+),\s*model:\s*([\w.\-]+)', str(msg))
     msg = re.split(r'\s(?:For more information|To monitor|Learn more)', str(msg))[0]
     msg = re.sub(r'https?://\S+', '', msg).strip(' .') + '.'
+    if limit:
+        msg += f" (limit {limit.group(1)}, model {limit.group(2)})"
     text = f"HTTP {code}: {msg}" if code else str(msg)
     return re.sub(r'key=[^&\s]+', 'key=...', ' '.join(str(text).split()))[:220]
 
@@ -117,19 +126,20 @@ class LLMOrchestrator:
         self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
         self.gemini_api_key = os.getenv("GEMINI_API_KEY")
         # Groq: free tier, fast, OpenAI-style API; one of its models reads
-        # pictures too. Model names can be changed in config.json.
+        # pictures too. These are the free plan's models as of September 2026
+        # (Llama 3.3 and Llama 4 left it); change them in config.json.
         self.groq_api_key = os.getenv("GROQ_API_KEY")
-        self.groq_model = config.get("groq_model", "llama-3.3-70b-versatile")
-        self.groq_vision_model = config.get("groq_vision_model", "meta-llama/llama-4-scout-17b-16e-instruct")
+        self.groq_model = config.get("groq_model", "openai/gpt-oss-120b")
+        self.groq_vision_model = config.get("groq_vision_model", "qwen/qwen3.8-27b")
         self._groq_models_cache: tuple = (0.0, [])
 
         # Determine primary model strategy
         self.primary_provider = config.get("primary_llm_provider", "openrouter")
         self.enabled = config.get("llm_enabled", True)
 
-        # Valid free Gemini model (the old default gemini-2.5-flash-lite 404s
-        # on the v1beta endpoint). Override with config 'gemini_model'.
-        self.gemini_model = config.get("gemini_model", "gemini-2.0-flash")
+        # Google's alias for its current Flash-Lite model, the free model
+        # with the largest daily allowance. Override with config 'gemini_model'.
+        self.gemini_model = config.get("gemini_model", "gemini-flash-lite-latest")
 
         self.cache_ttl = config.get('llm_cache_ttl', 900)  # 15 min default
         self._verdict_cache: Dict[str, tuple] = {}  # key -> (expires_at, verdict)
@@ -411,8 +421,10 @@ class LLMOrchestrator:
     def read_image_json(self, system_prompt: str, user_prompt: str, image_b64: str,
                         media_type: str, schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """A JSON object read from an image by the first model that can see
-        one: Claude while it has budget, then Gemini. OpenRouter's free model
-        is text only. None when neither answers."""
+        one: Claude while it has budget, then Groq (its picture model has an
+        allowance of its own), then Gemini, whose small free allowance is
+        better kept for trade reviews. OpenRouter's free model is text only.
+        None when none answers."""
         import time as _time
         self.last_image_errors = []
         callers = []
@@ -421,11 +433,11 @@ class LLMOrchestrator:
                 system_prompt, user_prompt, image_b64, media_type, schema)))
         elif self.claude is not None:
             self.last_image_errors.append(('Claude', "this month's AI budget is used up"))
-        if self.gemini_api_key:
-            callers.append(('gemini', lambda: self._gemini_image(
-                system_prompt, user_prompt, image_b64, media_type)))
         if self.groq_api_key:
             callers.append(('groq', lambda: self._groq_image(
+                system_prompt, user_prompt, image_b64, media_type)))
+        if self.gemini_api_key:
+            callers.append(('gemini', lambda: self._gemini_image(
                 system_prompt, user_prompt, image_b64, media_type)))
         if not callers and not self.last_image_errors:
             self.last_image_errors.append((
@@ -537,26 +549,45 @@ class LLMOrchestrator:
     # ------------------------------------------------------------------ Groq
 
     def _groq_post(self, messages: List[Dict[str, Any]], vision: bool = False,
-                   json_mode: bool = True, timeout: float = 20):
-        """POST a chat to Groq. When Groq says the model is gone (retired or
-        unknown), a current one is picked from Groq's own list, used for the
-        retry, and kept."""
+                   json_mode: bool = True, timeout: float = 20, max_tokens: Optional[int] = None):
+        """POST a chat to Groq. When Groq says the model is gone (retired, or
+        no longer on the free plan), current ones are picked from Groq's own
+        list and tried in turn; the first that answers is kept."""
         attr = 'groq_vision_model' if vision else 'groq_model'
-        body: Dict[str, Any] = {"model": getattr(self, attr), "messages": messages, "temperature": 0.2}
+        headers = {"Authorization": f"Bearer {self.groq_api_key}", "Content-Type": "application/json"}
+        model, gone = getattr(self, attr), set()
+        for _ in range(GROQ_SUBSTITUTE_TRIES + 1):
+            response = self._groq_send(model, messages, json_mode, max_tokens, headers, timeout)
+            if not model_gone(response):
+                break
+            gone.add(model)
+            substitute = self._current_groq_model(vision, exclude=gone)
+            if not substitute:
+                break
+            logger.warning(f"Groq model '{model}' is not offered; trying '{substitute}'. "
+                           f"Set {attr} in config.json to choose another.")
+            model = substitute
+        response.raise_for_status()
+        setattr(self, attr, model)
+        return response
+
+    @staticmethod
+    def _groq_send(model: str, messages: List[Dict[str, Any]], json_mode: bool,
+                   max_tokens: Optional[int], headers: Dict[str, str], timeout: float):
+        body: Dict[str, Any] = {"model": model, "messages": messages, "temperature": 0.2}
         if json_mode:
             body["response_format"] = {"type": "json_object"}
-        headers = {"Authorization": f"Bearer {self.groq_api_key}", "Content-Type": "application/json"}
+        if max_tokens:
+            body["max_completion_tokens"] = max_tokens
+        if model.startswith("openai/gpt-oss"):
+            # A trade review needs little reasoning, and less keeps each call
+            # inside the free plan's per-minute token limit.
+            body["reasoning_effort"] = "low"
         response = requests.post(GROQ_CHAT_URL, headers=headers, json=body, timeout=timeout)
-        if model_gone(response):
-            retired = body["model"]
-            substitute = self._current_groq_model(vision, exclude={retired})
-            if substitute:
-                logger.warning(f"Groq model '{retired}' is no longer offered; using '{substitute}'. "
-                               f"Set {attr} in config.json to choose another.")
-                setattr(self, attr, substitute)
-                body["model"] = substitute
-                response = requests.post(GROQ_CHAT_URL, headers=headers, json=body, timeout=timeout)
-        response.raise_for_status()
+        if (getattr(response, 'status_code', None) == 400 and "reasoning_effort" in body
+                and 'reasoning' in error_text(response)):
+            body.pop("reasoning_effort")
+            response = requests.post(GROQ_CHAT_URL, headers=headers, json=body, timeout=timeout)
         return response
 
     def _current_groq_model(self, vision: bool, exclude=()) -> Optional[str]:
@@ -598,7 +629,7 @@ class LLMOrchestrator:
         response = self._groq_post([{"role": "user", "content": [
             {"type": "text", "text": f"{system_prompt}\n\n{user_prompt}"},
             {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_b64}"}}]}],
-            vision=True, timeout=60)
+            vision=True, timeout=60, max_tokens=4096)
         text = response.json()['choices'][0]['message']['content']
         result = json_from_text(text)
         return result if isinstance(result, dict) else None
@@ -683,13 +714,18 @@ def model_gone(response) -> bool:
         return True
     if code != 400:
         return False
-    try:
-        text = json.dumps(response.json()).lower()
-    except Exception:
-        text = str(getattr(response, 'text', '')).lower()
+    text = error_text(response)
     if 'decommissioned' in text or 'model_not_found' in text:
         return True
     return 'model' in text and ('does not exist' in text or 'no longer supported' in text)
+
+
+def error_text(response) -> str:
+    """A failed reply's body, lower case, for matching words in it."""
+    try:
+        return json.dumps(response.json()).lower()
+    except Exception:
+        return str(getattr(response, 'text', '')).lower()
 
 
 def pick_groq_model(models: List[Dict[str, Any]], vision: bool, exclude=()) -> Optional[str]:
@@ -707,14 +743,16 @@ def pick_groq_model(models: List[Dict[str, Any]], vision: bool, exclude=()) -> O
               and family(m['id']) is not None]
     if not usable:
         return None
-    usable.sort(key=lambda m: (family(m['id']), -int(m.get('context_window') or 0), m['id']))
+    usable.sort(key=lambda m: m['id'], reverse=True)                  # newer versions first
+    usable.sort(key=lambda m: (family(m['id']), -int(m.get('context_window') or 0)))
     return usable[0]['id']
 
 
 def json_from_text(text: Any) -> Optional[Dict[str, Any]]:
     """The JSON object in a model's reply, allowing a code fence or words
-    around it; None when there is none."""
-    body = str(text or '').strip()
+    around it, or a model's own reasoning in <think> tags before it; None
+    when there is none."""
+    body = re.sub(r'<think>.*?</think>', '', str(text or ''), flags=re.S).strip()
     if body.startswith('```'):
         body = body.split('\n', 1)[1] if '\n' in body else ''
         body = body.rsplit('```', 1)[0]

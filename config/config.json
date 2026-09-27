@@ -1,8 +1,8 @@
 {
   "primary_llm_provider": "groq",
-  "groq_model": "llama-3.3-70b-versatile",
-  "groq_vision_model": "meta-llama/llama-4-scout-17b-16e-instruct",
-  "gemini_model": "gemini-2.0-flash",
+  "groq_model": "openai/gpt-oss-120b",
+  "groq_vision_model": "qwen/qwen3.8-27b",
+  "gemini_model": "gemini-flash-lite-latest",
   "llm_cooldown_seconds": 60,
   "sector_analysis_interval": 390,
   "data_manager": {

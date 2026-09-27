@@ -42,11 +42,11 @@ def test_a_retired_gemini_model_gives_way_to_a_current_one(gemini_only, monkeypa
     monkeypatch.setattr(lo.requests, 'post', post)
     out = gemini_only.propose_json('sys', 'user')
     assert out['action'] == 'buy'
-    assert gemini_only.gemini_model == 'gemini-2.5-flash'
+    assert gemini_only.gemini_model == 'gemini-flash-lite-latest'       # the larger free allowance
     assert all('SECRET123' not in url for url, _ in calls)             # the key is not in the address
     assert calls[0][1]['x-goog-api-key'] == 'SECRET123'
     [g] = gemini_only.provider_health()
-    assert g['status'] == 'ok' and g['model'] == 'gemini-2.5-flash'
+    assert g['status'] == 'ok' and g['model'] == 'gemini-flash-lite-latest'
 
 
 def test_a_failing_provider_says_why_without_the_key(gemini_only, monkeypatch):
@@ -145,6 +145,10 @@ def _groq_reply(content):
     return _reply(200, {'choices': [{'message': {'content': content}}]})
 
 
+GONE = {'error': {'message': 'The model `x` does not exist or you do not have access to it.',
+                  'code': 'model_not_found'}}
+
+
 @pytest.fixture
 def groq_first(monkeypatch):
     monkeypatch.setenv('GROQ_API_KEY', 'GSK_SECRET')
@@ -165,16 +169,30 @@ def test_groq_reviews_first_when_it_is_the_main_provider(groq_first, monkeypatch
     assert groq_first.propose_json('sys', 'user') == {'action': 'buy', 'confidence': 0.7}
     [(url, headers, body)] = sent
     assert url == lo.GROQ_CHAT_URL and headers['Authorization'] == 'Bearer GSK_SECRET'
-    assert body['model'] == 'llama-3.3-70b-versatile' and body['response_format'] == {'type': 'json_object'}
+    assert body['model'] == 'openai/gpt-oss-120b' and body['response_format'] == {'type': 'json_object'}
+    assert body['reasoning_effort'] == 'low'
     health = {p['provider']: p for p in groq_first.provider_health()}
     assert health['groq']['status'] == 'ok' and health['groq']['reads_images']
     assert health['gemini']['status'] == 'unused'
 
 
+def test_a_refused_reasoning_setting_is_dropped_not_fatal(groq_first, monkeypatch):
+    sent = []
+
+    def post(url, headers=None, json=None, timeout=None):
+        sent.append(dict(json))
+        if 'reasoning_effort' in json:
+            return _reply(400, {'error': {'message': '`reasoning_effort` is not supported with this model'}})
+        return _groq_reply('{"action": "hold"}')
+    monkeypatch.setattr(lo.requests, 'post', post)
+    assert groq_first.propose_json('sys', 'user') == {'action': 'hold'}
+    assert len(sent) == 2 and 'reasoning_effort' not in sent[1]
+
+
 def test_when_groq_is_rate_limited_gemini_answers(groq_first, monkeypatch):
     def post(url, headers=None, json=None, timeout=None):
         if url == lo.GROQ_CHAT_URL:
-            return _reply(429, {'error': {'message': 'Rate limit reached for model `llama-3.3-70b-versatile` '
+            return _reply(429, {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` '
                                                      'on tokens per day (TPD). Please try again in 12m3s.'}})
         return _reply(200, OK)
     monkeypatch.setattr(lo.requests, 'post', post)
@@ -186,22 +204,23 @@ def test_when_groq_is_rate_limited_gemini_answers(groq_first, monkeypatch):
     assert groq_first._cooldown_until['groq'] - lo.time.time() > 1700    # a daily limit: left alone a while
 
 
-def test_a_retired_groq_model_is_replaced_from_groqs_own_list(groq_first, monkeypatch):
+def test_a_model_off_the_free_plan_is_replaced_from_groqs_own_list(groq_first, monkeypatch):
+    # The account's list can still name models the free plan cannot use, so
+    # a substitute that is refused too gives way to the next.
     listing = {'data': [
         {'id': 'whisper-large-v3', 'active': True, 'context_window': 448},
         {'id': 'meta-llama/llama-guard-4-12b', 'active': True, 'context_window': 131072},
         {'id': 'llama-3.3-70b-specdec', 'active': False, 'context_window': 8192},
-        {'id': 'meta-llama/llama-4-scout-17b-16e-instruct', 'active': True, 'context_window': 131072},
-        {'id': 'openai/gpt-oss-120b', 'active': True, 'context_window': 131072},
+        {'id': 'qwen/qwen3.6-27b', 'active': True, 'context_window': 131072},
+        {'id': 'qwen/qwen3.8-27b', 'active': True, 'context_window': 131072},
+        {'id': 'openai/gpt-oss-20b', 'active': True, 'context_window': 131072},
     ]}
     sent, listed = [], []
 
     def post(url, headers=None, json=None, timeout=None):
         sent.append(json['model'])
-        if json['model'] == 'llama-3.3-70b-versatile':
-            return _reply(400, {'error': {'message': 'The model `llama-3.3-70b-versatile` has been decommissioned '
-                                                     'and is no longer supported.',
-                                          'code': 'model_decommissioned'}})
+        if json['model'] in ('openai/gpt-oss-120b', 'qwen/qwen3.8-27b'):
+            return _reply(404, GONE)
         return _groq_reply('{"action": "hold"}')
 
     def get(url, headers=None, timeout=None):
@@ -210,40 +229,50 @@ def test_a_retired_groq_model_is_replaced_from_groqs_own_list(groq_first, monkey
     monkeypatch.setattr(lo.requests, 'post', post)
     monkeypatch.setattr(lo.requests, 'get', get)
     assert groq_first.propose_json('sys', 'user') == {'action': 'hold'}
-    assert sent == ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b']
+    assert sent == ['openai/gpt-oss-120b', 'qwen/qwen3.8-27b', 'qwen/qwen3.6-27b']
     assert groq_first.propose_json('sys', 'user') == {'action': 'hold'}
-    assert sent[-1] == 'openai/gpt-oss-120b' and len(listed) == 1       # remembered; listed once
-    assert {p['provider']: p for p in groq_first.provider_health()}['groq']['model'] == 'openai/gpt-oss-120b'
+    assert sent[-1] == 'qwen/qwen3.6-27b' and len(listed) == 1          # remembered; listed once
+    assert {p['provider']: p for p in groq_first.provider_health()}['groq']['model'] == 'qwen/qwen3.6-27b'
+
+
+def test_when_no_listed_model_answers_the_refusal_is_reported(groq_first, monkeypatch):
+    monkeypatch.setattr(lo.requests, 'post', lambda *a, **k: _reply(404, GONE))
+    monkeypatch.setattr(lo.requests, 'get', lambda *a, **k: _reply(200, {'data': [
+        {'id': 'whisper-large-v3'}, {'id': 'openai/gpt-oss-20b'}]}))
+    with pytest.raises(requests.HTTPError):
+        groq_first._groq_post([{'role': 'user', 'content': 'x'}], vision=True)
+    assert groq_first.groq_vision_model == 'qwen/qwen3.8-27b'              # nothing better was found
 
 
 def test_groq_model_choice_by_family():
-    models = [{'id': 'meta-llama/llama-4-scout-17b-16e-instruct', 'context_window': 131072},
-              {'id': 'meta-llama/llama-4-maverick-17b-128e-instruct', 'context_window': 131072},
+    models = [{'id': 'qwen/qwen3-32b', 'context_window': 131072},                  # text only
+              {'id': 'qwen/qwen3.6-27b', 'context_window': 131072},
+              {'id': 'qwen/qwen3.8-27b', 'context_window': 131072},
               {'id': 'meta-llama/llama-prompt-guard-2-86m', 'context_window': 512},
               {'id': 'playai-tts', 'context_window': 8192},
-              {'id': 'llama-3.1-8b-instant', 'context_window': 131072}]
-    assert lo.pick_groq_model(models, vision=True) == 'meta-llama/llama-4-maverick-17b-128e-instruct'
-    assert lo.pick_groq_model(models, vision=True,
-                              exclude={'meta-llama/llama-4-maverick-17b-128e-instruct'}).endswith('scout-17b-16e-instruct')
-    assert lo.pick_groq_model(models, vision=False) == 'meta-llama/llama-4-maverick-17b-128e-instruct'
-    assert lo.pick_groq_model([models[4]], vision=True) is None           # no model that reads pictures
-    assert lo.pick_groq_model([models[4]], vision=False) == 'llama-3.1-8b-instant'
+              {'id': 'openai/gpt-oss-20b', 'context_window': 131072},
+              {'id': 'openai/gpt-oss-120b', 'context_window': 131072}]
+    assert lo.pick_groq_model(models, vision=True) == 'qwen/qwen3.8-27b'          # the newer version
+    assert lo.pick_groq_model(models, vision=True, exclude={'qwen/qwen3.8-27b'}) == 'qwen/qwen3.6-27b'
+    assert lo.pick_groq_model(models, vision=False) == 'openai/gpt-oss-120b'
+    assert lo.pick_groq_model(models[5:], vision=True) is None                  # no model that reads pictures
+    assert lo.pick_groq_model(models[5:6], vision=False) == 'openai/gpt-oss-20b'
 
 
-def test_a_reply_with_a_code_fence_or_words_around_the_json_is_still_read():
+def test_a_reply_with_a_code_fence_reasoning_or_words_around_the_json_is_still_read():
     assert lo.json_from_text('```json\n{"a": 1}\n```') == {'a': 1}
     assert lo.json_from_text('Here is the table:\n{"a": {"b": 2}}\nDone.') == {'a': {'b': 2}}
+    assert lo.json_from_text('<think>rows are {x}</think>\n{"a": 3}') == {'a': 3}
     assert lo.json_from_text('[1, 2]') is None and lo.json_from_text('no json here') is None
 
 
-def test_groq_reads_the_picture_when_gemini_cannot(groq_first, monkeypatch, tmp_path):
+def test_groq_reads_the_picture_before_gemini(groq_first, monkeypatch, tmp_path):
     from src.agent import daily_whispers as dw
     from tests.test_daily_whispers import SHEET
-    sent = {}
+    sent, urls = {}, []
 
     def post(url, headers=None, json=None, timeout=None):
-        if url != lo.GROQ_CHAT_URL:
-            return _reply(429, {'error': {'message': 'Resource has been exhausted (e.g. check quota).'}})
+        urls.append(url)
         sent.update(json)
         return _groq_reply('```json\n' + __import__('json').dumps(SHEET) + '\n```')
     monkeypatch.setattr(lo.requests, 'post', post)
@@ -251,7 +280,34 @@ def test_groq_reads_the_picture_when_gemini_cannot(groq_first, monkeypatch, tmp_
     img.write_bytes(b'\xff\xd8')
     sheet = dw.read(str(img), groq_first, last_close=lambda s, d: None)
     assert len(sheet['accepted']) == 5 and sheet['as_of'] == '2026-09-24'
-    assert sent['model'] == 'meta-llama/llama-4-scout-17b-16e-instruct'
+    assert urls == [lo.GROQ_CHAT_URL]                                      # Gemini's allowance untouched
+    assert sent['model'] == 'qwen/qwen3.8-27b' and sent['max_completion_tokens'] == 4096
+    assert 'reasoning_effort' not in sent
     text, image = sent['messages'][0]['content']
     assert 'Reply with JSON only' in text['text']
     assert image['image_url']['url'].startswith('data:image/jpeg;base64,')
+
+
+def test_gemini_reads_the_picture_when_groq_cannot(groq_first, monkeypatch, tmp_path):
+    from src.agent import daily_whispers as dw
+    from tests.test_daily_whispers import SHEET
+
+    def post(url, headers=None, json=None, timeout=None):
+        if url == lo.GROQ_CHAT_URL:
+            return _reply(429, {'error': {'message': 'Rate limit reached for model `qwen/qwen3.8-27b`.'}})
+        return _reply(200, {'candidates': [{'content': {'parts': [{'text': __import__('json').dumps(SHEET)}]}}]})
+    monkeypatch.setattr(lo.requests, 'post', post)
+    img = tmp_path / 'whispers.jpg'
+    img.write_bytes(b'\xff\xd8')
+    assert len(dw.read(str(img), groq_first, last_close=lambda s, d: None)['accepted']) == 5
+
+
+def test_geminis_quota_message_keeps_the_limit_and_the_model():
+    body = {'error': {'message': (
+        'You exceeded your current quota, please check your plan and billing details. For more '
+        'information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. '
+        '\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, '
+        'limit: 20, model: gemini-3.5-flash\nPlease retry in 22.5s.')}}
+    err = requests.HTTPError('429', response=SimpleNamespace(status_code=429, json=lambda: body))
+    assert lo.describe_error(err) == ('HTTP 429: You exceeded your current quota, please check your plan and '
+                                      'billing details. (limit 20, model gemini-3.5-flash)')
