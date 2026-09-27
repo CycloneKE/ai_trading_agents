@@ -110,6 +110,7 @@ def _orchestrator(monkeypatch, tmp_path, client, free=True, cap=20.0):
     monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
     monkeypatch.setenv('GEMINI_API_KEY', 'g') if free else monkeypatch.delenv('GEMINI_API_KEY', raising=False)
     monkeypatch.delenv('OPENROUTER_API_KEY', raising=False)
+    monkeypatch.delenv('GROQ_API_KEY', raising=False)
     orch = lo.LLMOrchestrator({'primary_llm_provider': 'gemini'})
     orch.claude = ClaudeProvider('key', AiBudget(tmp_path / 'spend.json', cap), {}, client=client)
     orch.enabled = True
@@ -141,6 +142,7 @@ def test_without_a_key_claude_is_off_and_the_dashboard_says_so(monkeypatch):
     from src.agent import llm_orchestrator as lo
     monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
     monkeypatch.setenv('GEMINI_API_KEY', 'g')
+    monkeypatch.delenv('GROQ_API_KEY', raising=False)
     orch = lo.LLMOrchestrator({})
     assert orch.claude is None and 'anthropic' not in orch._provider_order()
     assert orch.ai_budget()['paid_tier'] is False

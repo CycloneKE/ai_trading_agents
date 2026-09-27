@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 # Published free-tier ceilings, requests per minute. Override in config under
 # `capacity.provider_limits` when on a paid plan.
 DEFAULT_PROVIDER_LIMITS = {
+    'groq': 30,
     'gemini': 10,
     'openrouter': 20,
     'alpha_vantage': 5,

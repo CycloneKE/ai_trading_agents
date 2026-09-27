@@ -27,6 +27,7 @@ def gemini_only(monkeypatch):
     monkeypatch.setenv('GEMINI_API_KEY', 'SECRET123')
     monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
     monkeypatch.delenv('OPENROUTER_API_KEY', raising=False)
+    monkeypatch.delenv('GROQ_API_KEY', raising=False)
     return lo.LLMOrchestrator({'primary_llm_provider': 'gemini', 'gemini_model': 'gemini-2.0-flash'})
 
 
@@ -78,10 +79,11 @@ def test_text_only_ai_is_named_as_the_reason(monkeypatch, tmp_path):
     monkeypatch.setenv('OPENROUTER_API_KEY', 'k')
     monkeypatch.delenv('GEMINI_API_KEY', raising=False)
     monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
+    monkeypatch.delenv('GROQ_API_KEY', raising=False)
     llm = lo.LLMOrchestrator({'primary_llm_provider': 'openrouter'})
     img = tmp_path / 'w.jpg'
     img.write_bytes(b'\xff\xd8')
-    with pytest.raises(ValueError, match='reads text only. Add GEMINI_API_KEY'):
+    with pytest.raises(ValueError, match='reads text only. Add GROQ_API_KEY or GEMINI_API_KEY'):
         dw.read(str(img), llm, last_close=lambda s, d: None)
     assert [p['provider'] for p in llm.provider_health()] == ['openrouter']
 
@@ -108,6 +110,7 @@ def test_a_withdrawn_free_openrouter_model_is_replaced_by_one_offered_now(monkey
     monkeypatch.setenv('OPENROUTER_API_KEY', 'k')
     monkeypatch.delenv('GEMINI_API_KEY', raising=False)
     monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
+    monkeypatch.delenv('GROQ_API_KEY', raising=False)
     llm = lo.LLMOrchestrator({'primary_llm_provider': 'openrouter',
                               'swarm': {'agents': {'synthesizer': 'meta-llama/llama-3.3-70b-instruct:free'}}})
     listing = {'data': [
@@ -134,3 +137,121 @@ def test_a_withdrawn_free_openrouter_model_is_replaced_by_one_offered_now(monkey
     assert sent[-1] == 'meta-llama/llama-4-maverick:free'                  # remembered, no second 404
     [o] = llm.provider_health()
     assert o['status'] == 'ok' and o['model'] == 'meta-llama/llama-4-maverick:free'
+
+
+# ------------------------------------------------------------------ Groq
+
+def _groq_reply(content):
+    return _reply(200, {'choices': [{'message': {'content': content}}]})
+
+
+@pytest.fixture
+def groq_first(monkeypatch):
+    monkeypatch.setenv('GROQ_API_KEY', 'GSK_SECRET')
+    monkeypatch.setenv('GEMINI_API_KEY', 'g')
+    monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
+    monkeypatch.delenv('OPENROUTER_API_KEY', raising=False)
+    return lo.LLMOrchestrator({'primary_llm_provider': 'groq'})
+
+
+def test_groq_reviews_first_when_it_is_the_main_provider(groq_first, monkeypatch):
+    sent = []
+
+    def post(url, headers=None, json=None, timeout=None):
+        sent.append((url, headers, json))
+        return _groq_reply('{"action": "buy", "confidence": 0.7}')
+    monkeypatch.setattr(lo.requests, 'post', post)
+    assert groq_first._provider_order() == ['groq', 'gemini']
+    assert groq_first.propose_json('sys', 'user') == {'action': 'buy', 'confidence': 0.7}
+    [(url, headers, body)] = sent
+    assert url == lo.GROQ_CHAT_URL and headers['Authorization'] == 'Bearer GSK_SECRET'
+    assert body['model'] == 'llama-3.3-70b-versatile' and body['response_format'] == {'type': 'json_object'}
+    health = {p['provider']: p for p in groq_first.provider_health()}
+    assert health['groq']['status'] == 'ok' and health['groq']['reads_images']
+    assert health['gemini']['status'] == 'unused'
+
+
+def test_when_groq_is_rate_limited_gemini_answers(groq_first, monkeypatch):
+    def post(url, headers=None, json=None, timeout=None):
+        if url == lo.GROQ_CHAT_URL:
+            return _reply(429, {'error': {'message': 'Rate limit reached for model `llama-3.3-70b-versatile` '
+                                                     'on tokens per day (TPD). Please try again in 12m3s.'}})
+        return _reply(200, OK)
+    monkeypatch.setattr(lo.requests, 'post', post)
+    assert groq_first.propose_json('sys', 'user')['action'] == 'buy'
+    health = {p['provider']: p for p in groq_first.provider_health()}
+    assert health['groq']['status'] == 'failing' and 'Groq' in health['groq']['advice']
+    assert 'GSK_SECRET' not in health['groq']['last_error']
+    assert health['gemini']['status'] == 'ok'
+    assert groq_first._cooldown_until['groq'] - lo.time.time() > 1700    # a daily limit: left alone a while
+
+
+def test_a_retired_groq_model_is_replaced_from_groqs_own_list(groq_first, monkeypatch):
+    listing = {'data': [
+        {'id': 'whisper-large-v3', 'active': True, 'context_window': 448},
+        {'id': 'meta-llama/llama-guard-4-12b', 'active': True, 'context_window': 131072},
+        {'id': 'llama-3.3-70b-specdec', 'active': False, 'context_window': 8192},
+        {'id': 'meta-llama/llama-4-scout-17b-16e-instruct', 'active': True, 'context_window': 131072},
+        {'id': 'openai/gpt-oss-120b', 'active': True, 'context_window': 131072},
+    ]}
+    sent, listed = [], []
+
+    def post(url, headers=None, json=None, timeout=None):
+        sent.append(json['model'])
+        if json['model'] == 'llama-3.3-70b-versatile':
+            return _reply(400, {'error': {'message': 'The model `llama-3.3-70b-versatile` has been decommissioned '
+                                                     'and is no longer supported.',
+                                          'code': 'model_decommissioned'}})
+        return _groq_reply('{"action": "hold"}')
+
+    def get(url, headers=None, timeout=None):
+        listed.append(url)
+        return _reply(200, listing)
+    monkeypatch.setattr(lo.requests, 'post', post)
+    monkeypatch.setattr(lo.requests, 'get', get)
+    assert groq_first.propose_json('sys', 'user') == {'action': 'hold'}
+    assert sent == ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b']
+    assert groq_first.propose_json('sys', 'user') == {'action': 'hold'}
+    assert sent[-1] == 'openai/gpt-oss-120b' and len(listed) == 1       # remembered; listed once
+    assert {p['provider']: p for p in groq_first.provider_health()}['groq']['model'] == 'openai/gpt-oss-120b'
+
+
+def test_groq_model_choice_by_family():
+    models = [{'id': 'meta-llama/llama-4-scout-17b-16e-instruct', 'context_window': 131072},
+              {'id': 'meta-llama/llama-4-maverick-17b-128e-instruct', 'context_window': 131072},
+              {'id': 'meta-llama/llama-prompt-guard-2-86m', 'context_window': 512},
+              {'id': 'playai-tts', 'context_window': 8192},
+              {'id': 'llama-3.1-8b-instant', 'context_window': 131072}]
+    assert lo.pick_groq_model(models, vision=True) == 'meta-llama/llama-4-maverick-17b-128e-instruct'
+    assert lo.pick_groq_model(models, vision=True,
+                              exclude={'meta-llama/llama-4-maverick-17b-128e-instruct'}).endswith('scout-17b-16e-instruct')
+    assert lo.pick_groq_model(models, vision=False) == 'meta-llama/llama-4-maverick-17b-128e-instruct'
+    assert lo.pick_groq_model([models[4]], vision=True) is None           # no model that reads pictures
+    assert lo.pick_groq_model([models[4]], vision=False) == 'llama-3.1-8b-instant'
+
+
+def test_a_reply_with_a_code_fence_or_words_around_the_json_is_still_read():
+    assert lo.json_from_text('```json\n{"a": 1}\n```') == {'a': 1}
+    assert lo.json_from_text('Here is the table:\n{"a": {"b": 2}}\nDone.') == {'a': {'b': 2}}
+    assert lo.json_from_text('[1, 2]') is None and lo.json_from_text('no json here') is None
+
+
+def test_groq_reads_the_picture_when_gemini_cannot(groq_first, monkeypatch, tmp_path):
+    from src.agent import daily_whispers as dw
+    from tests.test_daily_whispers import SHEET
+    sent = {}
+
+    def post(url, headers=None, json=None, timeout=None):
+        if url != lo.GROQ_CHAT_URL:
+            return _reply(429, {'error': {'message': 'Resource has been exhausted (e.g. check quota).'}})
+        sent.update(json)
+        return _groq_reply('```json\n' + __import__('json').dumps(SHEET) + '\n```')
+    monkeypatch.setattr(lo.requests, 'post', post)
+    img = tmp_path / 'whispers.jpg'
+    img.write_bytes(b'\xff\xd8')
+    sheet = dw.read(str(img), groq_first, last_close=lambda s, d: None)
+    assert len(sheet['accepted']) == 5 and sheet['as_of'] == '2026-09-24'
+    assert sent['model'] == 'meta-llama/llama-4-scout-17b-16e-instruct'
+    text, image = sent['messages'][0]['content']
+    assert 'Reply with JSON only' in text['text']
+    assert image['image_url']['url'].startswith('data:image/jpeg;base64,')

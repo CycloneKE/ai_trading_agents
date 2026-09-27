@@ -14,6 +14,7 @@ def _make(primary='gemini', monkeypatch=None):
     # Pretend both keys are set so both providers are usable.
     orch.gemini_api_key = 'g'
     orch.openrouter_api_key = 'o'
+    orch.groq_api_key = None
     return orch
 
 

@@ -8,7 +8,7 @@ import { card, SectionHeader, Empty, localTime } from '../ui';
 
 const DOT = { high: theme.colors.danger, medium: theme.colors.warning, low: theme.colors.textMuted, info: theme.colors.accent };
 
-const PROVIDER = { anthropic: 'Claude', gemini: 'Gemini', openrouter: 'OpenRouter' };
+const PROVIDER = { anthropic: 'Claude', groq: 'Groq', gemini: 'Gemini', openrouter: 'OpenRouter' };
 const clock = (ts) => (ts ? new Date(ts * 1000).toLocaleString() : '');
 
 // What the AI services are doing: failing ones need a look when nothing else
@@ -19,7 +19,7 @@ function aiItems(ai) {
     return [{
       key: 'ai-none', severity: 'medium', attention: true,
       message: 'No AI service is set up: trades are reviewed and pictures read without AI.',
-      hint: 'Add GEMINI_API_KEY (free) in Coolify, and ANTHROPIC_API_KEY if you want Claude.',
+      hint: 'Add GROQ_API_KEY or GEMINI_API_KEY (both free) in Coolify, and ANTHROPIC_API_KEY if you want Claude.',
     }];
   }
   const answering = ai.providers.filter((p) => p.status === 'ok');
