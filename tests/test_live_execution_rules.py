@@ -208,3 +208,32 @@ def test_a_blended_order_credits_the_strategies_that_voted_for_it(agent_for):
                                'mean_reversion': {'action': 'sell', 'confidence': 0.7}})
     (row,) = cycle.journal.filled_orders()
     assert json.loads(row['strategy_weights']) == {'momentum': 0.75, 'rsi_strategy': 0.25}
+
+
+def test_an_order_is_sized_from_the_price_the_decision_used_when_yahoo_is_down(tmp_path, monkeypatch):
+    """The US loop used to re-fetch every price from Yahoo before sizing an
+    order and skipped the trade ("no_price") whenever Yahoo throttled the
+    server, although the price the strategies had just evaluated was in
+    hand. That price comes first now; Yahoo only fills a gap."""
+    from src.utils import real_price_feed
+    monkeypatch.setattr(real_price_feed.price_feed, 'get_price', lambda symbol: None)
+    broker = FillingBroker(price=500.0)
+    agent = SimpleNamespace(
+        config=load_config('config/config.json'),
+        components={'broker_manager': SimpleNamespace(get_broker=lambda *a: broker)},
+        order_journal=OrderJournal(db_path=str(tmp_path / 'orders.db')), monitoring_service=None,
+        risk_manager=_NoOp(), event_calendar=SimpleNamespace(risk_multiplier=lambda: 1.0),
+        trading_halted=False, _pdt_blocks_order=lambda *a: False,
+        _cycle_decisions={'SPY': {'symbol': 'SPY', 'price': 500.0}},
+    )
+    agent._position_gate = types.MethodType(TradingAgent._position_gate, agent)
+    signal = {'action': 'buy', 'confidence': 0.9, 'position_size': 0.05, 'strategy': 'ensemble',
+              'per_strategy': {}}                                  # no price on the signal
+    TradingAgent._execute_trades(agent, {'SPY': dict(signal)}, {})
+    assert [o.side for o in broker.orders] == ['buy']
+    assert agent._cycle_decisions['SPY'].get('skip_reason') is None
+
+    agent._cycle_decisions = {'SPY': {'symbol': 'SPY'}}               # no price anywhere
+    broker.held.clear()
+    TradingAgent._execute_trades(agent, {'SPY': dict(signal)}, {})
+    assert agent._cycle_decisions['SPY']['skip_reason'] == 'no_price' and len(broker.orders) == 1

@@ -192,7 +192,10 @@ def read(path: str, llm, today: Optional[date] = None,
     reading = llm.read_image_json(SYSTEM_PROMPT, USER_PROMPT, base64.b64encode(data).decode(),
                                   media_type, SCHEMA)
     if not isinstance(reading, dict):
-        raise ValueError('no AI model could read the image; try again later')
+        why = '; '.join(what if who == 'setup' else f"{who}: {what}"
+                        for who, what in getattr(llm, 'last_image_errors', None) or [])
+        raise ValueError(f"no AI model could read the image ({why})" if why
+                         else 'no AI model could read the image; try again later')
     on = parse_date(reading.get('report_date'), today)
     accepted, rejected = verify(reading, on or today, last_close or last_real_close)
     if not accepted and not rejected:

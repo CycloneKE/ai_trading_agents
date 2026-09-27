@@ -6,8 +6,57 @@ import os
 import json
 import logging
 import time
+import re
 import requests
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
+
+GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+# Tried in turn when the configured Gemini model answers 404, which is what
+# Google returns once a model is retired. The first that answers is kept.
+GEMINI_FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-flash-latest", "gemini-2.5-flash-lite")
+
+
+KEY_NAMES = {'anthropic': 'ANTHROPIC_API_KEY', 'gemini': 'GEMINI_API_KEY', 'openrouter': 'OPENROUTER_API_KEY'}
+
+
+def advice(provider: str, error: Optional[str]) -> str:
+    """What the operator can do about a provider's last failure."""
+    e = (error or '').lower()
+    if 'http 401' in e or 'http 403' in e or 'api key' in e or 'permission' in e:
+        return f"The service refused the key: check {KEY_NAMES.get(provider, 'the API key')} in Coolify."
+    if 'http 429' in e or 'quota' in e or 'rate' in e:
+        return ("The free allowance is used up for now; Gemini's resets daily. It recovers on its own."
+                if provider != 'anthropic' else "Claude is rate-limited for now; it recovers on its own.")
+    if 'budget' in e:
+        return "This month's Claude budget is used up; the free models take over until next month."
+    if 'http 404' in e:
+        if provider == 'gemini':
+            return ("The Gemini model named in config.json is no longer offered. The agent now tries "
+                    "newer ones on its own; if this stays, set gemini_model to gemini-2.5-flash.")
+        if provider == 'openrouter':
+            return ("The OpenRouter model is no longer offered: set swarm.agents.synthesizer in "
+                    "config.json to a current free model.")
+    return "The service did not answer; this usually clears on its own."
+
+
+def describe_error(err: Exception) -> str:
+    """A short, safe account of a failed AI call for the dashboard: the
+    HTTP status and the provider's own message, never the request URL (the
+    Gemini key used to travel in it)."""
+    resp = getattr(err, 'response', None)
+    code = getattr(resp, 'status_code', None) or getattr(err, 'status_code', None)
+    msg = ''
+    if resp is not None:
+        try:
+            body = resp.json()
+            e = body.get('error') if isinstance(body, dict) else None
+            msg = (e.get('message') if isinstance(e, dict) else e) or ''
+        except Exception:
+            msg = ''
+    if not msg:
+        msg = getattr(err, 'message', None) or (str(err) if resp is None else '') or type(err).__name__
+    text = f"HTTP {code}: {msg}" if code else str(msg)
+    return re.sub(r'key=[^&\s]+', 'key=...', ' '.join(str(text).split()))[:220]
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +82,10 @@ class LLMOrchestrator:
         # hammering it every cycle and flooding the log.
         self.cooldown_seconds = config.get('llm_cooldown_seconds', 60)
         self._cooldown_until: Dict[str, float] = {}  # provider -> epoch
+        # Each provider's recent record, for the dashboard: when it last
+        # answered, and what it said when it last failed.
+        self._health: Dict[str, Dict[str, Any]] = {}
+        self.last_image_errors: List[tuple] = []
 
         # Paid tier: Claude, off unless ANTHROPIC_API_KEY is set, and then
         # held to a monthly budget (claude_provider.py, ai_budget.py). The
@@ -87,16 +140,53 @@ class LLMOrchestrator:
             if self._cooldown_until.get(provider, 0) > now:
                 continue
             try:
-                return callers[provider](system_prompt, user_prompt, fallback,
-                                         model_override=model_override)
+                result = callers[provider](system_prompt, user_prompt, fallback,
+                                           model_override=model_override)
+                self._record(provider)
+                return result
             except Exception as e:
+                self._record(provider, e)
                 if self._status_code(e) == 429:
                     self._cooldown_until[provider] = now + self.cooldown_seconds
                     logger.warning(f"LLM provider '{provider}' rate-limited (429); "
                                    f"cooling down {self.cooldown_seconds}s, using fallback provider.")
-                else:
-                    logger.debug(f"LLM provider '{provider}' failed: {e}")
         return fallback
+
+    def _record(self, provider: str, err: Optional[Exception] = None) -> None:
+        """Note a provider's answer or failure. The first failure after a
+        success is logged as a warning (it used to be debug only, so an
+        outage never showed); repeats are logged every 20th time."""
+        h = self._health.setdefault(provider, {'last_ok': None, 'last_error': None,
+                                               'last_error_at': None, 'failures': 0})
+        if err is None:
+            h['last_ok'], h['failures'] = time.time(), 0
+            return
+        h['last_error'], h['last_error_at'] = describe_error(err), time.time()
+        h['failures'] += 1
+        if h['failures'] == 1 or h['failures'] % 20 == 0:
+            logger.warning(f"AI provider '{provider}' failed ({h['failures']} in a row): {h['last_error']}")
+
+    def provider_health(self) -> List[Dict[str, Any]]:
+        """Each configured AI provider: its model, whether it can read
+        pictures, and whether it is answering."""
+        out = []
+        configured = [('anthropic', self.claude is not None,
+                       self.claude.review_model if self.claude else None, True),
+                      ('gemini', bool(self.gemini_api_key), self.gemini_model, True),
+                      ('openrouter', bool(self.openrouter_api_key),
+                       self.config.get("swarm", {}).get("agents", {}).get("synthesizer"), False)]
+        for name, on, model, sees in configured:
+            if not on:
+                continue
+            h = self._health.get(name, {})
+            failing = bool(h.get('failures')) and (h.get('last_ok') is None
+                                                   or h['last_error_at'] > h['last_ok'])
+            out.append({'provider': name, 'model': model, 'reads_images': sees,
+                        'advice': advice(name, h.get('last_error')) if failing else None,
+                        'status': 'failing' if failing else ('ok' if h.get('last_ok') else 'unused'),
+                        'last_ok': h.get('last_ok'), 'last_error': h.get('last_error'),
+                        'last_error_at': h.get('last_error_at'), 'failures': h.get('failures', 0)})
+        return out
 
     def validate_trade(self, symbol: str, strategy_signal: Dict[str, Any], market_data: Dict[str, Any], news_data: list = None, research_context: Dict[str, Any] = None, sector_outlook: Dict[str, Any] = None, track_record: str = None) -> Dict[str, Any]:
         """
@@ -260,42 +350,72 @@ class LLMOrchestrator:
         one: Claude while it has budget, then Gemini. OpenRouter's free model
         is text only. None when neither answers."""
         import time as _time
+        self.last_image_errors = []
         callers = []
         if self.claude is not None and self.claude.available():
             callers.append(('anthropic', lambda: self.claude.read_image_json(
                 system_prompt, user_prompt, image_b64, media_type, schema)))
+        elif self.claude is not None:
+            self.last_image_errors.append(('Claude', "this month's AI budget is used up"))
         if self.gemini_api_key:
             callers.append(('gemini', lambda: self._gemini_image(
                 system_prompt, user_prompt, image_b64, media_type)))
+        if not callers and not self.last_image_errors:
+            self.last_image_errors.append((
+                'setup', 'no AI service that can read pictures is set up: the OpenRouter model '
+                         'reads text only. Add GEMINI_API_KEY (free) or ANTHROPIC_API_KEY in Coolify'))
+        names = {'anthropic': 'Claude', 'gemini': 'Gemini'}
         for provider, call in callers:
             if self._cooldown_until.get(provider, 0) > _time.time():
+                self.last_image_errors.append((names[provider], 'rate-limited a moment ago; try again in a minute'))
                 continue
             try:
                 result = call()
+                self._record(provider)
                 if isinstance(result, dict):
                     return result
+                self.last_image_errors.append((names[provider], 'answered, but not with the table'))
             except Exception as e:
+                self._record(provider, e)
                 if self._status_code(e) == 429:
                     self._cooldown_until[provider] = _time.time() + self.cooldown_seconds
-                logger.warning(f"Image reading by '{provider}' failed: {e}")
+                self.last_image_errors.append((names[provider], describe_error(e)))
         return None
 
     def _gemini_image(self, system_prompt: str, user_prompt: str, image_b64: str,
                       media_type: str) -> Optional[Dict[str, Any]]:
-        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{self.gemini_model}:generateContent?key={self.gemini_api_key}")
         data = {
             "contents": [{"parts": [
                 {"inline_data": {"mime_type": media_type, "data": image_b64}},
                 {"text": f"{system_prompt}\n\n{user_prompt}"}]}],
             "generationConfig": {"response_mime_type": "application/json", "temperature": 0},
         }
-        response = requests.post(url, headers={"Content-Type": "application/json"},
-                                 json=data, timeout=60)
-        response.raise_for_status()
+        response = self._gemini_post(data, timeout=60)
         text = response.json()['candidates'][0]['content']['parts'][0]['text']
         result = json.loads(text)
         return result if isinstance(result, dict) else None
+
+    def _gemini_post(self, data: Dict[str, Any], timeout: float, model: Optional[str] = None):
+        """POST to Gemini with the key in a header, not the URL, so it never
+        appears in an error message or a log. When the model answers 404
+        (retired), newer models are tried and the first that answers kept."""
+        first = model or self.gemini_model
+        headers = {"Content-Type": "application/json", "x-goog-api-key": self.gemini_api_key or ''}
+        tried = [first] + [m for m in GEMINI_FALLBACK_MODELS if m != first]
+        response = None
+        for candidate in tried:
+            response = requests.post(GEMINI_ENDPOINT.format(model=candidate), headers=headers,
+                                     json=data, timeout=timeout)
+            if response.status_code == 404 and candidate != tried[-1]:
+                continue
+            response.raise_for_status()
+            if candidate != first:
+                logger.warning(f"Gemini model '{first}' is not available (404); using '{candidate}' instead. "
+                               f"Set gemini_model in config.json to make it permanent.")
+                if first == self.gemini_model:
+                    self.gemini_model = candidate
+            return response
+        return response
 
     def _call_openrouter(self, system_prompt: str, user_prompt: str, fallback_signal: Optional[Dict[str, Any]], model_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
         url = "https://openrouter.ai/api/v1/chat/completions"
@@ -340,11 +460,6 @@ class LLMOrchestrator:
             # use the configured valid Gemini model instead.
             model = self.gemini_model
             
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.gemini_api_key}"
-        headers = {
-            "Content-Type": "application/json"
-        }
-        
         data = {
             "contents": [{
                 "parts": [{"text": f"{system_prompt}\n\nUser Data:\n{user_prompt}"}]
@@ -354,9 +469,7 @@ class LLMOrchestrator:
             }
         }
         
-        response = requests.post(url, headers=headers, json=data, timeout=15)
-        response.raise_for_status()
-        
+        response = self._gemini_post(data, timeout=15, model=model)
         result_text = response.json()['candidates'][0]['content']['parts'][0]['text']
         try:
             result = json.loads(result_text)

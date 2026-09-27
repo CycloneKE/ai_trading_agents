@@ -111,3 +111,10 @@ def test_scan_sorts_by_severity():
     assert out[0]['severity'] == 'high'
     assert all(A.SEVERITY_RANK[out[i]['severity']] <= A.SEVERITY_RANK[out[i+1]['severity']]
                for i in range(len(out) - 1))
+
+
+def test_a_block_is_said_once_not_again_as_a_persistent_skip():
+    decisions = [dec('NVDA', action='buy', skip='no_price') for _ in range(14)]
+    out = A.scan(decisions, [])
+    assert [a['type'] for a in out if a['symbol'] == 'NVDA'] == ['blocked_intent']
+    assert 'could not get a current price' in out[0]['message']
