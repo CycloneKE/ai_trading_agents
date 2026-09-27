@@ -12,6 +12,7 @@ const REASON_LABEL = {
   llm_veto: 'LLM vetoed the trade',
   fallback_price: 'Price was synthetic fallback',
   stale_price: 'Latest price is too old (stock suspended or not trading)',
+  market_closed: 'US market closed; looked at again when it opens',
   halted: 'Trading halted (kill switch)',
   risk_limits: 'Portfolio risk limit hit',
   pdt_guard: 'Pattern-day-trader block',

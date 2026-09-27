@@ -237,3 +237,26 @@ def test_an_order_is_sized_from_the_price_the_decision_used_when_yahoo_is_down(t
     broker.held.clear()
     TradingAgent._execute_trades(agent, {'SPY': dict(signal)}, {})
     assert agent._cycle_decisions['SPY']['skip_reason'] == 'no_price' and len(broker.orders) == 1
+
+
+def test_signals_that_cannot_trade_are_settled_before_the_ai_is_asked():
+    """Every non-hold signal used to go to the AI review first, every 15
+    minutes all day: holdings the agent would not add to, sells of nothing,
+    US stocks at the weekend. That spent the free AI allowance on signals
+    that could never become orders."""
+    from datetime import datetime, timezone
+    saturday = datetime(2026, 9, 26, 15, 0, tzinfo=timezone.utc)
+    monday = datetime(2026, 9, 28, 15, 0, tzinfo=timezone.utc)          # 11:00 in New York
+    broker = FillingBroker(price=500.0, held=10)                           # holds SPY at 500
+    agent = SimpleNamespace(config=load_config('config/config.json'),
+                            components={'broker_manager': SimpleNamespace(get_broker=lambda *a: broker)})
+    agent._position_gate = types.MethodType(TradingAgent._position_gate, agent)
+    gate = lambda *a, **k: TradingAgent._held_back_before_review(agent, *a, **k)
+
+    assert gate('SPY', 'buy', 500.0, now=saturday) == 'market_closed'
+    assert gate('SPY', 'buy', 510.0, now=monday) == 'add_not_profitable'  # 2% up; adds need 5%
+    assert gate('SPY', 'buy', 530.0, now=monday) is None                  # may add: let the AI look
+    assert gate('QQQ', 'sell', 400.0, now=monday) == 'no_position'
+    assert gate('QQQ', 'buy', 400.0, now=monday) is None                  # a new position: review it
+    broker.held['BTC-USD'] = 0.1
+    assert gate('BTC-USD', 'buy', 60000.0, now=saturday) == 'already_held'  # crypto trades at weekends; no adds

@@ -199,6 +199,7 @@ def test_without_claude_the_free_gemini_model_reads_it(monkeypatch):
     monkeypatch.setenv('GEMINI_API_KEY', 'g')
     monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
     monkeypatch.delenv('OPENROUTER_API_KEY', raising=False)
+    monkeypatch.delenv('GROQ_API_KEY', raising=False)
     posted = {}
 
     def post(url, headers=None, json=None, timeout=None):

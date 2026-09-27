@@ -10,6 +10,7 @@ the `config` dict (config.json 'anomalies' section).
 """
 
 from collections import defaultdict
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 DEFAULTS = {
@@ -18,6 +19,7 @@ DEFAULTS = {
     'persistent_skip_min': 4,    # same systemic skip reason N times -> flag
     'disagreement_conf': 0.6,    # both a strong buy AND strong sell signal
     'drawdown_warn_frac': 0.8,   # drawdown within 80% of the cap -> flag
+    'window_hours': 12,          # only checks this recent count; older ones have been acted on
 }
 
 # Skip reasons that indicate a *systemic* problem worth surfacing (vs. the
@@ -54,6 +56,7 @@ HELD_BACK = {
     'llm_veto': "the AI review advised against it",
     'dissent': "no strategy agreed with the direction",
     'liquidity_cap': "the stock trades too thinly to buy even one share within the volume limit",
+    'market_closed': "the US market is closed; the signal is looked at again when it opens",
 }
 BLOCKED = {
     'insufficient_cash': ("there was not enough paper cash",
@@ -108,20 +111,21 @@ def detect_blocked_intent(decisions: List[Dict[str, Any]], threshold: int) -> Li
         side = max(sides, key=sides.get)
         blocked = {k: n for k, n in reasons.items() if k not in HELD_BACK}
         n_blocked = sum(blocked.values())
+        last_at = max((str(r.get('ts')) for r in signalled if r.get('ts')), default=None)
         if n_blocked >= threshold:
             top = max(blocked, key=blocked.get)
             why, hint = BLOCKED.get(top, (f"of '{top}'", None))
             out.append(_anom('high', symbol, 'blocked_intent',
                              f"{symbol}: a {side} signal could not be carried out on {n_blocked} checks, "
                              f"because {why}.", hint=hint,
-                             count=n_blocked, reasons=dict(reasons)))
+                             count=n_blocked, reasons=dict(reasons), last_at=last_at))
             continue
         top = max(reasons, key=reasons.get)
         out.append(_anom('info', symbol, 'held_back',
                          f"{symbol}: {side} signal on {len(signalled)} checks, held back on purpose "
                          f"because {HELD_BACK.get(top, top)}.",
                          hint='No action needed: this is a rule working as designed.',
-                         count=len(signalled), reasons=dict(reasons)))
+                         count=len(signalled), reasons=dict(reasons), last_at=last_at))
     return out
 
 
@@ -211,12 +215,25 @@ def detect_drawdown(risk_report: Optional[Dict[str, Any]], warn_frac: float,
 SEVERITY_RANK = {'high': 0, 'medium': 1, 'low': 2, 'info': 3}
 
 
+def recent_only(decisions: List[Dict[str, Any]], hours: float,
+                now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """The decisions logged in the last `hours` (times are UTC). A row
+    without a time is kept. Older checks describe problems already fixed or
+    gone, and kept a notice alive for days."""
+    if not hours:
+        return decisions
+    cutoff = ((now or datetime.utcnow()) - timedelta(hours=float(hours))).isoformat()
+    return [d for d in decisions if not d.get('ts') or str(d['ts'])[:26] >= cutoff[:26]]
+
+
 def scan(decisions: List[Dict[str, Any]], orders: List[Dict[str, Any]],
          risk_report: Optional[Dict[str, Any]] = None,
          max_drawdown_cap: float = 0.10,
-         config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+         config: Optional[Dict[str, Any]] = None,
+         now: Optional[datetime] = None) -> List[Dict[str, Any]]:
     """Run all detectors and return anomalies, most severe first."""
     cfg = {**DEFAULTS, **(config or {})}
+    decisions = recent_only(decisions, cfg['window_hours'], now)
     anomalies = []
     anomalies += detect_blocked_intent(decisions, cfg['blocked_intent_min'])
     anomalies += detect_high_slippage(orders, cfg['high_slippage_bps'])

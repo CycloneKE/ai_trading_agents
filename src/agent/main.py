@@ -371,6 +371,40 @@ class TradingAgent:
             logger.error(f"Failed to initialize components: {str(e)}")
             raise
     
+    def _held_back_before_review(self, symbol: str, action: Optional[str],
+                                 price: Optional[float], now: Optional[datetime] = None) -> Optional[str]:
+        """Why a US or crypto signal cannot become an order, found before the
+        AI is asked to review it, or None when it might.
+
+        Only what is certain is settled here; anything else goes to the
+        review and then to _execute_trades, which applies every rule again.
+        An add is held back only when the price is below the average entry
+        plus the add rule's minimum gain: adds happen only on the way up, so
+        the last entry is at or above the average, and plan_add would refuse.
+        """
+        from src.agent.core_portfolio import us_session_open
+        market = classify(symbol, self.config)
+        if market == 'us_equity' and not us_session_open(now):
+            return 'market_closed'
+        bm = self.components.get('broker_manager')
+        if bm is None:
+            return None
+        broker = bm.get_broker('coinbase_broker') if market == 'crypto' else None
+        if not broker or not getattr(broker, 'is_connected', False):
+            broker = bm.get_broker()
+        if not broker or not getattr(broker, 'is_connected', False):
+            return None
+        allowed, why, held, avg_entry = self._position_gate(broker, symbol, action)
+        if not allowed:
+            return why
+        if action == 'buy' and held > 0:
+            add_rule = rule(LIVE_ADD_DEFAULTS, self.config.get('trading', {}).get('add_to_winners'))
+            if not add_rule.get('enabled') or market not in add_rule.get('markets', []):
+                return 'already_held'
+            if price and avg_entry and price < avg_entry * (1 + float(add_rule['min_gain_pct'])):
+                return 'add_not_profitable'
+        return None
+
     def _position_gate(self, broker, symbol: str, action: str):
         """The backtest's position rules, applied before any order.
 
@@ -980,6 +1014,18 @@ class TradingAgent:
                                     }
 
                                 if symbol_signals and symbol_signals.get('action') != 'hold':
+                                    # Settle what cannot become an order before paying
+                                    # for an AI review: a sell of nothing held, an add
+                                    # the holding has not earned, a US stock while its
+                                    # market is shut. These were reviewed every 15
+                                    # minutes all day, which spent the free AI
+                                    # allowance on signals that could never trade.
+                                    held_back = TradingAgent._held_back_before_review(
+                                        self, symbol, symbol_signals.get('action'), price)
+                                    if held_back:
+                                        dec['skip_reason'] = held_back
+                                        continue
+
                                     # Modify position size dynamically based on adaptive integration
                                     confidence = symbol_signals.get('confidence', 0.5)
                                     broker_manager = self.components.get('broker_manager')

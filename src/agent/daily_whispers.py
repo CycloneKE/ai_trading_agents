@@ -188,7 +188,8 @@ def read(path: str, llm, today: Optional[date] = None,
     if len(data) > MAX_IMAGE_BYTES:
         raise ValueError(f'image is {len(data) / 1e6:.1f} MB; the limit is 5 MB')
     if llm is None or not hasattr(llm, 'read_image_json') or not getattr(llm, 'enabled', False):
-        raise ValueError('no AI model is set up to read images (needs GEMINI_API_KEY or ANTHROPIC_API_KEY)')
+        raise ValueError('no AI model is set up to read images (needs GROQ_API_KEY, GEMINI_API_KEY '
+                         'or ANTHROPIC_API_KEY)')
     reading = llm.read_image_json(SYSTEM_PROMPT, USER_PROMPT, base64.b64encode(data).decode(),
                                   media_type, SCHEMA)
     if not isinstance(reading, dict):

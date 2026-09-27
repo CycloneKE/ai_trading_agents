@@ -118,3 +118,15 @@ def test_a_block_is_said_once_not_again_as_a_persistent_skip():
     out = A.scan(decisions, [])
     assert [a['type'] for a in out if a['symbol'] == 'NVDA'] == ['blocked_intent']
     assert 'could not get a current price' in out[0]['message']
+
+
+def test_only_recent_checks_count_and_the_last_one_is_shown():
+    from datetime import datetime, timedelta
+    now = datetime(2026, 9, 27, 4, 0)
+    old = [dict(dec('TSLA', action='buy', skip='no_price'), ts=(now - timedelta(hours=20)).isoformat())
+           for _ in range(12)]
+    new = [dict(dec('NVDA', action='buy', skip='add_not_profitable'), ts=(now - timedelta(minutes=m)).isoformat())
+           for m in range(30, 0, -5)]
+    out = A.scan(old + new, [], now=now)
+    assert [a['symbol'] for a in out] == ['NVDA']                          # the fixed problem has dropped off
+    assert out[0]['detail']['last_at'] == (now - timedelta(minutes=5)).isoformat()

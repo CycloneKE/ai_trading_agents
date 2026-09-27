@@ -14,9 +14,25 @@ GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{mode
 # Tried in turn when the configured Gemini model answers 404, which is what
 # Google returns once a model is retired. The first that answers is kept.
 GEMINI_FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-flash-latest", "gemini-2.5-flash-lite")
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+# Free OpenRouter models come and go. When the configured one is withdrawn,
+# a free model that returns JSON is picked from OpenRouter's own list, these
+# families first, larger context windows first within a family.
+FREE_MODEL_FAMILIES = ("meta-llama/", "deepseek/", "qwen/", "mistralai/", "google/", "openai/", "nvidia/")
+QUOTA_COOLDOWN_SECONDS = 1800   # a spent daily allowance: stop asking for a while
+GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models"
+# Used when Groq retires the configured model: the first of these families
+# that Groq still lists, larger context windows first. Vision reads the
+# rating-sheet pictures, so only models that accept images qualify there.
+GROQ_TEXT_FAMILIES = ("llama-3.3-70b", "openai/gpt-oss-120b", "llama-4-maverick", "qwen", "kimi",
+                      "llama-4-scout", "openai/gpt-oss", "llama")
+GROQ_VISION_FAMILIES = ("llama-4-maverick", "llama-4-scout")
+GROQ_NOT_CHAT = ("whisper", "guard", "tts", "orpheus", "playai", "distil")
 
 
-KEY_NAMES = {'anthropic': 'ANTHROPIC_API_KEY', 'gemini': 'GEMINI_API_KEY', 'openrouter': 'OPENROUTER_API_KEY'}
+KEY_NAMES = {'anthropic': 'ANTHROPIC_API_KEY', 'gemini': 'GEMINI_API_KEY',
+             'openrouter': 'OPENROUTER_API_KEY', 'groq': 'GROQ_API_KEY'}
 
 
 def advice(provider: str, error: Optional[str]) -> str:
@@ -25,18 +41,49 @@ def advice(provider: str, error: Optional[str]) -> str:
     if 'http 401' in e or 'http 403' in e or 'api key' in e or 'permission' in e:
         return f"The service refused the key: check {KEY_NAMES.get(provider, 'the API key')} in Coolify."
     if 'http 429' in e or 'quota' in e or 'rate' in e:
-        return ("The free allowance is used up for now; Gemini's resets daily. It recovers on its own."
-                if provider != 'anthropic' else "Claude is rate-limited for now; it recovers on its own.")
+        if provider == 'anthropic':
+            return "Claude is rate-limited for now; it recovers on its own."
+        if provider == 'groq':
+            return "Groq's free limit is used up for now; it resets within the day and recovers on its own."
+        return "The free allowance is used up for now; Gemini's resets daily. It recovers on its own."
     if 'budget' in e:
         return "This month's Claude budget is used up; the free models take over until next month."
     if 'http 404' in e:
         if provider == 'gemini':
             return ("The Gemini model named in config.json is no longer offered. The agent now tries "
                     "newer ones on its own; if this stays, set gemini_model to gemini-2.5-flash.")
+        if provider == 'groq':
+            return ("The Groq model named in config.json was retired. The agent now picks a current "
+                    "one on its own; if this stays, set groq_model in config.json.")
         if provider == 'openrouter':
-            return ("The OpenRouter model is no longer offered: set swarm.agents.synthesizer in "
-                    "config.json to a current free model.")
+            return ("The OpenRouter model is no longer offered. The agent now picks a current free "
+                    "model on its own; if this stays, set swarm.agents.synthesizer in config.json.")
     return "The service did not answer; this usually clears on its own."
+
+
+def cooldown_for(err: Exception, default: float) -> float:
+    """How long to leave a rate-limited provider alone: the provider's own
+    Retry-After or retryDelay when it gives one; half an hour when the
+    message says a quota is spent (a daily allowance does not come back in
+    a minute, and Groq's daily token limit says "per day"); otherwise the
+    default."""
+    resp = getattr(err, 'response', None)
+    try:
+        after = (getattr(resp, 'headers', None) or {}).get('Retry-After')
+        if after:
+            return max(float(after), default)
+    except (TypeError, ValueError):
+        pass
+    try:
+        body = resp.json() if resp is not None else {}
+        for d in (body.get('error') or {}).get('details') or []:
+            delay = str(d.get('retryDelay') or '')
+            if delay.endswith('s'):
+                return max(float(delay[:-1]), default)
+    except Exception:
+        pass
+    said = describe_error(err).lower()
+    return QUOTA_COOLDOWN_SECONDS if 'quota' in said or 'per day' in said else default
 
 
 def describe_error(err: Exception) -> str:
@@ -55,6 +102,10 @@ def describe_error(err: Exception) -> str:
             msg = ''
     if not msg:
         msg = getattr(err, 'message', None) or (str(err) if resp is None else '') or type(err).__name__
+    # Keep the provider's own sentence; drop its links and "for more
+    # information" tails, which only cut off mid-address on the dashboard.
+    msg = re.split(r'\s(?:For more information|To monitor|Learn more)', str(msg))[0]
+    msg = re.sub(r'https?://\S+', '', msg).strip(' .') + '.'
     text = f"HTTP {code}: {msg}" if code else str(msg)
     return re.sub(r'key=[^&\s]+', 'key=...', ' '.join(str(text).split()))[:220]
 
@@ -65,6 +116,12 @@ class LLMOrchestrator:
         self.config = config
         self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
         self.gemini_api_key = os.getenv("GEMINI_API_KEY")
+        # Groq: free tier, fast, OpenAI-style API; one of its models reads
+        # pictures too. Model names can be changed in config.json.
+        self.groq_api_key = os.getenv("GROQ_API_KEY")
+        self.groq_model = config.get("groq_model", "llama-3.3-70b-versatile")
+        self.groq_vision_model = config.get("groq_vision_model", "meta-llama/llama-4-scout-17b-16e-instruct")
+        self._groq_models_cache: tuple = (0.0, [])
 
         # Determine primary model strategy
         self.primary_provider = config.get("primary_llm_provider", "openrouter")
@@ -86,6 +143,9 @@ class LLMOrchestrator:
         # answered, and what it said when it last failed.
         self._health: Dict[str, Dict[str, Any]] = {}
         self.last_image_errors: List[tuple] = []
+        # OpenRouter models found withdrawn, and the free model used instead.
+        self._withdrawn_models: set = set()
+        self._openrouter_substitute: Optional[str] = None
 
         # Paid tier: Claude, off unless ANTHROPIC_API_KEY is set, and then
         # held to a monthly budget (claude_provider.py, ai_budget.py). The
@@ -104,7 +164,7 @@ class LLMOrchestrator:
                         f"{self.claude.volume_model} does volume work, "
                         f"${budget.cap:.2f}/month cap")
 
-        if not self.openrouter_api_key and not self.gemini_api_key and self.claude is None:
+        if not (self.openrouter_api_key or self.gemini_api_key or self.groq_api_key) and self.claude is None:
             logger.warning("No LLM API keys found. LLM Orchestrator will be disabled.")
             self.enabled = False
 
@@ -114,10 +174,10 @@ class LLMOrchestrator:
         bidirectional fallback regardless of which is primary (the old code
         only fell back openrouter->gemini)."""
         order = ([self.primary_provider] +
-                 [p for p in ('gemini', 'openrouter') if p != self.primary_provider])
-        free = [p for p in order
-                if (p == 'gemini' and self.gemini_api_key)
-                or (p == 'openrouter' and self.openrouter_api_key)]
+                 [p for p in ('groq', 'gemini', 'openrouter') if p != self.primary_provider])
+        keys = {'groq': self.groq_api_key, 'gemini': self.gemini_api_key,
+                'openrouter': self.openrouter_api_key}
+        free = [p for p in order if keys.get(p)]
         paid = ['anthropic'] if self.claude is not None and self.claude.available() else []
         return paid + free
 
@@ -134,6 +194,7 @@ class LLMOrchestrator:
         import time as _time
         now = _time.time()
         callers = {'gemini': self._call_gemini, 'openrouter': self._call_openrouter,
+                   'groq': self._call_groq,
                    'anthropic': lambda s, u, fb, model_override=None:
                        self._call_claude(s, u, fb, model_override, purpose)}
         for provider in self._provider_order():
@@ -147,9 +208,10 @@ class LLMOrchestrator:
             except Exception as e:
                 self._record(provider, e)
                 if self._status_code(e) == 429:
-                    self._cooldown_until[provider] = now + self.cooldown_seconds
+                    wait = cooldown_for(e, self.cooldown_seconds)
+                    self._cooldown_until[provider] = now + wait
                     logger.warning(f"LLM provider '{provider}' rate-limited (429); "
-                                   f"cooling down {self.cooldown_seconds}s, using fallback provider.")
+                                   f"cooling down {wait:.0f}s, using fallback provider.")
         return fallback
 
     def _record(self, provider: str, err: Optional[Exception] = None) -> None:
@@ -172,9 +234,11 @@ class LLMOrchestrator:
         out = []
         configured = [('anthropic', self.claude is not None,
                        self.claude.review_model if self.claude else None, True),
+                      ('groq', bool(self.groq_api_key), self.groq_model, True),
                       ('gemini', bool(self.gemini_api_key), self.gemini_model, True),
                       ('openrouter', bool(self.openrouter_api_key),
-                       self.config.get("swarm", {}).get("agents", {}).get("synthesizer"), False)]
+                       self._openrouter_substitute
+                       or self.config.get("swarm", {}).get("agents", {}).get("synthesizer"), False)]
         for name, on, model, sees in configured:
             if not on:
                 continue
@@ -310,7 +374,7 @@ class LLMOrchestrator:
         secondary = providers[1]
         try:
             dispatch = {'openrouter': self._call_openrouter, 'gemini': self._call_gemini,
-                        'anthropic': self._call_claude}
+                        'groq': self._call_groq, 'anthropic': self._call_claude}
             fn = dispatch.get(secondary)
             if fn:
                 result = fn(system_prompt, user_prompt, None)
@@ -360,11 +424,15 @@ class LLMOrchestrator:
         if self.gemini_api_key:
             callers.append(('gemini', lambda: self._gemini_image(
                 system_prompt, user_prompt, image_b64, media_type)))
+        if self.groq_api_key:
+            callers.append(('groq', lambda: self._groq_image(
+                system_prompt, user_prompt, image_b64, media_type)))
         if not callers and not self.last_image_errors:
             self.last_image_errors.append((
                 'setup', 'no AI service that can read pictures is set up: the OpenRouter model '
-                         'reads text only. Add GEMINI_API_KEY (free) or ANTHROPIC_API_KEY in Coolify'))
-        names = {'anthropic': 'Claude', 'gemini': 'Gemini'}
+                         'reads text only. Add GROQ_API_KEY or GEMINI_API_KEY (both free), or '
+                         'ANTHROPIC_API_KEY, in Coolify'))
+        names = {'anthropic': 'Claude', 'gemini': 'Gemini', 'groq': 'Groq'}
         for provider, call in callers:
             if self._cooldown_until.get(provider, 0) > _time.time():
                 self.last_image_errors.append((names[provider], 'rate-limited a moment ago; try again in a minute'))
@@ -378,7 +446,7 @@ class LLMOrchestrator:
             except Exception as e:
                 self._record(provider, e)
                 if self._status_code(e) == 429:
-                    self._cooldown_until[provider] = _time.time() + self.cooldown_seconds
+                    self._cooldown_until[provider] = _time.time() + cooldown_for(e, self.cooldown_seconds)
                 self.last_image_errors.append((names[provider], describe_error(e)))
         return None
 
@@ -426,20 +494,34 @@ class LLMOrchestrator:
         }
         
         model = model_override or self.config.get("swarm", {}).get("agents", {}).get("synthesizer", "meta-llama/llama-3.1-8b-instruct")
-        
-        # Allow up to 45 seconds for DeepSeek-R1 or o1 models to produce thinking tokens
-        timeout = 45 if ("r1" in model.lower() or "o1" in model.lower()) else 15
-        
-        data = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "response_format": {"type": "json_object"}
-        }
-        
-        response = requests.post(url, headers=headers, json=data, timeout=timeout)
+        if model in self._withdrawn_models and self._openrouter_substitute:
+            model = self._openrouter_substitute
+
+        def post(model_id):
+            # Allow up to 45 seconds for DeepSeek-R1 or o1 models to produce thinking tokens
+            timeout = 45 if ("r1" in model_id.lower() or "o1" in model_id.lower()) else 15
+            data = {
+                "model": model_id,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "response_format": {"type": "json_object"}
+            }
+            return requests.post(url, headers=headers, json=data, timeout=timeout)
+
+        response = post(model)
+        if response.status_code == 404:
+            # The model is withdrawn (free versions are, from time to time):
+            # use a free model that is offered now, and keep using it.
+            self._withdrawn_models.add(model)
+            substitute = self._free_openrouter_model()
+            if substitute:
+                logger.warning(f"OpenRouter model '{model}' is no longer offered; using the free "
+                               f"model '{substitute}' instead. Set swarm.agents.synthesizer in "
+                               f"config.json to choose another.")
+                self._openrouter_substitute = model = substitute
+                response = post(model)
         response.raise_for_status()
         
         result_text = response.json()['choices'][0]['message']['content']
@@ -451,6 +533,92 @@ class LLMOrchestrator:
         except json.JSONDecodeError:
             logger.error(f"Failed to decode OpenRouter JSON response. Model: {model}. Text: {result_text}")
             return fallback_signal
+
+    # ------------------------------------------------------------------ Groq
+
+    def _groq_post(self, messages: List[Dict[str, Any]], vision: bool = False,
+                   json_mode: bool = True, timeout: float = 20):
+        """POST a chat to Groq. When Groq says the model is gone (retired or
+        unknown), a current one is picked from Groq's own list, used for the
+        retry, and kept."""
+        attr = 'groq_vision_model' if vision else 'groq_model'
+        body: Dict[str, Any] = {"model": getattr(self, attr), "messages": messages, "temperature": 0.2}
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
+        headers = {"Authorization": f"Bearer {self.groq_api_key}", "Content-Type": "application/json"}
+        response = requests.post(GROQ_CHAT_URL, headers=headers, json=body, timeout=timeout)
+        if model_gone(response):
+            retired = body["model"]
+            substitute = self._current_groq_model(vision, exclude={retired})
+            if substitute:
+                logger.warning(f"Groq model '{retired}' is no longer offered; using '{substitute}'. "
+                               f"Set {attr} in config.json to choose another.")
+                setattr(self, attr, substitute)
+                body["model"] = substitute
+                response = requests.post(GROQ_CHAT_URL, headers=headers, json=body, timeout=timeout)
+        response.raise_for_status()
+        return response
+
+    def _current_groq_model(self, vision: bool, exclude=()) -> Optional[str]:
+        """A model Groq lists as active now, chosen by family (see
+        GROQ_TEXT_FAMILIES / GROQ_VISION_FAMILIES). The list is fetched at
+        most once an hour."""
+        at, models = self._groq_models_cache
+        if time.time() - at > 3600 or not models:
+            try:
+                resp = requests.get(GROQ_MODELS_URL, timeout=15,
+                                    headers={"Authorization": f"Bearer {self.groq_api_key}"})
+                resp.raise_for_status()
+                models = resp.json().get('data') or []
+                self._groq_models_cache = (time.time(), models)
+            except Exception as e:
+                logger.warning(f"Could not list Groq's models: {describe_error(e)}")
+                return None
+        return pick_groq_model(models, vision, exclude)
+
+    def _call_groq(self, system_prompt: str, user_prompt: str,
+                   fallback_signal: Optional[Dict[str, Any]],
+                   model_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        # model_override names an OpenRouter or Gemini model; Groq uses its own.
+        response = self._groq_post([{"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": user_prompt}])
+        text = response.json()['choices'][0]['message']['content']
+        try:
+            result = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            logger.error(f"Groq did not answer in JSON (model {self.groq_model}): {str(text)[:200]}")
+            return fallback_signal
+        if isinstance(result, dict) and fallback_signal is not None:
+            result['strategy'] = 'llm_orchestrated'
+        return result
+
+    def _groq_image(self, system_prompt: str, user_prompt: str, image_b64: str,
+                    media_type: str) -> Optional[Dict[str, Any]]:
+        """A JSON object read from a picture by Groq's vision model."""
+        response = self._groq_post([{"role": "user", "content": [
+            {"type": "text", "text": f"{system_prompt}\n\n{user_prompt}"},
+            {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_b64}"}}]}],
+            vision=True, timeout=60)
+        text = response.json()['choices'][0]['message']['content']
+        result = json_from_text(text)
+        return result if isinstance(result, dict) else None
+
+    def _free_openrouter_model(self) -> Optional[str]:
+        """A free OpenRouter model that returns JSON, from OpenRouter's own
+        list of models, or None. Checked at most once an hour."""
+        now = time.time()
+        if now - getattr(self, '_free_model_checked_at', 0) < 3600:
+            return self._openrouter_substitute
+        self._free_model_checked_at = now
+        try:
+            resp = requests.get(OPENROUTER_MODELS_URL, timeout=15,
+                                headers={"Authorization": f"Bearer {self.openrouter_api_key}"})
+            resp.raise_for_status()
+            models = resp.json().get('data') or []
+        except Exception as e:
+            logger.warning(f"Could not list OpenRouter's models: {describe_error(e)}")
+            return None
+        return pick_free_model(models, self._withdrawn_models)
 
     def _call_gemini(self, system_prompt: str, user_prompt: str, fallback_signal: Optional[Dict[str, Any]], model_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
         # Map dynamic model to gemini endpoints if applicable, otherwise default
@@ -480,3 +648,85 @@ class LLMOrchestrator:
             logger.error(f"Failed to decode Gemini JSON response. Text: {result_text}")
             return fallback_signal
 
+
+
+def pick_free_model(models: List[Dict[str, Any]], exclude=()) -> Optional[str]:
+    """The best free model in OpenRouter's model list that can answer in
+    JSON: FREE_MODEL_FAMILIES in order, then the largest context window."""
+    def free(m):
+        p = m.get('pricing') or {}
+        try:
+            return float(p.get('prompt', 1)) == 0 and float(p.get('completion', 1)) == 0
+        except (TypeError, ValueError):
+            return False
+
+    def json_capable(m):
+        params = m.get('supported_parameters')
+        return not params or 'response_format' in params or 'structured_outputs' in params
+
+    def family(mid):
+        return next((i for i, f in enumerate(FREE_MODEL_FAMILIES) if mid.startswith(f)), len(FREE_MODEL_FAMILIES))
+
+    candidates = [m for m in models if isinstance(m, dict) and m.get('id')
+                  and m['id'] not in exclude and free(m) and json_capable(m)]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda m: (family(m['id']), -int(m.get('context_length') or 0), m['id']))
+    return candidates[0]['id']
+
+
+def model_gone(response) -> bool:
+    """Whether a provider refused the request because the model no longer
+    exists or was retired (404, or a 400 that says so)."""
+    code = getattr(response, 'status_code', None)
+    if code == 404:
+        return True
+    if code != 400:
+        return False
+    try:
+        text = json.dumps(response.json()).lower()
+    except Exception:
+        text = str(getattr(response, 'text', '')).lower()
+    if 'decommissioned' in text or 'model_not_found' in text:
+        return True
+    return 'model' in text and ('does not exist' in text or 'no longer supported' in text)
+
+
+def pick_groq_model(models: List[Dict[str, Any]], vision: bool, exclude=()) -> Optional[str]:
+    """The model to use from Groq's list: an active chat model, by family
+    preference, then the largest context window. For pictures, only the
+    families known to read images qualify."""
+    families = GROQ_VISION_FAMILIES if vision else GROQ_TEXT_FAMILIES
+
+    def family(mid):
+        return next((i for i, f in enumerate(families) if f in mid), None)
+
+    usable = [m for m in models if isinstance(m, dict) and m.get('id')
+              and m['id'] not in exclude and m.get('active', True) is not False
+              and not any(w in m['id'].lower() for w in GROQ_NOT_CHAT)
+              and family(m['id']) is not None]
+    if not usable:
+        return None
+    usable.sort(key=lambda m: (family(m['id']), -int(m.get('context_window') or 0), m['id']))
+    return usable[0]['id']
+
+
+def json_from_text(text: Any) -> Optional[Dict[str, Any]]:
+    """The JSON object in a model's reply, allowing a code fence or words
+    around it; None when there is none."""
+    body = str(text or '').strip()
+    if body.startswith('```'):
+        body = body.split('\n', 1)[1] if '\n' in body else ''
+        body = body.rsplit('```', 1)[0]
+    try:
+        data = json.loads(body)
+        return data if isinstance(data, dict) else None
+    except ValueError:
+        start, end = body.find('{'), body.rfind('}')
+        if 0 <= start < end:
+            try:
+                data = json.loads(body[start:end + 1])
+                return data if isinstance(data, dict) else None
+            except ValueError:
+                return None
+    return None
