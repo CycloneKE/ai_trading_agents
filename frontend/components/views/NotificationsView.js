@@ -4,7 +4,7 @@
 // the approval queue, the halt switch and the dashboard's version check.
 import { Bell, AlertTriangle, Info } from 'lucide-react';
 import { theme } from '../DashboardStyles';
-import { card, SectionHeader, Empty } from '../ui';
+import { card, SectionHeader, Empty, localTime } from '../ui';
 
 const DOT = { high: theme.colors.danger, medium: theme.colors.warning, low: theme.colors.textMuted, info: theme.colors.accent };
 
@@ -66,7 +66,7 @@ export function notificationItems({ anomalies = [], pendingApprovals = 0, status
   items.push(...aiItems(ai));
   anomalies.forEach((a, i) => items.push({
     key: `a${i}`, severity: a.severity, attention: a.attention ?? ['high', 'medium'].includes(a.severity),
-    message: a.message, hint: a.hint, symbol: a.symbol,
+    message: a.message, hint: a.hint, symbol: a.symbol, lastAt: a.detail?.last_at,
   }));
   return items;
 }
@@ -83,6 +83,7 @@ function Item({ item, onDrill, onGo }) {
       <div style={{ minWidth: 0, flex: 1 }}>
         <div style={{ fontSize: '13px', color: theme.colors.text }}>{item.message}</div>
         {item.hint && <div style={{ fontSize: '12px', color: theme.colors.textMuted, marginTop: '3px' }}>{item.hint}</div>}
+        {item.lastAt && <div style={{ fontSize: '11px', color: theme.colors.textMuted, marginTop: '2px' }}>Last seen {localTime(item.lastAt)}</div>}
       </div>
       {act && (
         <span style={{ fontSize: '11px', color: theme.colors.textSecondary, whiteSpace: 'nowrap' }}>
@@ -116,7 +117,7 @@ export default function NotificationsView({ items, isOperator, mobile, onDrill, 
           <div>
             The agent checks every stock about once a minute and logs the outcome when it changes, and every half hour
             while it does not. A &quot;check&quot; below is one of those log lines, not an order: nothing is sent to a broker unless
-            a trade is actually placed.
+            a trade is actually placed. Only the last 12 hours of checks count, so a problem that has been fixed drops off.
           </div>
           <div>
             <strong>Needs your attention</strong>{' '}means something stopped a trade the agent should have made, or a decision

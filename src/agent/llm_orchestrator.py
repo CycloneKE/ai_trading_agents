@@ -14,6 +14,12 @@ GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{mode
 # Tried in turn when the configured Gemini model answers 404, which is what
 # Google returns once a model is retired. The first that answers is kept.
 GEMINI_FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-flash-latest", "gemini-2.5-flash-lite")
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+# Free OpenRouter models come and go. When the configured one is withdrawn,
+# a free model that returns JSON is picked from OpenRouter's own list, these
+# families first, larger context windows first within a family.
+FREE_MODEL_FAMILIES = ("meta-llama/", "deepseek/", "qwen/", "mistralai/", "google/", "openai/", "nvidia/")
+QUOTA_COOLDOWN_SECONDS = 1800   # a spent daily allowance: stop asking for a while
 
 
 KEY_NAMES = {'anthropic': 'ANTHROPIC_API_KEY', 'gemini': 'GEMINI_API_KEY', 'openrouter': 'OPENROUTER_API_KEY'}
@@ -34,9 +40,32 @@ def advice(provider: str, error: Optional[str]) -> str:
             return ("The Gemini model named in config.json is no longer offered. The agent now tries "
                     "newer ones on its own; if this stays, set gemini_model to gemini-2.5-flash.")
         if provider == 'openrouter':
-            return ("The OpenRouter model is no longer offered: set swarm.agents.synthesizer in "
-                    "config.json to a current free model.")
+            return ("The OpenRouter model is no longer offered. The agent now picks a current free "
+                    "model on its own; if this stays, set swarm.agents.synthesizer in config.json.")
     return "The service did not answer; this usually clears on its own."
+
+
+def cooldown_for(err: Exception, default: float) -> float:
+    """How long to leave a rate-limited provider alone: the provider's own
+    Retry-After or retryDelay when it gives one; half an hour when the
+    message says a quota is spent (a daily allowance does not come back in
+    a minute); otherwise the default."""
+    resp = getattr(err, 'response', None)
+    try:
+        after = (getattr(resp, 'headers', None) or {}).get('Retry-After')
+        if after:
+            return max(float(after), default)
+    except (TypeError, ValueError):
+        pass
+    try:
+        body = resp.json() if resp is not None else {}
+        for d in (body.get('error') or {}).get('details') or []:
+            delay = str(d.get('retryDelay') or '')
+            if delay.endswith('s'):
+                return max(float(delay[:-1]), default)
+    except Exception:
+        pass
+    return QUOTA_COOLDOWN_SECONDS if 'quota' in describe_error(err).lower() else default
 
 
 def describe_error(err: Exception) -> str:
@@ -55,6 +84,10 @@ def describe_error(err: Exception) -> str:
             msg = ''
     if not msg:
         msg = getattr(err, 'message', None) or (str(err) if resp is None else '') or type(err).__name__
+    # Keep the provider's own sentence; drop its links and "for more
+    # information" tails, which only cut off mid-address on the dashboard.
+    msg = re.split(r'\s(?:For more information|To monitor|Learn more)', str(msg))[0]
+    msg = re.sub(r'https?://\S+', '', msg).strip(' .') + '.'
     text = f"HTTP {code}: {msg}" if code else str(msg)
     return re.sub(r'key=[^&\s]+', 'key=...', ' '.join(str(text).split()))[:220]
 
@@ -86,6 +119,9 @@ class LLMOrchestrator:
         # answered, and what it said when it last failed.
         self._health: Dict[str, Dict[str, Any]] = {}
         self.last_image_errors: List[tuple] = []
+        # OpenRouter models found withdrawn, and the free model used instead.
+        self._withdrawn_models: set = set()
+        self._openrouter_substitute: Optional[str] = None
 
         # Paid tier: Claude, off unless ANTHROPIC_API_KEY is set, and then
         # held to a monthly budget (claude_provider.py, ai_budget.py). The
@@ -147,9 +183,10 @@ class LLMOrchestrator:
             except Exception as e:
                 self._record(provider, e)
                 if self._status_code(e) == 429:
-                    self._cooldown_until[provider] = now + self.cooldown_seconds
+                    wait = cooldown_for(e, self.cooldown_seconds)
+                    self._cooldown_until[provider] = now + wait
                     logger.warning(f"LLM provider '{provider}' rate-limited (429); "
-                                   f"cooling down {self.cooldown_seconds}s, using fallback provider.")
+                                   f"cooling down {wait:.0f}s, using fallback provider.")
         return fallback
 
     def _record(self, provider: str, err: Optional[Exception] = None) -> None:
@@ -174,7 +211,8 @@ class LLMOrchestrator:
                        self.claude.review_model if self.claude else None, True),
                       ('gemini', bool(self.gemini_api_key), self.gemini_model, True),
                       ('openrouter', bool(self.openrouter_api_key),
-                       self.config.get("swarm", {}).get("agents", {}).get("synthesizer"), False)]
+                       self._openrouter_substitute
+                       or self.config.get("swarm", {}).get("agents", {}).get("synthesizer"), False)]
         for name, on, model, sees in configured:
             if not on:
                 continue
@@ -378,7 +416,7 @@ class LLMOrchestrator:
             except Exception as e:
                 self._record(provider, e)
                 if self._status_code(e) == 429:
-                    self._cooldown_until[provider] = _time.time() + self.cooldown_seconds
+                    self._cooldown_until[provider] = _time.time() + cooldown_for(e, self.cooldown_seconds)
                 self.last_image_errors.append((names[provider], describe_error(e)))
         return None
 
@@ -426,20 +464,34 @@ class LLMOrchestrator:
         }
         
         model = model_override or self.config.get("swarm", {}).get("agents", {}).get("synthesizer", "meta-llama/llama-3.1-8b-instruct")
-        
-        # Allow up to 45 seconds for DeepSeek-R1 or o1 models to produce thinking tokens
-        timeout = 45 if ("r1" in model.lower() or "o1" in model.lower()) else 15
-        
-        data = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "response_format": {"type": "json_object"}
-        }
-        
-        response = requests.post(url, headers=headers, json=data, timeout=timeout)
+        if model in self._withdrawn_models and self._openrouter_substitute:
+            model = self._openrouter_substitute
+
+        def post(model_id):
+            # Allow up to 45 seconds for DeepSeek-R1 or o1 models to produce thinking tokens
+            timeout = 45 if ("r1" in model_id.lower() or "o1" in model_id.lower()) else 15
+            data = {
+                "model": model_id,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "response_format": {"type": "json_object"}
+            }
+            return requests.post(url, headers=headers, json=data, timeout=timeout)
+
+        response = post(model)
+        if response.status_code == 404:
+            # The model is withdrawn (free versions are, from time to time):
+            # use a free model that is offered now, and keep using it.
+            self._withdrawn_models.add(model)
+            substitute = self._free_openrouter_model()
+            if substitute:
+                logger.warning(f"OpenRouter model '{model}' is no longer offered; using the free "
+                               f"model '{substitute}' instead. Set swarm.agents.synthesizer in "
+                               f"config.json to choose another.")
+                self._openrouter_substitute = model = substitute
+                response = post(model)
         response.raise_for_status()
         
         result_text = response.json()['choices'][0]['message']['content']
@@ -451,6 +503,23 @@ class LLMOrchestrator:
         except json.JSONDecodeError:
             logger.error(f"Failed to decode OpenRouter JSON response. Model: {model}. Text: {result_text}")
             return fallback_signal
+
+    def _free_openrouter_model(self) -> Optional[str]:
+        """A free OpenRouter model that returns JSON, from OpenRouter's own
+        list of models, or None. Checked at most once an hour."""
+        now = time.time()
+        if now - getattr(self, '_free_model_checked_at', 0) < 3600:
+            return self._openrouter_substitute
+        self._free_model_checked_at = now
+        try:
+            resp = requests.get(OPENROUTER_MODELS_URL, timeout=15,
+                                headers={"Authorization": f"Bearer {self.openrouter_api_key}"})
+            resp.raise_for_status()
+            models = resp.json().get('data') or []
+        except Exception as e:
+            logger.warning(f"Could not list OpenRouter's models: {describe_error(e)}")
+            return None
+        return pick_free_model(models, self._withdrawn_models)
 
     def _call_gemini(self, system_prompt: str, user_prompt: str, fallback_signal: Optional[Dict[str, Any]], model_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
         # Map dynamic model to gemini endpoints if applicable, otherwise default
@@ -480,3 +549,28 @@ class LLMOrchestrator:
             logger.error(f"Failed to decode Gemini JSON response. Text: {result_text}")
             return fallback_signal
 
+
+
+def pick_free_model(models: List[Dict[str, Any]], exclude=()) -> Optional[str]:
+    """The best free model in OpenRouter's model list that can answer in
+    JSON: FREE_MODEL_FAMILIES in order, then the largest context window."""
+    def free(m):
+        p = m.get('pricing') or {}
+        try:
+            return float(p.get('prompt', 1)) == 0 and float(p.get('completion', 1)) == 0
+        except (TypeError, ValueError):
+            return False
+
+    def json_capable(m):
+        params = m.get('supported_parameters')
+        return not params or 'response_format' in params or 'structured_outputs' in params
+
+    def family(mid):
+        return next((i for i, f in enumerate(FREE_MODEL_FAMILIES) if mid.startswith(f)), len(FREE_MODEL_FAMILIES))
+
+    candidates = [m for m in models if isinstance(m, dict) and m.get('id')
+                  and m['id'] not in exclude and free(m) and json_capable(m)]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda m: (family(m['id']), -int(m.get('context_length') or 0), m['id']))
+    return candidates[0]['id']

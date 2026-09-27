@@ -84,3 +84,53 @@ def test_text_only_ai_is_named_as_the_reason(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match='reads text only. Add GEMINI_API_KEY'):
         dw.read(str(img), llm, last_close=lambda s, d: None)
     assert [p['provider'] for p in llm.provider_health()] == ['openrouter']
+
+
+def test_a_spent_quota_is_left_alone_for_a_while(gemini_only, monkeypatch):
+    calls = []
+
+    def post(*a, **k):
+        calls.append(1)
+        return _reply(429, {'error': {'message': 'You exceeded your current quota, please check your plan '
+                                                 'and billing details. For more information on this error, '
+                                                 'head to: https://ai.google.dev/gemini-api/docs/rate-limits.'}})
+    monkeypatch.setattr(lo.requests, 'post', post)
+    gemini_only.propose_json('sys', 'user')
+    gemini_only.propose_json('sys', 'user')
+    assert len(calls) == 1                                                 # not asked again straight away
+    [g] = gemini_only.provider_health()
+    assert g['last_error'] == 'HTTP 429: You exceeded your current quota, please check your plan and billing details.'
+    left = gemini_only._cooldown_until['gemini'] - lo.time.time()
+    assert 1700 < left <= lo.QUOTA_COOLDOWN_SECONDS
+
+
+def test_a_withdrawn_free_openrouter_model_is_replaced_by_one_offered_now(monkeypatch):
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'k')
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
+    monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
+    llm = lo.LLMOrchestrator({'primary_llm_provider': 'openrouter',
+                              'swarm': {'agents': {'synthesizer': 'meta-llama/llama-3.3-70b-instruct:free'}}})
+    listing = {'data': [
+        {'id': 'meta-llama/llama-3.3-70b-instruct', 'pricing': {'prompt': '0.0000001', 'completion': '0.0000003'}},
+        {'id': 'qwen/qwen3-32b:free', 'pricing': {'prompt': '0', 'completion': '0'}, 'context_length': 40000,
+         'supported_parameters': ['response_format']},
+        {'id': 'meta-llama/llama-4-maverick:free', 'pricing': {'prompt': '0', 'completion': '0'},
+         'context_length': 128000, 'supported_parameters': ['response_format', 'tools']},
+        {'id': 'meta-llama/llama-3.2-3b-instruct:free', 'pricing': {'prompt': '0', 'completion': '0'},
+         'context_length': 8000, 'supported_parameters': ['tools']},                # no JSON mode
+    ]}
+    sent = []
+
+    def post(url, headers=None, json=None, timeout=None):
+        sent.append(json['model'])
+        if json['model'].endswith('llama-3.3-70b-instruct:free'):
+            return _reply(404, {'error': {'message': 'This model is unavailable for free.'}})
+        return _reply(200, {'choices': [{'message': {'content': '{"action": "buy"}'}}]})
+    monkeypatch.setattr(lo.requests, 'post', post)
+    monkeypatch.setattr(lo.requests, 'get', lambda *a, **k: _reply(200, listing))
+    assert llm.propose_json('sys', 'user') == {'action': 'buy'}
+    assert sent == ['meta-llama/llama-3.3-70b-instruct:free', 'meta-llama/llama-4-maverick:free']
+    assert llm.propose_json('sys', 'user') == {'action': 'buy'}
+    assert sent[-1] == 'meta-llama/llama-4-maverick:free'                  # remembered, no second 404
+    [o] = llm.provider_health()
+    assert o['status'] == 'ok' and o['model'] == 'meta-llama/llama-4-maverick:free'

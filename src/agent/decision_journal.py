@@ -45,6 +45,7 @@ SKIP_REASONS = {
     'turnover_budget',    # NSE: this week's allowance of new positions is used up
     'liquidity_cap',      # NSE: too little trading volume for even one share
     'stale_price',        # NSE: the latest real price is too old to act on
+    'market_closed',      # US stock signal while the US market is shut
 }
 
 _SCHEMA = """
