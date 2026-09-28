@@ -327,3 +327,85 @@ def test_enough_trips_switches_the_verdict_to_a_real_reading(journals):
     assert 'Too early to judge' not in text
     assert 'profit factor' in text
     assert 'money market fund' in text
+
+
+# ---------------------------------- the 28 September report's misreadings
+
+def test_every_reason_the_agent_writes_has_a_reading(journals):
+    tmp_path, oj, dj = journals
+    _manifest(tmp_path)
+    for cycle, reason in enumerate(['add_not_profitable', 'no_position', 'order_pending',
+                                    'market_closed', 'no_price', 'position_unknown']):
+        dj.record({'symbol': 'AAPL', 'cycle': cycle, 'action': 'buy', 'skip_reason': reason,
+                   'ensemble_confidence': 0.7})
+    text = report.render(report.build(Args()), 'config/config.json')
+    assert 'unrecognised reason' not in text
+    assert '| add_not_profitable | 1 |' in text and 'by design: it is already held' in text
+    assert '| no_price | 1 |' in text and 'check: the agent could not get a current price' in text
+
+
+def test_open_positions_and_pnl_say_which_currency(journals):
+    tmp_path, oj, dj = journals
+    _manifest(tmp_path)
+    _fill(oj, 'b1', 'SCOM', 'buy', 133, 36.81)
+    _fill(oj, 'b2', 'TSLA', 'buy', 13.1537, 377.12)
+    _fill(oj, 'b3', 'QQQ', 'buy', 10, 500.0)
+    _fill(oj, 's3', 'QQQ', 'sell', 10, 510.0)
+    rep = report.build(Args())
+    assert rep['pnl']['open_positions']['SCOM']['currency'] == 'KES'
+    assert rep['pnl']['open_positions']['TSLA']['currency'] == 'USD'
+    text = report.render(rep, 'config/config.json')
+    assert '| SCOM | 133.0000 | KES 4,895.73 |' in text
+    assert '- Realised P&L: USD 100.00' in text
+
+
+def test_holds_and_rule_settled_signals_are_not_counted_as_missed_ai_reviews(journals):
+    tmp_path, oj, dj = journals
+    _manifest(tmp_path)
+    cycle = 0
+    for _ in range(40):                                                    # the resting state
+        dj.record({'symbol': 'AAPL', 'cycle': cycle, 'action': 'hold', 'skip_reason': 'hold'})
+        cycle += 1
+    for _ in range(6):                                                     # settled before review
+        dj.record({'symbol': 'NVDA', 'cycle': cycle, 'action': 'buy', 'skip_reason': 'market_closed'})
+        cycle += 1
+    for _ in range(2):                                                     # reviewed
+        dj.record({'symbol': 'MSFT', 'cycle': cycle, 'action': 'buy', 'skip_reason': 'llm_veto',
+                   'llm_verdict': {'action': 'hold', 'confidence': 0.2}})
+        cycle += 1
+    rep = report.build(Args())
+    d = rep['decisions']
+    assert d['signals'] == 8 and d['signals_settled_by_rules'] == 6 and d['signals_reviewed'] == 2
+    assert 'AI review' not in report.render(rep, 'config/config.json').split('## Silent degradation')[1]
+    for _ in range(5):                                                     # due a review, none given
+        dj.record({'symbol': 'XLF', 'cycle': cycle, 'action': 'sell', 'skip_reason': None, 'executed': 1})
+        cycle += 1
+    text = report.render(report.build(Args()), 'config/config.json')
+    assert '5 of 7 signals due an AI review (71%) got none' in text
+
+
+def test_stuck_orders_are_named(journals):
+    tmp_path, oj, dj = journals
+    _manifest(tmp_path)
+    oj.record_intent('stop-1', 'TSLA', 'sell', 13.15, 'market', strategy='stop_loss')
+    oj.mark_submitted('stop-1', 'broker-1')
+    text = report.render(report.build(Args()), 'config/config.json')
+    assert '1 order(s) never reached a final status: sell TSLA (submitted' in text
+    assert 'stop_loss)' in text and 'waits at the broker for the next open' in text
+
+
+def test_a_run_started_without_git_records_what_code_it_ran(monkeypatch):
+    spec = importlib.util.spec_from_file_location(
+        'start_paper_run', os.path.join(_ROOT, 'scripts', 'start_paper_run.py'))
+    start = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(start)
+
+    def no_git(*a, **k):
+        raise FileNotFoundError('git')
+    monkeypatch.setattr(start.subprocess, 'check_output', no_git)
+    monkeypatch.delenv('SOURCE_COMMIT', raising=False)
+    first = start.git_commit()
+    assert first.startswith('source ') and len(first) == len('source ') + 12
+    assert start.git_commit() == first                                     # stable for the same code
+    monkeypatch.setenv('SOURCE_COMMIT', 'caafb1402d60')
+    assert start.git_commit() == 'caafb1402d60'
