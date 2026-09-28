@@ -720,11 +720,40 @@ class TradingAPI:
                         'market_value': round(value, 2), 'currency': 'KES',
                         'region': 'Kenya/Africa', 'market_name': r['market_name'], 'flag': '🇰🇪'})
 
+                # 3. Forex: the forex paper book (config brokers.forex_paper),
+                # a separate simulated account in US dollars.
+                forex_account = None
+                fx_book = broker_mgr.get_broker('forex_paper') if broker_mgr else None
+                if fx_book is not None and getattr(fx_book, 'is_connected', False):
+                    try:
+                        acct = fx_book.get_account_info()
+                        if acct:
+                            forex_account = {'cash': round(float(acct.cash or 0), 2),
+                                             'equity': round(float(acct.equity or 0), 2),
+                                             'initial': float(getattr(fx_book, 'initial_cash', 0) or 0),
+                                             'currency': 'USD'}
+                        for p in fx_book.get_positions() or []:
+                            qty = float(getattr(p, 'quantity', 0) or 0)
+                            entry = float(getattr(p, 'avg_entry_price', 0) or 0)
+                            curr = float(getattr(p, 'current_price', 0) or entry or 0)
+                            unrealized = float(getattr(p, 'unrealized_pl', 0) or 0)
+                            all_positions.append({
+                                'symbol': getattr(p, 'symbol', 'UNKNOWN'), 'quantity': qty,
+                                'avg_entry_price': round(entry, 5), 'current_price': round(curr, 5),
+                                'unrealized_pl': round(unrealized, 2),
+                                'unrealized_pl_pct': round(unrealized / (entry * qty) * 100, 2) if entry and qty else 0.0,
+                                'market_value': round(qty * curr, 2), 'currency': 'USD',
+                                'region': 'Forex', 'market_name': 'Forex (paper book)', 'flag': '💱'})
+                    except Exception as e:
+                        logger.warning(f"Forex paper book unavailable: {e}")
+
                 # Region allocation summary, KES converted at the market rate
                 # (src/connectors/fx_rate.py; it was a fixed 130).
                 fx = self._fx_snapshot(nse_connector)
                 kes_per_usd = (fx or {}).get('kes_per_usd') or 130.0
                 region_summary = {'US': 0.0, 'Crypto': 0.0, 'Kenya/Africa': 0.0}
+                if forex_account is not None:
+                    region_summary['Forex'] = 0.0
                 for pos in all_positions:
                     val_usd = pos['market_value'] if pos['currency'] == 'USD' else pos['market_value'] / kes_per_usd
                     reg = pos['region']
@@ -733,6 +762,7 @@ class TradingAPI:
                 return jsonify({
                     'fx': fx,
                     'nse_account': nse_account,
+                    'forex_account': forex_account,
                     'core': core,
                     'account': {
                         'cash': round(cash_usd, 2),

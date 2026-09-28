@@ -53,6 +53,9 @@ from src.connectors.nse_scraper import REAL_NSE_SOURCES
 from src.agent.position_rules import (LIVE_ADD_DEFAULTS, LIVE_EXIT_DEFAULTS, plan_add,
                                       plan_exit, rule, state_from_journal)
 from src.agent.cost_model import classify, costs_for
+
+# The broker entry (config brokers.forex_paper) that holds the forex paper book.
+FOREX_BOOK = 'forex_paper'
 from src.agent.broker_manager import BrokerManager
 from src.agent.order_execution_engine import OrderExecutionEngine
 from src.agent.realtime_risk_manager import RealTimeRiskManager
@@ -382,14 +385,21 @@ class TradingAgent:
         plus the add rule's minimum gain: adds happen only on the way up, so
         the last entry is at or above the average, and plan_add would refuse.
         """
-        from src.agent.core_portfolio import us_session_open
+        from src.agent.core_portfolio import fx_session_open, us_session_open
         market = classify(symbol, self.config)
         if market == 'us_equity' and not us_session_open(now):
+            return 'market_closed'
+        if market == 'forex' and not fx_session_open(now):
             return 'market_closed'
         bm = self.components.get('broker_manager')
         if bm is None:
             return None
-        broker = bm.get_broker('coinbase_broker') if market == 'crypto' else None
+        if market == 'forex':
+            broker = TradingAgent._forex_broker(self)
+            if broker is None:
+                return 'no_broker'
+        else:
+            broker = bm.get_broker('coinbase_broker') if market == 'crypto' else None
         if not broker or not getattr(broker, 'is_connected', False):
             broker = bm.get_broker()
         if not broker or not getattr(broker, 'is_connected', False):
@@ -404,6 +414,25 @@ class TradingAgent:
             if price and avg_entry and price < avg_entry * (1 + float(add_rule['min_gain_pct'])):
                 return 'add_not_profitable'
         return None
+
+    def _forex_broker(self):
+        """The forex paper book (config brokers.forex_paper), when it is
+        built and connected; None otherwise. Forex never falls back to the
+        primary broker: Alpaca does not trade currencies."""
+        bm = self.components.get('broker_manager')
+        broker = bm.get_broker(FOREX_BOOK) if bm is not None else None
+        return broker if broker is not None and getattr(broker, 'is_connected', False) else None
+
+    def _books(self):
+        """Every connected book the loop trades: the primary broker's, then
+        the forex paper book when there is one."""
+        bm = self.components.get('broker_manager')
+        primary = bm.get_broker() if bm is not None else None
+        books = [primary] if primary is not None and getattr(primary, 'is_connected', False) else []
+        fx = TradingAgent._forex_broker(self)
+        if fx is not None and fx not in books:
+            books.append(fx)
+        return books
 
     def _position_gate(self, broker, symbol: str, action: str):
         """The backtest's position rules, applied before any order.
@@ -822,18 +851,18 @@ class TradingAgent:
                 # attribution and duplicate-close checks see current state.
                 if self.order_journal:
                     try:
-                        broker_manager = self.components.get('broker_manager')
-                        primary = broker_manager.get_broker() if broker_manager else None
-                        if primary and primary.is_connected:
-                            self.order_journal.sync_fills(primary)
-                            # Feed real broker positions into the risk manager
-                            # so trailing stops fire and /api/risk-metrics
-                            # reflects actual exposure.
-                            if getattr(self, 'risk_manager', None):
-                                acct = primary.get_account_info()
-                                self.risk_manager.sync_broker_positions(
-                                    primary.get_positions(),
-                                    cash=acct.cash if acct else 0.0)
+                        books = TradingAgent._books(self)
+                        for book in books:
+                            self.order_journal.sync_fills(book)
+                        # Feed real broker positions into the risk manager
+                        # so trailing stops fire and /api/risk-metrics
+                        # reflects actual exposure; the forex book's too,
+                        # or its trailing stops would never fire.
+                        if books and getattr(self, 'risk_manager', None):
+                            acct = books[0].get_account_info()
+                            positions = [p for book in books for p in (book.get_positions() or [])]
+                            self.risk_manager.sync_broker_positions(
+                                positions, cash=acct.cash if acct else 0.0)
                     except Exception as e:
                         logger.debug(f"Position/fill sync error: {e}")
 
@@ -1967,11 +1996,8 @@ class TradingAgent:
 
                     if action != 'hold' and confidence > 0.1 and position_size > 0:
                         # Determine asset type for routing
-                        asset_type = 'stock'
-                        if symbol.endswith('-USD') or symbol in ['BTC-USD', 'ETH-USD']:
-                            asset_type = 'crypto'
-                        elif '_' in symbol:
-                            asset_type = 'forex'
+                        market = classify(symbol, self.config)
+                        asset_type = {'crypto': 'crypto', 'forex': 'forex'}.get(market, 'stock')
 
                         # Route to appropriate broker. Stocks go to the
                         # PRIMARY broker (Alpaca in prod) — the same book that
@@ -1985,9 +2011,9 @@ class TradingAgent:
                             if not broker or not getattr(broker, 'is_connected', False):
                                 broker = broker_manager.get_broker()  # Fallback to paper broker
                         elif asset_type == 'forex':
-                            broker = broker_manager.get_broker('oanda_broker')
-                            if not broker or not getattr(broker, 'is_connected', False):
-                                broker = broker_manager.get_broker()  # Fallback to paper broker
+                            # The forex paper book only: the primary broker
+                            # (Alpaca) does not trade currencies.
+                            broker = TradingAgent._forex_broker(self)
                         else:
                             broker = broker_manager.get_broker()  # primary
                             
@@ -2028,9 +2054,15 @@ class TradingAgent:
                         # from their own share of equity, and "deployed" is
                         # measured within that share, not across the core.
                         equity = float(account_info.equity)
-                        portfolio_value = TradingAgent._active_equity(self, equity)
                         cash = float(getattr(account_info, 'cash', 0) or 0)
-                        active_invested = max(equity - cash - TradingAgent._core_value_now(self), 0.0)
+                        if asset_type == 'forex':
+                            # A book of its own: sized from its own balance,
+                            # with no core-satellite split.
+                            portfolio_value = equity
+                            active_invested = max(equity - cash, 0.0)
+                        else:
+                            portfolio_value = TradingAgent._active_equity(self, equity)
+                            active_invested = max(equity - cash - TradingAgent._core_value_now(self), 0.0)
                         deployed_pct = active_invested / portfolio_value if portfolio_value else 0.0
                         if not hasattr(self, 'cash_policy'):
                             from src.agent.cash_policy import CashDeploymentPolicy
@@ -2396,6 +2428,9 @@ class TradingAgent:
         try:
             if side != 'sell' or not self.order_journal:
                 return False
+            # The rule covers US stocks only: not currencies or crypto.
+            if classify(symbol, self.config) != 'us_equity':
+                return False
             acct = broker.get_account_info()
             if not acct or acct.equity >= self.PDT_EQUITY_THRESHOLD:
                 return False
@@ -2459,15 +2494,14 @@ class TradingAgent:
             stop_loss_pct: Maximum loss percentage before auto-close (e.g. 0.05 = 5%)
             trailing_stop_pct: Trailing stop percentage (e.g. 0.03 = 3%)
         """
+        # Every book the loop trades: the forex paper book's positions need
+        # their stops as much as the primary broker's.
+        for book in TradingAgent._books(self):
+            TradingAgent._enforce_stops_on(self, book, stop_loss_pct, trailing_stop_pct)
+
+    def _enforce_stops_on(self, primary_broker, stop_loss_pct: float, trailing_stop_pct: float):
+        """Stop-loss and trailing stop rules on one book's open positions."""
         try:
-            broker_manager = self.components.get('broker_manager')
-            if not broker_manager:
-                return
-            
-            primary_broker = broker_manager.get_broker()
-            if not primary_broker or not primary_broker.is_connected:
-                return
-            
             positions = primary_broker.get_positions()
             if not positions:
                 return

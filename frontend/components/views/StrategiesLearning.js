@@ -6,7 +6,7 @@ import { Brain, History } from 'lucide-react';
 import { theme } from '../DashboardStyles';
 import { apiGet, card, money, gainColor, SectionHeader, Empty, Note, th, td, tableHeadRow } from '../ui';
 
-const MARKET = { us_equity: 'US', crypto: 'Crypto', nse: 'NSE' };
+const MARKET = { us_equity: 'US', crypto: 'Crypto', nse: 'NSE', forex: 'Forex' };
 
 const params = (p) => (p && typeof p === 'object'
   ? Object.entries(p).map(([k, v]) => `${k} ${v}`).join(', ')

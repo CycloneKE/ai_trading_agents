@@ -56,7 +56,7 @@ HELD_BACK = {
     'llm_veto': "the AI review advised against it",
     'dissent': "no strategy agreed with the direction",
     'liquidity_cap': "the stock trades too thinly to buy even one share within the volume limit",
-    'market_closed': "the US market is closed; the signal is looked at again when it opens",
+    'market_closed': "its market is closed (US stocks or forex); the signal is looked at again when it opens",
 }
 BLOCKED = {
     'insufficient_cash': ("there was not enough paper cash",

@@ -105,6 +105,11 @@ class RealDataConnector:
 
     def _get_single_quote(self, symbol: str) -> Dict[str, Any]:
         """Get real-time market data for one symbol"""
+        # A currency pair (EUR_USD) is priced by the live price feed; asking
+        # Finnhub and then Alpha Vantage for it every minute only spent their
+        # free allowances.
+        if '_' in str(symbol):
+            return None
         try:
             cached = self.cache.get(symbol)
             if cached and time.time() - cached['fetched_at'] < self.CACHE_TTL_SECONDS:

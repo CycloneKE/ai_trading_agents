@@ -221,6 +221,21 @@ def us_session_open(now: Optional[datetime] = None) -> bool:
     return 9 * 60 + 30 <= minutes < 16 * 60
 
 
+def fx_session_open(now: Optional[datetime] = None) -> bool:
+    """The currency market: from Sunday 17:00 to Friday 17:00 New York
+    time, around the clock in between."""
+    from zoneinfo import ZoneInfo
+    et = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo('America/New_York'))
+    day, minutes = et.weekday(), et.hour * 60 + et.minute        # Monday is 0
+    if day == 5:
+        return False
+    if day == 6:
+        return minutes >= 17 * 60
+    if day == 4:
+        return minutes < 17 * 60
+    return True
+
+
 class CoreState:
     """When the core last rebalanced and to what, kept in a small JSON file
     so a restart does not rebalance again."""

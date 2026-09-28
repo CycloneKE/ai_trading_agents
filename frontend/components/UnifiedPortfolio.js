@@ -15,8 +15,12 @@ import { fxSourceNote } from './ui';
 const REGION_COLORS = {
   'US': '#3b82f6',
   'Crypto': '#a855f7',
-  'Kenya/Africa': '#10b981'
+  'Kenya/Africa': '#10b981',
+  'Forex': '#f59e0b'
 };
+
+const REGION_NAME = { 'Kenya/Africa': '🇰🇪 Kenya & Africa', US: '🇺🇸 US Equities', Crypto: '🪙 Crypto', Forex: '💱 Forex' };
+const REGION_BUTTON = { ALL: 'ALL REGIONS', 'Kenya/Africa': '🇰🇪 KENYA', US: '🇺🇸 US', Crypto: '🪙 CRYPTO', Forex: '💱 FOREX' };
 
 // Shown only until the server answers with its market rate
 // (src/connectors/fx_rate.py); this used to be the rate itself.
@@ -98,7 +102,7 @@ export default function UnifiedPortfolio({ onDrill }) {
   const pieChartData = useMemo(() => {
     const summary = portfolioData.summary?.regional_allocation_usd || {};
     return Object.keys(summary).map(reg => ({
-      name: reg === 'Kenya/Africa' ? '🇰🇪 Kenya & Africa' : reg === 'US' ? '🇺🇸 US Equities' : '🪙 Crypto',
+      name: REGION_NAME[reg] || reg,
       value: Math.round(summary[reg] || 0),
       rawRegion: reg
     })).filter(d => d.value > 0);
@@ -106,19 +110,21 @@ export default function UnifiedPortfolio({ onDrill }) {
 
   // Cash held by the NSE paper account, in KES (null when it is off).
   const nseCashKES = portfolioData.nse_account?.cash_kes ?? null;
+  // Cash held by the forex paper book, in USD (null when it is off).
+  const forexCashUSD = portfolioData.forex_account?.cash ?? null;
   // The core-satellite split of the US account ({enabled: false} when off).
   const core = portfolioData.core || null;
 
-  // Aggregate total net worth in USD: US cash, NSE paper cash and every
-  // holding, KES converted at KES_FX_RATE.
+  // Aggregate total net worth in USD: US cash, NSE paper cash, forex book
+  // cash and every holding, KES converted at KES_FX_RATE.
   const totalNetWorthUSD = useMemo(() => {
     const usdCash = portfolioData.account?.cash || 0;
     const positionsUSD = positions.reduce((sum, p) => {
       const val = p.market_value || 0;
       return sum + (p.currency === 'KES' ? val / KES_FX_RATE : val);
     }, 0);
-    return usdCash + (nseCashKES || 0) / KES_FX_RATE + positionsUSD;
-  }, [portfolioData, positions, KES_FX_RATE, nseCashKES]);
+    return usdCash + (forexCashUSD || 0) + (nseCashKES || 0) / KES_FX_RATE + positionsUSD;
+  }, [portfolioData, positions, KES_FX_RATE, nseCashKES, forexCashUSD]);
 
   const totalNetWorthKES = useMemo(() => totalNetWorthUSD * KES_FX_RATE, [totalNetWorthUSD, KES_FX_RATE]);
 
@@ -135,7 +141,8 @@ export default function UnifiedPortfolio({ onDrill }) {
     const sectors = {};
     let totalVal = 0;
     positions.forEach(p => {
-      const sec = p.region === 'Crypto' ? 'Cryptocurrency' : p.region === 'Kenya/Africa' ? 'Kenyan Equities' : 'US Technology & ETFs';
+      const sec = p.region === 'Crypto' ? 'Cryptocurrency' : p.region === 'Kenya/Africa' ? 'Kenyan Equities'
+        : p.region === 'Forex' ? 'Currencies' : 'US Technology & ETFs';
       const val = p.currency === 'KES' ? (p.market_value || 0) / KES_FX_RATE : (p.market_value || 0);
       sectors[sec] = (sectors[sec] || 0) + val;
       totalVal += val;
@@ -408,7 +415,7 @@ export default function UnifiedPortfolio({ onDrill }) {
           </div>
 
           <div style={{ display: 'flex', gap: '8px', backgroundColor: 'rgba(0,0,0,0.3)', padding: '4px', borderRadius: '8px', border: `1px solid ${theme.colors.border}` }}>
-            {['ALL', 'US', 'Crypto', 'Kenya/Africa'].map(reg => (
+            {['ALL', 'US', 'Crypto', 'Kenya/Africa', 'Forex'].map(reg => (
               <button
                 key={reg}
                 onClick={() => setRegionFilter(reg)}
@@ -420,7 +427,7 @@ export default function UnifiedPortfolio({ onDrill }) {
                   transition: 'all 0.2s ease'
                 }}
               >
-                {reg === 'ALL' ? 'ALL REGIONS' : reg === 'Kenya/Africa' ? '🇰🇪 KENYA' : reg === 'US' ? '🇺🇸 US' : '🪙 CRYPTO'}
+                {REGION_BUTTON[reg] || reg}
               </button>
             ))}
           </div>

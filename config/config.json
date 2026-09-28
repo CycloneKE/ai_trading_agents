@@ -20,7 +20,16 @@
       "XLE",
       "BTC-USD",
       "ETH-USD",
-      "SOL-USD"
+      "SOL-USD",
+      "EUR_USD",
+      "GBP_USD",
+      "AUD_USD"
+    ],
+    "_forex_symbols": "Currency pairs traded on the forex paper book (brokers.forex_paper), written BASE_QUOTE. Only pairs quoted in US dollars, so the book's value stays in dollars: EUR_USD, GBP_USD, AUD_USD, NZD_USD. Like crypto_symbols, a pair must also be in `symbols` to be traded. Long only, no leverage.",
+    "forex_symbols": [
+      "EUR_USD",
+      "GBP_USD",
+      "AUD_USD"
     ],
     "crypto_symbols": [
       "BTC-USD",
@@ -239,6 +248,16 @@
       "secret": "${COINBASE_API_SECRET}",
       "passphrase": "${COINBASE_PASSPHRASE}",
       "is_paper": true
+    },
+    "forex_paper": {
+      "_comment": "The forex paper book: a simulated account inside the agent, filled at live Yahoo Finance prices (never at an old one), with about one pip of spread a side. Kept in data/forex_paper_state.json. Alpaca does not trade currencies.",
+      "type": "paper",
+      "enabled": true,
+      "initial_cash": 10000,
+      "commission_per_trade": 0.0,
+      "slippage_percent": 0.01,
+      "state_file": "forex_paper_state.json",
+      "primary": false
     }
   },
   "trading": {
@@ -427,6 +446,13 @@
       "slippage_pct": 0.001,
       "verified": false,
       "note": "PLACEHOLDER \u2014 Coinbase taker fees vary by 30-day volume tier."
+    },
+    "forex": {
+      "commission_pct": 0.0,
+      "min_commission": 0.0,
+      "slippage_pct": 0.0001,
+      "verified": false,
+      "note": "ESTIMATE: about one pip of spread a side on the major USD pairs; no commission."
     }
   },
   "regime_filter": {

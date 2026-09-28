@@ -12,7 +12,7 @@ const REASON_LABEL = {
   llm_veto: 'LLM vetoed the trade',
   fallback_price: 'Price was synthetic fallback',
   stale_price: 'Latest price is too old (stock suspended or not trading)',
-  market_closed: 'US market closed; looked at again when it opens',
+  market_closed: 'Market closed (US stocks: weekdays 9:30 to 16:00 New York; forex: Sunday evening to Friday evening); looked at again when it opens',
   halted: 'Trading halted (kill switch)',
   risk_limits: 'Portfolio risk limit hit',
   pdt_guard: 'Pattern-day-trader block',
@@ -35,7 +35,7 @@ const REASON_LABEL = {
   liquidity_cap: 'Too little trading volume for the order',
 };
 
-const MARKET_LABEL = { nse: 'NSE KENYA', us_equity: 'US STOCK', crypto: 'CRYPTO' };
+const MARKET_LABEL = { nse: 'NSE KENYA', us_equity: 'US STOCK', crypto: 'CRYPTO', forex: 'FOREX' };
 
 const reasonColor = (r) => {
   if (!r) return theme.colors.primary;
