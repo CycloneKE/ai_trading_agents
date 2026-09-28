@@ -155,19 +155,25 @@ def detect_persistent_skip(decisions: List[Dict[str, Any]], threshold: int) -> L
     """A symbol repeatedly hitting the SAME systemic skip reason — a data or
     account problem, not normal market quiet."""
     counts = defaultdict(lambda: defaultdict(int))
+    last = {}
     for d in decisions:
         r = d.get('skip_reason')
         if r in SYSTEMIC_REASONS:
             counts[d['symbol']][r] += 1
+            key = (d['symbol'], r)
+            if d.get('ts') and d['ts'] > last.get(key, ''):
+                last[key] = d['ts']
     out = []
     for symbol, reasons in counts.items():
         for reason, n in reasons.items():
             if n >= threshold:
                 sev = 'high' if reason in ('fallback_price', 'no_price', 'no_account_info') else 'medium'
+                # When it last happened, so a fixed problem can be told from a
+                # current one while its count drains out of the window.
                 out.append(_anom(sev, symbol, 'persistent_skip',
                                  f"{symbol}: {SYSTEMIC_REASONS[reason]} ({n} recent checks).",
                                  hint=BLOCKED.get(reason, (None, None))[1],
-                                 reason=reason, count=n))
+                                 reason=reason, count=n, last_at=last.get((symbol, reason))))
     return out
 
 

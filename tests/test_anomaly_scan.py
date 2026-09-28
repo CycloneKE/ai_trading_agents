@@ -77,6 +77,12 @@ def test_persistent_skip_flags_systemic_reason():
     assert out[0]['detail']['reason'] == 'fallback_price'
 
 
+def test_a_repeated_price_problem_says_when_it_last_happened():
+    decisions = [{**dec('BTC-USD', skip='fallback_price'), 'ts': f'2026-09-28T0{h}:00:00'} for h in (3, 7, 5, 4)]
+    [notice] = A.detect_persistent_skip(decisions, threshold=4)
+    assert notice['detail']['last_at'] == '2026-09-28T07:00:00'
+
+
 def test_persistent_skip_ignores_normal_hold():
     decisions = [dec(skip='hold') for _ in range(10)]
     assert A.detect_persistent_skip(decisions, threshold=4) == []
