@@ -49,6 +49,9 @@ class PaperTradingBroker(BaseBroker):
         self.commission_per_trade = config.get('commission_per_trade', 0.0)
         self.slippage_percent = config.get('slippage_percent', 0.0)
         self.data_source = config.get('data_source', None)
+        # Each paper book keeps its own file (the forex book is a second
+        # instance of this broker); the first book keeps the original name.
+        self.state_path = str(DATA_DIR / config.get('state_file', 'paper_trading_state.json'))
         
         # Internal state
         self.cash = self.initial_cash
@@ -391,8 +394,9 @@ class PaperTradingBroker(BaseBroker):
             order: Order to process
         """
         try:
-            # Get current price
-            current_price = self._get_current_price(order.symbol)
+            # A fill needs a live price: the last known one may be hours
+            # old (a vendor outage, a weekend), and the order simply waits.
+            current_price = self._get_current_price(order.symbol, live_only=True)
             if current_price is None:
                 return
             
@@ -572,7 +576,7 @@ class PaperTradingBroker(BaseBroker):
                         broker_name=self.broker_name
                     )
     
-    def _get_current_price(self, symbol: str) -> Optional[float]:
+    def _get_current_price(self, symbol: str, live_only: bool = False) -> Optional[float]:
         """
         Get current price for a symbol.
         
@@ -588,8 +592,9 @@ class PaperTradingBroker(BaseBroker):
             self.market_prices[symbol] = price
             return price
         
-        # If real price feed fails, fallback to last known if available
-        if symbol in self.market_prices:
+        # If real price feed fails, fallback to last known if available,
+        # to value holdings; never to fill an order (live_only).
+        if symbol in self.market_prices and not live_only:
             last_price = self.market_prices[symbol]
             logger.warning(f"Using cached price for {symbol}: {last_price}")
             return last_price
@@ -621,7 +626,7 @@ class PaperTradingBroker(BaseBroker):
             # Create directory if it doesn't exist
             os.makedirs(str(DATA_DIR), exist_ok=True)
 
-            with open(str(DATA_DIR / 'paper_trading_state.json'), 'w') as f:
+            with open(self.state_path, 'w') as f:
                 json.dump(state, f, indent=2)
                 
         except Exception as e:
@@ -630,8 +635,8 @@ class PaperTradingBroker(BaseBroker):
     def _load_state(self):
         """Load paper trading state from file."""
         try:
-            if os.path.exists(str(DATA_DIR / 'paper_trading_state.json')):
-                with open(str(DATA_DIR / 'paper_trading_state.json'), 'r') as f:
+            if os.path.exists(self.state_path):
+                with open(self.state_path, 'r') as f:
                     state = json.load(f)
                 
                 self.cash = state.get('cash', self.initial_cash)

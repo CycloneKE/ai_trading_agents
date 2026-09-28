@@ -66,23 +66,42 @@ def test_allocator_noop_without_llm():
     assert MgrStub.strategy_weights == CURRENT  # untouched
 
 
-def test_allocator_applies_proposal_from_llm():
-    class FakeLLM:
-        enabled = True
-        def propose_json(self, system_prompt, user_prompt):
-            return {'momentum': 1.3, 'mean_reversion': 0.7, 'rsi_strategy': 0.8}
+class _FakeLLM:
+    enabled = True
 
-    class MgrStub:
-        def __init__(self):
-            self.strategy_weights = dict(CURRENT)
+    def __init__(self):
+        self.calls = 0
 
-    mgr = MgrStub()
-    alloc = LLMAllocator(FakeLLM(), mgr, None, {'interval_hours': 0})
+    def propose_json(self, system_prompt, user_prompt):
+        self.calls += 1
+        return {'momentum': 1.3, 'mean_reversion': 0.7, 'rsi_strategy': 1.5}
+
+
+class _MgrStub:
+    def __init__(self):
+        self.strategy_weights = dict(CURRENT)
+
+
+EVIDENCE = {'momentum': {'closed_trades': 7}, 'mean_reversion': {'closed_trades': 5},
+            'rsi_strategy': {'closed_trades': 1}}
+
+
+def test_allocator_waits_for_closed_trades_before_asking():
+    llm, mgr = _FakeLLM(), _MgrStub()
+    alloc = LLMAllocator(llm, mgr, None, {'interval_hours': 0})
+    assert alloc.maybe_rebalance() is None
+    assert llm.calls == 0 and mgr.strategy_weights == CURRENT             # no evidence, no AI call
+
+
+def test_allocator_applies_proposal_from_llm(monkeypatch):
+    llm, mgr = _FakeLLM(), _MgrStub()
+    alloc = LLMAllocator(llm, mgr, None, {'interval_hours': 0})
+    monkeypatch.setattr(alloc, '_attribution', lambda: EVIDENCE)
     applied = alloc.maybe_rebalance()
-    assert applied == {'momentum': 1.3, 'mean_reversion': 0.7, 'rsi_strategy': 0.8}
-    assert mgr.strategy_weights['momentum'] == 1.3
-    # second call inside the interval is rate-limited... interval 0 -> allowed;
-    # use a real interval to check the limiter
-    alloc2 = LLMAllocator(FakeLLM(), mgr, None, {'interval_hours': 6})
+    # rsi_strategy has closed one trade: too few to judge, so it keeps 0.8.
+    assert applied == {'momentum': 1.3, 'mean_reversion': 0.7}
+    assert mgr.strategy_weights == {'momentum': 1.3, 'mean_reversion': 0.7, 'rsi_strategy': 0.8}
+    alloc2 = LLMAllocator(llm, mgr, None, {'interval_hours': 6})
+    monkeypatch.setattr(alloc2, '_attribution', lambda: EVIDENCE)
     assert alloc2.maybe_rebalance() is not None
     assert alloc2.maybe_rebalance() is None  # rate-limited

@@ -11,6 +11,30 @@ const DOT = { high: theme.colors.danger, medium: theme.colors.warning, low: them
 const PROVIDER = { anthropic: 'Claude', groq: 'Groq', gemini: 'Gemini', openrouter: 'OpenRouter' };
 const clock = (ts) => (ts ? new Date(ts * 1000).toLocaleString() : '');
 
+// The settings the daily AI review may comment on (self_assessment.ADJUSTABLE).
+const SETTING = {
+  'risk_limits.stop_loss_pct': ['the fixed stop-loss', 'pct'],
+  'risk_limits.trailing_stop_pct': ['the fixed trailing stop', 'pct'],
+  'risk_limits.stop_loss_atr_mult': ['the stop-loss distance', 'atr'],
+  'risk_limits.trailing_stop_atr_mult': ['the trailing stop distance', 'atr'],
+};
+const settingValue = (kind, v) => (kind === 'pct' ? `${+(v * 100).toFixed(1)}%` : `${v} x ATR`);
+
+// The daily AI review is advice: its checked suggestions are shown here and
+// nothing changes unless config.json is changed.
+function reviewItems(review) {
+  if (!review || !(review.suggestions || []).length) return [];
+  return review.suggestions.map((s, i) => {
+    const [name, kind] = SETTING[s.target] || [s.target, 'atr'];
+    return {
+      key: `review-${i}`, severity: 'info', attention: false,
+      message: `AI review suggests changing ${name} from ${settingValue(kind, s.current)} to ${settingValue(kind, s.proposed)}${s.reasoning ? `: ${s.reasoning}` : '.'}`,
+      hint: `Based on ${review.executed_trades} trades. Advice only: nothing changes unless config.json is changed.`,
+      lastAt: review.at, lastLabel: 'Reviewed',
+    };
+  });
+}
+
 // What the AI services are doing: failing ones need a look when nothing else
 // answers; otherwise they are information, as are the ones answering.
 function aiItems(ai) {
@@ -64,6 +88,7 @@ export function notificationItems({ anomalies = [], pendingApprovals = 0, status
     });
   }
   items.push(...aiItems(ai));
+  items.push(...reviewItems(ai && ai.review));
   anomalies.forEach((a, i) => items.push({
     key: `a${i}`, severity: a.severity, attention: a.attention ?? ['high', 'medium'].includes(a.severity),
     message: a.message, hint: a.hint, symbol: a.symbol, lastAt: a.detail?.last_at,
@@ -83,7 +108,7 @@ function Item({ item, onDrill, onGo }) {
       <div style={{ minWidth: 0, flex: 1 }}>
         <div style={{ fontSize: '13px', color: theme.colors.text }}>{item.message}</div>
         {item.hint && <div style={{ fontSize: '12px', color: theme.colors.textMuted, marginTop: '3px' }}>{item.hint}</div>}
-        {item.lastAt && <div style={{ fontSize: '11px', color: theme.colors.textMuted, marginTop: '2px' }}>Last seen {localTime(item.lastAt)}</div>}
+        {item.lastAt && <div style={{ fontSize: '11px', color: theme.colors.textMuted, marginTop: '2px' }}>{item.lastLabel || 'Last seen'} {localTime(item.lastAt)}</div>}
       </div>
       {act && (
         <span style={{ fontSize: '11px', color: theme.colors.textSecondary, whiteSpace: 'nowrap' }}>

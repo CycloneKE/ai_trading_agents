@@ -7,6 +7,15 @@ import threading
 
 logger = logging.getLogger(__name__)
 
+def yahoo_symbol(symbol: str) -> str:
+    """Yahoo Finance's name for a symbol: a currency pair written EUR_USD
+    is EURUSD=X there; anything else is unchanged."""
+    sym = str(symbol or '').upper()
+    if len(sym) == 7 and sym[3] == '_' and sym.replace('_', '').isalpha():
+        return f"{sym.replace('_', '')}=X"
+    return sym
+
+
 class RealPriceFeed:
     """
     Fetch real market prices using yfinance with caching.
@@ -28,8 +37,9 @@ class RealPriceFeed:
                 return cached['price']
 
         try:
-            # Map NSE symbols to yfinance format (e.g. SCOM -> SCOM.KE)
-            yf_symbol = symbol.upper()
+            # Map NSE symbols to yfinance format (e.g. SCOM -> SCOM.KE) and
+            # currency pairs to Yahoo's (EUR_USD -> EURUSD=X).
+            yf_symbol = yahoo_symbol(symbol)
             
             # Known Kenyan NSE symbol mapping
             kenyan_symbols = {

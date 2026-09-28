@@ -58,15 +58,17 @@ class AdaptiveStrategyIntegration:
                     self.strategy_adaptations[goal.goal_type.value] = adaptation
     
     def _create_adaptation_for_goal(self, goal) -> Optional[Dict[str, Any]]:
-        """Create strategy adaptation for a specific goal"""
+        """Create strategy adaptation for a specific goal.
+
+        Falling behind the profit goal used to make the agent more
+        aggressive: bigger positions and a 60/40 tilt to momentum, written
+        over the ensemble's evidence-based weights every cycle. That is
+        chasing losses. A struggling goal may only make the agent more
+        careful (guardrails.py, rule 4), so the profit goal adapts nothing.
+        """
         if goal.goal_type == GoalType.PROFIT_TARGET:
-            return {
-                'increase_position_size': True,
-                'position_multiplier': 1.1,
-                'focus_momentum': True,
-                'momentum_weight': 0.6
-            }
-        
+            return None
+
         elif goal.goal_type == GoalType.SHARPE_OPTIMIZATION:
             return {
                 'reduce_volatility_exposure': True,
@@ -109,11 +111,7 @@ class AdaptiveStrategyIntegration:
         """Apply adaptation to strategy parameters"""
         updated_params = {}
         
-        if adaptation.get('increase_position_size'):
-            current_size = params.get('position_size', 0.1)
-            multiplier = adaptation.get('position_multiplier', 1.1)
-            updated_params['position_size'] = min(current_size * multiplier, 0.2)  # Cap at 20%
-        
+        # Reduce-only: nothing here may raise a size or re-weight strategies.
         if adaptation.get('reduce_position_size'):
             current_size = params.get('position_size', 0.1)
             multiplier = adaptation.get('position_multiplier', 0.9)
@@ -123,11 +121,7 @@ class AdaptiveStrategyIntegration:
             current_stop = params.get('stop_loss', 0.05)
             multiplier = adaptation.get('stop_loss_multiplier', 0.8)
             updated_params['stop_loss'] = current_stop * multiplier
-        
-        if adaptation.get('focus_momentum'):
-            updated_params['momentum_weight'] = adaptation.get('momentum_weight', 0.6)
-            updated_params['mean_reversion_weight'] = 1.0 - updated_params['momentum_weight']
-        
+
         return updated_params
     
     def should_trade(self, symbol: str, signal_strength: float) -> bool:
@@ -162,16 +156,17 @@ class AdaptiveStrategyIntegration:
         # Adjust based on signal strength
         size_multiplier = min(abs(signal_strength) * 2, 1.5)  # Cap at 1.5x
         
-        # Adjust based on current market regime
+        # Volatile markets shrink the size; calm ones no longer enlarge it
+        # (a calm stretch is when risk is underestimated).
         if self.adaptive_agent.market_regime == "high_volatility":
-            size_multiplier *= 0.7  # Reduce size in volatile markets
-        elif self.adaptive_agent.market_regime == "low_volatility":
-            size_multiplier *= 1.2  # Increase size in stable markets
-        
-        # Calculate final position size
+            size_multiplier *= 0.7
+
         position_value = account_value * risk_tolerance * base_size * size_multiplier
-        
-        return min(position_value, account_value * 0.1)  # Cap at 10% of account
+
+        # Never above the configured position cap: a proposed size over it
+        # made _check_risk_limits refuse every trade in the cycle.
+        cap = float((self.config.get('risk_limits') or {}).get('max_position_size', 0.05))
+        return min(position_value, account_value * cap)
     
     def get_adaptive_status(self) -> Dict[str, Any]:
         """Get comprehensive status of adaptive system"""

@@ -57,6 +57,41 @@ SKIP_MEANING = {
     'pdt_guard': ('check sizing', 'pattern-day-trader rule blocked the trade'),
 }
 
+# Signals the agent's rules settle before the AI is asked (main.py
+# _held_back_before_review): no AI verdict on these is by design, not a
+# missing review.
+SETTLED_BEFORE_REVIEW = {'market_closed', 'no_position', 'order_pending', 'position_unknown',
+                         'already_held', 'add_not_profitable', 'fallback_price', 'stale_price',
+                         'halted', 'no_broker'}
+
+
+def reading(reason):
+    """(verdict, meaning) for a skip reason. Reasons added to the agent
+    after this table was written take their wording from the Notifications
+    page (anomaly_scan), so no reason shows as unrecognised."""
+    if reason in SKIP_MEANING:
+        return SKIP_MEANING[reason]
+    if reason == 'executed':
+        return ('executed', 'the trade went out')
+    try:
+        from src.agent.anomaly_scan import BLOCKED, HELD_BACK
+    except Exception:
+        BLOCKED, HELD_BACK = {}, {}
+    if reason in HELD_BACK:
+        return ('by design', HELD_BACK[reason])
+    if reason in BLOCKED:
+        return ('check', BLOCKED[reason][0])
+    return ('?', 'unrecognised reason')
+
+
+def currency_of(symbol, config):
+    """KES for an NSE stock, USD for everything else the agent trades."""
+    try:
+        from src.agent.cost_model import classify
+        return 'KES' if classify(symbol, config) == 'nse' else 'USD'
+    except Exception:
+        return '?'
+
 
 # --------------------------------------------------------------- data access
 
@@ -193,6 +228,11 @@ def build(args):
 
     oc = read_only(orders_db)
     dc = read_only(decisions_db)
+    try:
+        with open(getattr(args, 'config', None) or 'config/config.json', encoding='utf-8') as f:
+            config = json.load(f)
+    except (OSError, ValueError):
+        config = {}
 
     if cutoff_iso:
         all_orders = rows(oc, 'SELECT * FROM orders WHERE created_at >= ?'
@@ -217,6 +257,18 @@ def build(args):
 
     llm_missing = sum(1 for d in decisions
                       if not (d.get('llm_verdict_json') or '').strip('{} \n'))
+    # How much of what could reach the AI review did: only buy or sell
+    # signals go to it, and the rules settle some of those first.
+    signals = [d for d in decisions if (d.get('action') or '') in ('buy', 'sell')]
+    reviewed = [d for d in signals if (d.get('llm_verdict_json') or '').strip('{} \n')]
+    settled = [d for d in signals if d not in reviewed
+               and (d.get('skip_reason') or '') in SETTLED_BEFORE_REVIEW]
+    stuck = [{'symbol': o.get('symbol'), 'side': o.get('side'), 'status': o.get('status'),
+              'created_at': o.get('created_at'), 'strategy': o.get('strategy')}
+             for o in all_orders if (o.get('status') or '') in ('intent', 'submitted')]
+    realised_by_currency = defaultdict(float)
+    for t in trips:
+        realised_by_currency[currency_of(t.get('symbol'), config)] += t['pnl']
 
     started = parse_ts((manifest or {}).get('started_at'))
     elapsed_days = ((now - started).total_seconds() / 86400.0) if started else None
@@ -230,6 +282,7 @@ def build(args):
         'orders': {
             'total': len(all_orders),
             'by_status': dict(statuses),
+            'stuck': stuck,
             'last_order_at': last_order.isoformat() if last_order else None,
             'hours_since_last_order': ((now - last_order).total_seconds() / 3600.0
                                        if last_order else None),
@@ -242,15 +295,20 @@ def build(args):
             'hours_since_last_decision': ((now - last_decision).total_seconds() / 3600.0
                                           if last_decision else None),
             'without_llm_verdict': llm_missing,
+            'signals': len(signals),
+            'signals_reviewed': len(reviewed),
+            'signals_settled_by_rules': len(settled),
         },
         'pnl': {
             'closed_trips': len(trips),
             'realised': sum(t['pnl'] for t in trips),
+            'realised_by_currency': dict(realised_by_currency),
             'by_symbol': aggregate(trips, 'symbol'),
             'by_strategy': aggregate(trips, 'strategy'),
             'open_positions': {s: {'lots': len(q),
                                    'quantity': sum(l['qty'] for l in q),
-                                   'cost_basis': sum(l['qty'] * l['price'] for l in q)}
+                                   'cost_basis': sum(l['qty'] * l['price'] for l in q),
+                                   'currency': currency_of(s, config)}
                                for s, q in open_lots.items()},
         },
     }
@@ -367,9 +425,7 @@ def render(rep, config_path):
         add('| reason | count | share | reading |')
         add('|---|---:|---:|---|')
         for reason, n in sorted(d['by_skip_reason'].items(), key=lambda x: -x[1]):
-            verdict, meaning = SKIP_MEANING.get(
-                reason, ('executed', 'the trade went out')
-                if reason == 'executed' else ('?', 'unrecognised reason'))
+            verdict, meaning = reading(reason)
             add(f"| {reason} | {n:,} | {n / total:.1%} | {verdict}: {meaning} |")
         degraded = {r: n for r, n in d['by_skip_reason'].items()
                     if SKIP_MEANING.get(r, ('', ''))[0] == 'DEGRADED'}
@@ -386,7 +442,11 @@ def render(rep, config_path):
     add('## What it made')
     add('')
     add(f"- Closed round trips: {p['closed_trips']:,}")
-    add(f"- Realised P&L: {p['realised']:,.2f}")
+    by_ccy = p.get('realised_by_currency') or {}
+    if by_ccy:
+        add('- Realised P&L: ' + '; '.join(f"{c} {v:,.2f}" for c, v in sorted(by_ccy.items())))
+    else:
+        add(f"- Realised P&L: {p['realised']:,.2f}")
     add('')
     add('Realised P&L is computed from actual fill prices, FIFO matched. '
         'Broker commission and the slippage already embedded in those fills '
@@ -432,7 +492,7 @@ def render(rep, config_path):
         add('| symbol | quantity | cost basis |')
         add('|---|---:|---:|')
         for sym, a in sorted(p['open_positions'].items()):
-            add(f"| {sym} | {a['quantity']:,.4f} | {a['cost_basis']:,.2f} |")
+            add(f"| {sym} | {a['quantity']:,.4f} | {a.get('currency', '')} {a['cost_basis']:,.2f} |")
         add('')
 
     # 5. Degradation
@@ -441,9 +501,13 @@ def render(rep, config_path):
     findings = []
     stuck = (o['by_status'].get('intent', 0) + o['by_status'].get('submitted', 0))
     if stuck:
-        findings.append(f"{stuck} order(s) never reached a final status. Either "
-                        f"the broker never answered or reconciliation is not "
-                        f"running at startup.")
+        named = '; '.join(f"{s['side']} {s['symbol']} ({s['status']}, {str(s['created_at'])[:16]}, "
+                          f"{s['strategy'] or '?'})" for s in (o.get('stuck') or [])[:10])
+        findings.append(f"{stuck} order(s) never reached a final status"
+                        + (f": {named}" if named else '') + ". An order placed while its "
+                        f"market is closed waits at the broker for the next open; one "
+                        f"still here after a full trading day means the broker never "
+                        f"answered or reconciliation is not running at startup.")
     failed = o['by_status'].get('failed', 0) + o['by_status'].get('aborted', 0)
     if failed:
         findings.append(f"{failed} order(s) failed or were aborted. Each one is "
@@ -452,15 +516,24 @@ def render(rep, config_path):
     if rejected:
         findings.append(f"{rejected} order(s) were rejected by the broker. "
                         f"Usually sizing, buying power, or a tradability rule.")
-    if d['total'] and d['without_llm_verdict'] == d['total']:
+    # Only buy and sell signals go to the AI review, and the rules settle
+    # some first; holds never do. Counting every decision made a quiet week
+    # look like an AI outage.
+    if 'signals' in d:
+        due = d['signals'] - d['signals_settled_by_rules']
+        missed = due - d['signals_reviewed']
+        if due > 0 and d['signals_reviewed'] == 0:
+            findings.append(f"None of the {due:,} signals due an AI review got one. Validation is "
+                            f"either disabled or has been rate-limited off for the whole window, "
+                            f"so trades went out unvalidated.")
+        elif due > 0 and missed > 0.5 * due:
+            findings.append(f"{missed:,} of {due:,} signals due an AI review ({missed / due:.0%}) "
+                            f"got none, which is what an exhausted AI allowance looks like "
+                            f"from the journal.")
+    elif d['total'] and d['without_llm_verdict'] == d['total']:
         findings.append('No decision carries an LLM verdict. Validation is '
                         'either disabled or has been rate-limited off for the '
                         'whole window, so trades went out unvalidated.')
-    elif d['total'] and d['without_llm_verdict'] > 0.5 * d['total']:
-        findings.append(f"{d['without_llm_verdict']:,} of {d['total']:,} "
-                        f"decisions ({d['without_llm_verdict'] / d['total']:.0%}) "
-                        f"have no LLM verdict, which is what quota exhaustion "
-                        f"looks like from the journal.")
     fb = d['by_skip_reason'].get('fallback_price', 0)
     if fb:
         findings.append(f"{fb:,} decisions saw synthetic fallback prices. The "

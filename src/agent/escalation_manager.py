@@ -90,6 +90,10 @@ class EscalationManager:
             self.withdraw_misread_market_reports()
         except Exception as e:
             logger.warning(f"Could not withdraw misread Market Pulse ratings: {e}")
+        try:
+            self.withdraw_unchecked_ai_proposals()
+        except Exception as e:
+            logger.warning(f"Could not withdraw the AI review's old proposals: {e}")
         logger.info(f"EscalationManager database initialized at {db_path}")
 
     def record_upload(self, filename: str, source: str = 'aib_axys') -> int:
@@ -119,6 +123,31 @@ class EscalationManager:
                 "UPDATE research_uploads SET document_type = ?, summary = ? WHERE id = ?",
                 (document_type, json.dumps(actions), upload_id))
             self._conn.commit()
+
+    def withdraw_unchecked_ai_proposals(self) -> int:
+        """Close the proposals the AI self-review used to post, unchecked.
+
+        The daily review (self_assessment.py) used to put whatever the AI
+        suggested into the approval queue: settings that do not exist,
+        placeholder tickers such as ABC or XYZ, and contradictory stop
+        changes made with no trades to judge by. Approving one did not apply
+        it. The review is now advisory and posts nothing here, so its old
+        pending proposals (no research signal, reason starting as the old
+        review wrote it) are closed as expired. Safe to run on every start.
+        """
+        note = ("Withdrawn automatically: suggested by the AI review before its suggestions were "
+                "checked. The review now waits for real trades, suggests only settings that exist "
+                "within safe ranges, and shows its advice on the Notifications page.")
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE escalations SET status = 'expired', operator_notes = ?, resolved_at = ?, "
+                "resolved_by = 'system' WHERE status = 'pending' AND signal_id IS NULL AND "
+                "(reason LIKE 'Proposed adjustment:%' OR reason LIKE 'Retrospective recommendation:%')",
+                (note, datetime.utcnow().isoformat()))
+            self._conn.commit()
+            if cur.rowcount:
+                logger.info(f"Withdrew {cur.rowcount} unchecked AI review proposals from the approval queue")
+            return cur.rowcount
 
     def withdraw_misread_market_reports(self) -> Dict[str, int]:
         """Undo what the old reader did with Market Pulse reports.

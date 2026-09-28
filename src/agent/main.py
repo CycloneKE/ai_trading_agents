@@ -53,6 +53,9 @@ from src.connectors.nse_scraper import REAL_NSE_SOURCES
 from src.agent.position_rules import (LIVE_ADD_DEFAULTS, LIVE_EXIT_DEFAULTS, plan_add,
                                       plan_exit, rule, state_from_journal)
 from src.agent.cost_model import classify, costs_for
+
+# The broker entry (config brokers.forex_paper) that holds the forex paper book.
+FOREX_BOOK = 'forex_paper'
 from src.agent.broker_manager import BrokerManager
 from src.agent.order_execution_engine import OrderExecutionEngine
 from src.agent.realtime_risk_manager import RealTimeRiskManager
@@ -382,14 +385,21 @@ class TradingAgent:
         plus the add rule's minimum gain: adds happen only on the way up, so
         the last entry is at or above the average, and plan_add would refuse.
         """
-        from src.agent.core_portfolio import us_session_open
+        from src.agent.core_portfolio import fx_session_open, us_session_open
         market = classify(symbol, self.config)
         if market == 'us_equity' and not us_session_open(now):
+            return 'market_closed'
+        if market == 'forex' and not fx_session_open(now):
             return 'market_closed'
         bm = self.components.get('broker_manager')
         if bm is None:
             return None
-        broker = bm.get_broker('coinbase_broker') if market == 'crypto' else None
+        if market == 'forex':
+            broker = TradingAgent._forex_broker(self)
+            if broker is None:
+                return 'no_broker'
+        else:
+            broker = bm.get_broker('coinbase_broker') if market == 'crypto' else None
         if not broker or not getattr(broker, 'is_connected', False):
             broker = bm.get_broker()
         if not broker or not getattr(broker, 'is_connected', False):
@@ -404,6 +414,25 @@ class TradingAgent:
             if price and avg_entry and price < avg_entry * (1 + float(add_rule['min_gain_pct'])):
                 return 'add_not_profitable'
         return None
+
+    def _forex_broker(self):
+        """The forex paper book (config brokers.forex_paper), when it is
+        built and connected; None otherwise. Forex never falls back to the
+        primary broker: Alpaca does not trade currencies."""
+        bm = self.components.get('broker_manager')
+        broker = bm.get_broker(FOREX_BOOK) if bm is not None else None
+        return broker if broker is not None and getattr(broker, 'is_connected', False) else None
+
+    def _books(self):
+        """Every connected book the loop trades: the primary broker's, then
+        the forex paper book when there is one."""
+        bm = self.components.get('broker_manager')
+        primary = bm.get_broker() if bm is not None else None
+        books = [primary] if primary is not None and getattr(primary, 'is_connected', False) else []
+        fx = TradingAgent._forex_broker(self)
+        if fx is not None and fx not in books:
+            books.append(fx)
+        return books
 
     def _position_gate(self, broker, symbol: str, action: str):
         """The backtest's position rules, applied before any order.
@@ -822,18 +851,18 @@ class TradingAgent:
                 # attribution and duplicate-close checks see current state.
                 if self.order_journal:
                     try:
-                        broker_manager = self.components.get('broker_manager')
-                        primary = broker_manager.get_broker() if broker_manager else None
-                        if primary and primary.is_connected:
-                            self.order_journal.sync_fills(primary)
-                            # Feed real broker positions into the risk manager
-                            # so trailing stops fire and /api/risk-metrics
-                            # reflects actual exposure.
-                            if getattr(self, 'risk_manager', None):
-                                acct = primary.get_account_info()
-                                self.risk_manager.sync_broker_positions(
-                                    primary.get_positions(),
-                                    cash=acct.cash if acct else 0.0)
+                        books = TradingAgent._books(self)
+                        for book in books:
+                            self.order_journal.sync_fills(book)
+                        # Feed real broker positions into the risk manager
+                        # so trailing stops fire and /api/risk-metrics
+                        # reflects actual exposure; the forex book's too,
+                        # or its trailing stops would never fire.
+                        if books and getattr(self, 'risk_manager', None):
+                            acct = books[0].get_account_info()
+                            positions = [p for book in books for p in (book.get_positions() or [])]
+                            self.risk_manager.sync_broker_positions(
+                                positions, cash=acct.cash if acct else 0.0)
                     except Exception as e:
                         logger.debug(f"Position/fill sync error: {e}")
 
@@ -991,16 +1020,12 @@ class TradingAgent:
                                             # Flat list with per-item symbol field
                                             symbol_news.extend([n for n in data if isinstance(n, dict) and n.get('symbol') == symbol])
 
-                                # Apply Adaptive Goals to strategy execution
-                                modified_params = self.components['adaptive_integration'].get_strategy_parameters('technical')
-                                if modified_params:
-                                    # Update momentum & reversion weights if adjusted by goals/performance
-                                    mw = modified_params.get('momentum_weight')
-                                    mr = modified_params.get('mean_reversion_weight')
-                                    if mw is not None and mr is not None:
-                                        self.components['strategy_manager'].strategy_weights['momentum'] = mw
-                                        self.components['strategy_manager'].strategy_weights['mean_reversion'] = mr
-                                
+                                # The adaptive goals layer used to overwrite the
+                                # ensemble's momentum / mean-reversion weights here
+                                # every cycle while the profit goal was behind:
+                                # chasing losses over the evidence-based weights.
+                                # It no longer sets weights (guardrails.py).
+
                                 # Generate trading signals for this symbol
                                 symbol_signals = self.components['strategy_manager'].generate_signals(symbol_data)
 
@@ -1183,15 +1208,15 @@ class TradingAgent:
                             logger.info("Executing periodic self-assessment and self-improvement loop...")
                             engine = self.components.get('self_assessment')
                             if engine:
-                                plan = engine.run_assessment(
+                                # Advisory only: the review's checked suggestions
+                                # are shown on the Notifications page; nothing is
+                                # applied or sent to the approval queue.
+                                engine.run_assessment(
                                     self.decision_journal,
                                     self.order_journal,
                                     self.performance_analytics,
                                     cycles_to_review=assessment_interval
                                 )
-                                # Auto-apply safe changes
-                                auto_applied, escalated = engine.apply_improvements(plan, require_approval=False)
-                                logger.info(f"Retrospective assessment completed: applied {len(auto_applied)} auto-improvements, escalated {len(escalated)} structural proposals.")
 
                                 # Prune expired local cache entries to prevent memory leaks in local offline mode
                                 if state_store:
@@ -1877,47 +1902,61 @@ class TradingAgent:
             return False
     
     def _extract_symbol_data(self, market_data: Dict[str, Any], symbol: str) -> Optional[Dict[str, Any]]:
-        """
-        Extract data for a specific symbol from the market data.
-        
-        Args:
-            market_data: Full market data from data manager
-            symbol: Symbol to extract data for
-            
-        Returns:
-            Symbol-specific data or None if not found
+        """This cycle's quote for one symbol, tagged with its source.
+
+        A real source wins over the synthetic fallback. The data manager
+        keeps every source's last batch, so an old fallback batch stays in
+        market_data for good; the first source holding the symbol used to
+        win, and crypto, which the Finnhub / Alpha Vantage quote path does
+        not cover, only ever found the fallback: every crypto signal was set
+        aside as fallback_price. When no real source has the symbol, the live
+        price feed (Yahoo Finance, which also serves the history warm-start)
+        is asked; the fallback is returned, and refused downstream, only
+        when that has nothing either.
         """
         try:
-            # Check different data sources
-            for data_type, sources in market_data.items():
-                if data_type == 'market_data':
-                    for source, source_data in sources.items():
-                        data = source_data.get('data', {})
-                        
-                        # Check if symbol data exists
-                        if symbol in data:
-                            symbol_data = data[symbol].copy()
-                            symbol_data['symbol'] = symbol
-                            symbol_data['source'] = source
-                            symbol_data['timestamp'] = source_data.get('timestamp')
-                            return symbol_data
-                        
-                        # Check if data is for this specific symbol
-                        if data.get('symbol') == symbol:
-                            symbol_data = data.copy()
-                            symbol_data['symbol'] = symbol
-                            symbol_data['source'] = source
-                            symbol_data['timestamp'] = source_data.get('timestamp')
-                            return symbol_data
-            
-            # If no data found, return None
-            logger.debug(f"No market data found for symbol {symbol}")
-            return None
-            
+            fallback = None
+            for source, source_data in ((market_data or {}).get('market_data') or {}).items():
+                data = (source_data or {}).get('data') or {}
+                if symbol in data:
+                    row = data[symbol]
+                elif data.get('symbol') == symbol:
+                    row = data
+                else:
+                    continue
+                found = {**row, 'symbol': symbol, 'source': source,
+                         'timestamp': source_data.get('timestamp')}
+                if source != 'fallback':
+                    return found
+                fallback = fallback or found
+            live = self._live_quote(symbol)
+            if live:
+                return live
+            if fallback is None:
+                logger.debug(f"No market data found for symbol {symbol}")
+            return fallback
         except Exception as e:
             logger.error(f"Error extracting data for symbol {symbol}: {str(e)}")
             return None
-    
+
+    @staticmethod
+    def _live_quote(symbol: str) -> Optional[Dict[str, Any]]:
+        """A real last price from the live price feed, or None."""
+        try:
+            from src.utils.real_price_feed import price_feed
+            price = price_feed.get_price(symbol)
+        except Exception as e:
+            logger.debug(f"Live price feed unavailable for {symbol}: {e}")
+            return None
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            return None
+        if not price > 0:
+            return None
+        return {'symbol': symbol, 'price': price, 'close': price, 'source': 'yfinance',
+                'timestamp': datetime.utcnow().isoformat()}
+
     def _execute_trades(self, signals: Dict[str, Dict[str, Any]], risk_assessment: Dict[str, Any]):
         """
         Execute trades based on signals and risk assessment with unified order routing.
@@ -1957,11 +1996,8 @@ class TradingAgent:
 
                     if action != 'hold' and confidence > 0.1 and position_size > 0:
                         # Determine asset type for routing
-                        asset_type = 'stock'
-                        if symbol.endswith('-USD') or symbol in ['BTC-USD', 'ETH-USD']:
-                            asset_type = 'crypto'
-                        elif '_' in symbol:
-                            asset_type = 'forex'
+                        market = classify(symbol, self.config)
+                        asset_type = {'crypto': 'crypto', 'forex': 'forex'}.get(market, 'stock')
 
                         # Route to appropriate broker. Stocks go to the
                         # PRIMARY broker (Alpaca in prod) — the same book that
@@ -1975,9 +2011,9 @@ class TradingAgent:
                             if not broker or not getattr(broker, 'is_connected', False):
                                 broker = broker_manager.get_broker()  # Fallback to paper broker
                         elif asset_type == 'forex':
-                            broker = broker_manager.get_broker('oanda_broker')
-                            if not broker or not getattr(broker, 'is_connected', False):
-                                broker = broker_manager.get_broker()  # Fallback to paper broker
+                            # The forex paper book only: the primary broker
+                            # (Alpaca) does not trade currencies.
+                            broker = TradingAgent._forex_broker(self)
                         else:
                             broker = broker_manager.get_broker()  # primary
                             
@@ -2018,9 +2054,15 @@ class TradingAgent:
                         # from their own share of equity, and "deployed" is
                         # measured within that share, not across the core.
                         equity = float(account_info.equity)
-                        portfolio_value = TradingAgent._active_equity(self, equity)
                         cash = float(getattr(account_info, 'cash', 0) or 0)
-                        active_invested = max(equity - cash - TradingAgent._core_value_now(self), 0.0)
+                        if asset_type == 'forex':
+                            # A book of its own: sized from its own balance,
+                            # with no core-satellite split.
+                            portfolio_value = equity
+                            active_invested = max(equity - cash, 0.0)
+                        else:
+                            portfolio_value = TradingAgent._active_equity(self, equity)
+                            active_invested = max(equity - cash - TradingAgent._core_value_now(self), 0.0)
                         deployed_pct = active_invested / portfolio_value if portfolio_value else 0.0
                         if not hasattr(self, 'cash_policy'):
                             from src.agent.cash_policy import CashDeploymentPolicy
@@ -2386,6 +2428,9 @@ class TradingAgent:
         try:
             if side != 'sell' or not self.order_journal:
                 return False
+            # The rule covers US stocks only: not currencies or crypto.
+            if classify(symbol, self.config) != 'us_equity':
+                return False
             acct = broker.get_account_info()
             if not acct or acct.equity >= self.PDT_EQUITY_THRESHOLD:
                 return False
@@ -2449,15 +2494,14 @@ class TradingAgent:
             stop_loss_pct: Maximum loss percentage before auto-close (e.g. 0.05 = 5%)
             trailing_stop_pct: Trailing stop percentage (e.g. 0.03 = 3%)
         """
+        # Every book the loop trades: the forex paper book's positions need
+        # their stops as much as the primary broker's.
+        for book in TradingAgent._books(self):
+            TradingAgent._enforce_stops_on(self, book, stop_loss_pct, trailing_stop_pct)
+
+    def _enforce_stops_on(self, primary_broker, stop_loss_pct: float, trailing_stop_pct: float):
+        """Stop-loss and trailing stop rules on one book's open positions."""
         try:
-            broker_manager = self.components.get('broker_manager')
-            if not broker_manager:
-                return
-            
-            primary_broker = broker_manager.get_broker()
-            if not primary_broker or not primary_broker.is_connected:
-                return
-            
             positions = primary_broker.get_positions()
             if not positions:
                 return

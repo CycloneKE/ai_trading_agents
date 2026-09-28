@@ -52,7 +52,7 @@ def test_documentation_keys_are_not_treated_as_markets():
 
 def test_unverified_markets_flags_placeholders_only():
     flagged = unverified_markets(CFG)
-    assert set(flagged) == {'nse', 'crypto'}
+    assert set(flagged) == {'nse', 'crypto', 'forex'}          # forex spreads are an estimate
     assert 'us_equity' not in flagged
 
 

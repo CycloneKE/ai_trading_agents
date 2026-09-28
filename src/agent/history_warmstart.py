@@ -33,7 +33,8 @@ History = Dict[str, Dict[str, List[float]]]  # symbol -> {'close','high','low'}
 
 def _yfinance_daily(symbol: str, period: str = '6mo') -> List[Row]:
     import yfinance as yf
-    df = yf.Ticker(symbol).history(period=period, interval='1d', auto_adjust=True)
+    from src.utils.real_price_feed import yahoo_symbol
+    df = yf.Ticker(yahoo_symbol(symbol)).history(period=period, interval='1d', auto_adjust=True)
     if df is None or df.empty:
         return []
     return [(idx.date(), float(r['High']), float(r['Low']), float(r['Close']))

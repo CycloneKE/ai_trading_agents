@@ -75,8 +75,9 @@ def test_the_shipped_config_declares_all_its_crypto():
     assert mu.unclassified_crypto(_shipped()) == []
 
 
-def test_the_shipped_universe_is_the_trimmed_twenty_two():
-    assert len(mu.all_symbols(_shipped())) == 22
+def test_the_shipped_universe_is_the_trimmed_twenty_two_plus_three_currency_pairs():
+    symbols = mu.all_symbols(_shipped())
+    assert len(symbols) == 25 and {'EUR_USD', 'GBP_USD', 'AUD_USD'} <= set(symbols)
 
 
 def test_the_sleeve_only_accumulates_names_the_scraper_fetches():

@@ -10,6 +10,8 @@ import re
 import requests
 from typing import Dict, Any, List, Optional
 
+from src.agent.guardrails import bound_verdict
+
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 # Tried in turn when the configured Gemini model answers 404, which is what
 # Google returns once a model is retired. The first that answers is kept.
@@ -277,7 +279,7 @@ class LLMOrchestrator:
         cache_key = f"{symbol}:{action}:{conf_bucket}"
         cached = self._verdict_cache.get(cache_key)
         if cached and cached[0] > time.time():
-            return dict(cached[1])
+            return bound_verdict(strategy_signal, dict(cached[1]))
 
         system_prompt = (
             "You are a quantitative trading risk reviewer.\n"
@@ -347,7 +349,9 @@ class LLMOrchestrator:
             # full TTL even after the provider recovers from a brief 429.
             if isinstance(verdict, dict) and verdict is not strategy_signal:
                 self._verdict_cache[cache_key] = (time.time() + self.cache_ttl, dict(verdict))
-            return verdict
+            # The AI may confirm, weaken or veto; never reverse or strengthen
+            # (guardrails.bound_verdict).
+            return bound_verdict(strategy_signal, verdict)
 
         # All-providers-down returns the base signal: a trade is never
         # force-held by an LLM outage.

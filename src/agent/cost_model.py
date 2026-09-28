@@ -19,6 +19,7 @@ short-horizon NSE trading look viable when it is not.
 """
 
 import logging
+import re
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,18 @@ DEFAULT_COSTS: Dict[str, Dict[str, Any]] = {
         'verified': False,
         'note': 'PLACEHOLDER. Coinbase taker fees vary by volume tier.',
     },
+    'forex': {
+        # Currency brokers charge through the spread, not a commission.
+        'commission_pct': 0.0,
+        'min_commission': 0.0,
+        'slippage_pct': 0.0001,
+        'verified': False,
+        'note': 'ESTIMATE. About one pip of spread a side on the major USD pairs.',
+    },
 }
+
+# A currency pair as the config writes it: EUR_USD.
+FX_PAIR = re.compile(r'^[A-Z]{3}_[A-Z]{3}$')
 
 DEFAULT_MARKET = 'us_equity'
 
@@ -85,6 +97,8 @@ def classify(symbol: str, config: Optional[Dict[str, Any]] = None) -> str:
         return 'nse'
     if sym in {s.upper() for s in dm.get('crypto_symbols', []) or []}:
         return 'crypto'
+    if sym in {s.upper() for s in dm.get('forex_symbols', []) or []} or FX_PAIR.match(sym):
+        return 'forex'
     # A dash-suffixed fiat pair is the crypto convention used throughout the
     # config (BTC-USD, ETH-USD); plain tickers are US equities.
     if '-' in sym and sym.rsplit('-', 1)[-1] in {'USD', 'USDT', 'USDC', 'EUR'}:
