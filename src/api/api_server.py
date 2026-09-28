@@ -1482,12 +1482,16 @@ class TradingAPI:
                     nse_symbols.append(symbol)
                     logger.info(f"Added approved symbol {symbol} to config data_manager.nse_symbols")
                 em.add_to_watchlist(symbol, market='kenyan', source='universe_scout')
-            elif status == 'approved' and escalation:
+            elif status == 'approved' and escalation and escalation.get('signal_id') is not None:
+                # Only an analyst rating has something to put on the watchlist.
+                # The AI review's old proposals (no research signal) used to
+                # land here and put SYSTEM or ALL on the watchlist; approving
+                # one of those now only records the decision.
                 symbol = escalation.get('symbol')
-                market = escalation.get('market', 'kenyan')
-                recommendation = escalation.get('recommendation', 'BUY')
-                target_price = escalation.get('target_price', 0.0)
-                rationale = escalation.get('rationale', '')
+                market = escalation.get('market') or 'kenyan'
+                recommendation = escalation.get('recommendation') or 'HOLD'
+                target_price = escalation.get('target_price') or 0.0
+                rationale = escalation.get('rationale') or ''
 
                 em.add_to_watchlist(
                     symbol=symbol,
@@ -1723,10 +1727,17 @@ class TradingAPI:
             to do (llm_orchestrator.provider_health). Errors are shown as the
             provider's own message, never with a key."""
             llm = self.trading_agent.components.get('llm_orchestrator')
+            review = None
+            engine = self.trading_agent.components.get('self_assessment')
+            if engine is not None and hasattr(engine, 'latest_review'):
+                try:
+                    review = engine.latest_review()
+                except Exception as e:
+                    logger.warning(f"Could not read the latest AI review: {e}")
             if llm is None or not hasattr(llm, 'provider_health'):
-                return jsonify({'enabled': False, 'providers': []}), 200
+                return jsonify({'enabled': False, 'providers': [], 'review': review}), 200
             return jsonify({'enabled': bool(getattr(llm, 'enabled', False)),
-                            'providers': llm.provider_health()}), 200
+                            'providers': llm.provider_health(), 'review': review}), 200
 
         @self.app.route('/api/ai/budget', methods=['GET'])
         @require_rate_limit

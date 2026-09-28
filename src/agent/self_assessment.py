@@ -1,14 +1,30 @@
 """
-Self Assessment Engine:
-Runs end-of-day retrospective assessments of agent decisions, evaluates adaptation results,
-and uses LLM reasoning to adjust strategy weights, confidence floors, or escalate structural changes.
+Self Assessment Engine: a periodic AI review of the agent's own results.
+
+It is advisory. It used to post whatever the AI suggested to the operator's
+approval queue, and to apply some suggestions by itself: settings that do
+not exist (strategy_weights, which nothing reads), order sizes, placeholder
+tickers such as ABC or XYZ, and contradictory stop changes, all made with no
+trades to judge by. Approving one did not apply it either. Now:
+
+- the AI is asked only once the period reviewed holds at least
+  `self_assessment.min_trades` executed trades (20); before that the review
+  records that it waited, and costs no AI call;
+- it may suggest changes to the stop settings only (ADJUSTABLE), within
+  fixed ranges and by at most half the current value. Strategy settings
+  are tuned on evidence by strategy_tuner.py; order sizes and the trading
+  lists are the operator's;
+- every suggestion is checked (check_proposals), the rest are kept with the
+  reason, and nothing is applied: the latest review is shown on the
+  Notifications page (latest_review), and adopting a suggestion is a change
+  to config.json.
 """
 import os
 import json
 import sqlite3
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 from src.agent.escalation_manager import EscalationManager
 from src.utils.paths import DATA_DIR
@@ -40,49 +56,34 @@ CREATE TABLE IF NOT EXISTS improvements (
 );
 """
 
-_RETROSPECTIVE_SYSTEM_PROMPT = """
-You are the Chief Auditor and Performance Optimizer of an AI algorithmic trading portfolio.
-Your job is to perform a rigorous retrospective review of the system's past decisions and performance, and propose optimizations.
-
-You will be given:
-1. Trade execution details and P&L performance.
-2. Accuracy rates: how often BUY/SELL decisions actually led to favorable price movements, and whether LLM trade vetos were correct.
-3. Adaptation tracking: whether previous parameter adaptations actually improved results.
-4. Active strategy weights and configuration parameters.
-
-Based on this audit, you must propose concrete changes to improve system performance.
-- Adjust strategy weights (e.g. momentum vs mean reversion) to tilt toward profitable strategies.
-- Adjust global confidence floors (e.g. increase if many trades are skipped or losing).
-- Add or remove symbols from active watchlist if they are persistently unprofitable.
-
-Output your proposal strictly as a valid JSON object matching this schema:
-{
-  "parameter_adjustments": [
-    {
-      "target": "strategy_weights.<strategy_name>" or "risk_limits.stop_loss_pct" or "risk_limits.trailing_stop_pct" or "execution.min_order_size",
-      "current": float_or_string,
-      "proposed": float_or_string,
-      "reasoning": "why this adjustment is needed"
-    }
-  ],
-  "symbol_actions": [
-    {
-      "symbol": "TICKER",
-      "action": "remove" or "pause" or "add",
-      "reasoning": "performance justification"
-    }
-  ],
-  "risk_adjustments": [
-    {
-      "target": "risk_limits.max_position_size",
-      "proposed": float,
-      "reasoning": "rationale"
-    }
-  ],
-  "reasoning_summary": "executive summary of the audit findings"
+# setting -> (lowest, highest) a suggestion may propose
+ADJUSTABLE = {
+    'risk_limits.stop_loss_pct': (0.02, 0.15),
+    'risk_limits.trailing_stop_pct': (0.01, 0.10),
+    'risk_limits.stop_loss_atr_mult': (1.5, 4.0),
+    'risk_limits.trailing_stop_atr_mult': (1.5, 5.0),
 }
+MAX_RELATIVE_CHANGE = 0.5      # a suggestion moves a setting by at most half its value
+MAX_SUGGESTIONS = 3
+DEFAULT_MIN_TRADES = 20
 
-Ensure the output is strictly valid raw JSON. Do not wrap in markdown blocks, do not add trailing text or comments.
+_RETROSPECTIVE_SYSTEM_PROMPT = """
+You review an algorithmic trading system's recent results and may suggest changes to its stop-loss
+settings, only where the results clearly support them. Suggest nothing when they do not.
+
+You are given how many trades were executed, how often buys and sells were followed by a favourable
+move, how often the AI's trade vetoes were right, and the current stop settings. Only these settings
+may be changed, within these ranges, and by at most half of the current value:
+- risk_limits.stop_loss_pct (0.02 to 0.15): fixed stop-loss, a fraction of the entry price
+- risk_limits.trailing_stop_pct (0.01 to 0.10): fixed trailing stop, a fraction of the high
+- risk_limits.stop_loss_atr_mult (1.5 to 4.0): stop distance in multiples of average true range
+- risk_limits.trailing_stop_atr_mult (1.5 to 5.0): trailing distance in multiples of average true range
+At most three suggestions. Do not suggest anything else: no symbols, no strategy weights, no order sizes.
+
+Reply with JSON only, in this shape:
+{"parameter_adjustments": [{"target": "risk_limits.trailing_stop_pct", "proposed": 0.04,
+  "reasoning": "one sentence citing the numbers given"}],
+ "reasoning_summary": "two sentences at most"}
 """
 
 
@@ -104,175 +105,69 @@ class SelfAssessmentEngine:
         
         logger.info(f"SelfAssessmentEngine database initialized at {db_path}")
 
-    def run_assessment(self, decision_journal, order_journal, performance_analytics, 
+    def run_assessment(self, decision_journal, order_journal, performance_analytics,
                        cycles_to_review: int = 390) -> Dict[str, Any]:
-        """
-        Runs retrospective analysis of the past decisions/fills.
-        Computes accuracy metrics, compiles feedback, asks LLM for improvements,
-        and logs results to the improvements database.
-        """
-        logger.info(f"Running retrospective self-assessment for the past {cycles_to_review} cycles...")
-        
-        # 1. Gather historical decisions and filled orders
+        """Review the latest decisions and, when there is evidence enough,
+        ask the AI for suggestions, which are checked and recorded. Nothing
+        is applied. Returns the review (see latest_review)."""
         decisions = decision_journal.recent(limit=cycles_to_review) if decision_journal else []
         filled_orders = order_journal.filled_orders() if order_journal else []
-        
-        # 2. Score previous improvements (closing the loop)
         self._score_past_improvements(performance_analytics)
-        
-        # 3. Analyze Prediction Accuracy
         accuracy_metrics = self._analyze_prediction_accuracy(decisions, filled_orders)
-        
-        # 4. Analyze Adaptation Effectiveness
         adaptation_metrics = self._analyze_adaptation_effectiveness()
-        
-        # 5. Extract bias trends
         bias_trends = self._compile_bias_trends(decisions)
-        
-        # 6. Build LLM Context and request improvement plan
-        context = {
-            "current_configuration": {
-                "strategy_weights": self.config.get("strategy_weights", {}),
-                "risk_limits": self.config.get("risk_limits", {}),
-                "execution": self.config.get("execution", {})
-            },
-            "performance_summary": {
+
+        executed = sum(1 for d in decisions if d.get('executed'))
+        min_trades = int((self.config.get('self_assessment') or {}).get('min_trades', DEFAULT_MIN_TRADES))
+        review: Dict[str, Any] = {'executed_trades': executed, 'min_trades': min_trades, 'skipped': None,
+                                  'suggestions': [], 'rejected': [], 'summary': ''}
+        if executed < min_trades:
+            review['skipped'] = (f"{executed} trade{'s' if executed != 1 else ''} in the period reviewed; "
+                                 f"the review waits for {min_trades} before suggesting changes")
+        elif not (self.llm and getattr(self.llm, "enabled", False)):
+            review['skipped'] = 'no AI service is set up'
+        else:
+            context = {
+                "executed_trades": executed,
+                "current_settings": {t: (self.config.get('risk_limits') or {}).get(t.split('.', 1)[1])
+                                     for t in ADJUSTABLE},
                 "prediction_accuracy": accuracy_metrics,
                 "adaptation_effectiveness": adaptation_metrics,
-                "bias_trends": bias_trends
+                "bias_trends": bias_trends,
             }
-        }
-        
-        improvement_plan = {}
-        if self.llm and getattr(self.llm, "enabled", False):
+            plan = None
             try:
-                improvement_plan = self.llm.propose_json(_RETROSPECTIVE_SYSTEM_PROMPT, json.dumps(context, default=str)) or {}
+                plan = self.llm.propose_json(_RETROSPECTIVE_SYSTEM_PROMPT, json.dumps(context, default=str))
             except Exception as e:
-                logger.error(f"LLM retrospective proposal failed: {e}")
-                
-        # 7. Record Assessment in DB
-        assessment_id = self._record_assessment(
-            cycles_reviewed=len(decisions),
-            accuracy=accuracy_metrics,
-            adaptations=adaptation_metrics,
-            biases=bias_trends,
-            plan=improvement_plan
-        )
-        
-        improvement_plan["assessment_id"] = assessment_id
-        logger.info(f"Self-assessment completed successfully. ID: {assessment_id}")
-        return improvement_plan
-
-    def apply_improvements(self, plan: Dict[str, Any], require_approval: bool = True) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """
-        Applies proposed changes. Safe parameter modifications are auto-applied directly to config.
-        Structural or high-risk modifications are escalated to the operator's queue.
-        Returns: (auto_applied_list, escalated_list)
-        """
-        assessment_id = plan.get("assessment_id")
-        auto_applied = []
-        escalated = []
-        
-        # Guardrails for automatic changes
-        safe_parameter_keys = {
-            "strategy_weights.momentum",
-            "strategy_weights.mean_reversion",
-            "strategy_weights.rsi_strategy",
-            "execution.min_order_size",
-            "execution.max_order_size"
-        }
-        
-        # Process parameter adjustments
-        adjustments = plan.get("parameter_adjustments", [])
-        for adj in adjustments:
-            target = adj.get("target")
-            current = adj.get("current")
-            proposed = adj.get("proposed")
-            reasoning = adj.get("reasoning", "")
-            
-            if not target:
-                continue
-                
-            is_safe = target in safe_parameter_keys
-            
-            if is_safe and not require_approval:
-                # Apply change directly to config
-                self._apply_config_change(target, proposed)
-                
-                # Record in DB
-                self._record_improvement(
-                    assessment_id=assessment_id,
-                    target=target,
-                    prev_value=str(current),
-                    new_value=str(proposed),
-                    reasoning=reasoning,
-                    auto_applied=True
-                )
-                auto_applied.append(adj)
-                logger.info(f"Auto-applied parameter shift: {target} -> {proposed}")
+                logger.error(f"AI self-review failed: {e}")
+            if isinstance(plan, dict):
+                review['suggestions'], review['rejected'] = check_proposals(plan, self.config)
+                review['summary'] = str(plan.get('reasoning_summary') or '')[:500]
             else:
-                # Escalate to operator approval
-                escalation_reason = f"Proposed adjustment: {target} to {proposed} (Current: {current}). Rationale: {reasoning}"
-                self.escalation_manager.create_escalation(
-                    signal_id=None,
-                    symbol="SYSTEM",
-                    action=f"config_change:{target}",
-                    reason=escalation_reason,
-                    risk_level="medium" if is_safe else "high"
-                )
-                escalated.append(adj)
-                logger.info(f"Escalated parameter change: {target} to {proposed} (Safe: {is_safe})")
+                review['skipped'] = 'the AI did not answer'
 
-        # Process symbol actions (always escalated)
-        symbol_actions = plan.get("symbol_actions", [])
-        for act in symbol_actions:
-            symbol = act.get("symbol", "").upper()
-            action = act.get("action")
-            reasoning = act.get("reasoning", "")
-            
-            if not symbol or not action:
-                continue
-                
-            escalation_reason = f"Retrospective recommendation: {action} tracking for symbol '{symbol}'. Rationale: {reasoning}"
-            self.escalation_manager.create_escalation(
-                signal_id=None,
-                symbol=symbol,
-                action=f"{action}_symbol",
-                reason=escalation_reason,
-                risk_level="medium"
-            )
-            escalated.append(act)
-            logger.info(f"Escalated symbol recommendation: {action} {symbol}")
-            
-        return auto_applied, escalated
+        review['assessment_id'] = self._record_assessment(
+            cycles_reviewed=len(decisions), accuracy=accuracy_metrics,
+            adaptations=adaptation_metrics, biases=bias_trends, plan=review)
+        logger.info(f"AI self-review: {describe(review)}")
+        return review
 
-    def _apply_config_change(self, target: str, value: Any) -> None:
-        """Applies a dotted key change directly to the active config."""
-        parts = target.split(".")
-        config = self.config
-        
-        # Traverse down to nested dict level
-        for part in parts[:-1]:
-            if part not in config:
-                config[part] = {}
-            config = config[part]
-            
-        # Parse value if string representation of float/int
-        parsed_value = value
-        if isinstance(value, str):
-            try:
-                if "." in value:
-                    parsed_value = float(value)
-                else:
-                    parsed_value = int(value)
-            except ValueError:
-                pass
-                
-        # Guardrail bounds clamping
-        if parts[0] == "strategy_weights":
-            parsed_value = max(0.0, min(2.0, float(parsed_value)))
-            
-        config[parts[-1]] = parsed_value
+    def latest_review(self) -> Optional[Dict[str, Any]]:
+        """The newest review for the dashboard, or None when there is none
+        (reviews recorded before they were checked are not shown)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT ts, improvement_plan_json FROM assessments ORDER BY id DESC LIMIT 1").fetchone()
+        if not row:
+            return None
+        try:
+            plan = json.loads(row[1] or '{}')
+        except ValueError:
+            return None
+        if not isinstance(plan, dict) or 'suggestions' not in plan:
+            return None
+        return {'at': row[0], **{k: plan.get(k) for k in
+                                 ('executed_trades', 'min_trades', 'skipped', 'suggestions', 'rejected', 'summary')}}
 
     def _analyze_prediction_accuracy(self, decisions: List[Dict[str, Any]], fills: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -418,7 +313,7 @@ class SelfAssessmentEngine:
                 "adaptation_effectiveness_json, bias_trends_json, improvement_plan_json) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (
-                    datetime.utcnow().isoformat(),
+                    datetime.now(timezone.utc).isoformat(),
                     cycles_reviewed,
                     json.dumps(accuracy),
                     json.dumps(adaptations),
@@ -429,26 +324,62 @@ class SelfAssessmentEngine:
             self._conn.commit()
             return cur.lastrowid
 
-    def _record_improvement(self, assessment_id: int, target: str, prev_value: str,
-                            new_value: str, reasoning: str, auto_applied: bool) -> None:
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO improvements (assessment_id, target, previous_value, new_value, "
-                "reasoning, applied_at, auto_applied) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    assessment_id,
-                    target,
-                    prev_value,
-                    new_value,
-                    reasoning,
-                    datetime.utcnow().isoformat(),
-                    1 if auto_applied else 0
-                )
-            )
-            self._conn.commit()
-
     def close(self):
         """Close connection."""
         with self._lock:
             self._conn.close()
+
+
+def check_proposals(plan: Dict[str, Any], config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """The AI's suggestions that pass the rules (see ADJUSTABLE), with the
+    current value taken from config.json rather than the AI's own claim, and
+    the rest with the reason each was set aside."""
+    risk = config.get('risk_limits') or {}
+    accepted: List[Dict[str, Any]] = []
+    rejected: List[Dict[str, Any]] = []
+    for adj in (plan.get('parameter_adjustments') or [])[:10]:
+        if not isinstance(adj, dict):
+            continue
+        target = str(adj.get('target') or '').strip()
+        bounds = ADJUSTABLE.get(target)
+        current = risk.get(target.split('.', 1)[-1]) if bounds else None
+        try:
+            proposed = float(adj.get('proposed'))
+        except (TypeError, ValueError):
+            proposed = None
+        why = None
+        if not bounds:
+            why = 'not a setting the review may change'
+        elif any(a['target'] == target for a in accepted):
+            why = 'suggested twice'
+        elif not isinstance(current, (int, float)) or current <= 0:
+            why = 'not set in config.json'
+        elif proposed is None:
+            why = 'no number given'
+        elif not bounds[0] <= proposed <= bounds[1]:
+            why = f'outside the allowed range {bounds[0]} to {bounds[1]}'
+        elif abs(proposed - current) < 1e-9:
+            why = 'the same as the current value'
+        elif abs(proposed / current - 1) > MAX_RELATIVE_CHANGE:
+            why = 'a change of more than half the current value'
+        elif len(accepted) >= MAX_SUGGESTIONS:
+            why = f'more than {MAX_SUGGESTIONS} suggestions'
+        if why:
+            rejected.append({'target': target or '?', 'proposed': adj.get('proposed'), 'reason': why})
+            continue
+        accepted.append({'target': target, 'current': float(current), 'proposed': proposed,
+                         'reasoning': str(adj.get('reasoning') or '')[:300]})
+    for act in plan.get('symbol_actions') or []:
+        if isinstance(act, dict):
+            rejected.append({'target': f"{act.get('action', '?')} {act.get('symbol', '?')}",
+                             'proposed': None, 'reason': 'symbol changes are not part of the review'})
+    return accepted, rejected
+
+
+def describe(review: Dict[str, Any]) -> str:
+    """One line for the log."""
+    if review.get('skipped'):
+        return f"skipped: {review['skipped']}"
+    made = [f"{s['target']} {s['current']} -> {s['proposed']}" for s in review.get('suggestions') or []]
+    return (f"{len(made)} suggestion(s) {'; '.join(made)}" if made else 'no changes suggested') + \
+        (f"; {len(review.get('rejected') or [])} set aside" if review.get('rejected') else '')

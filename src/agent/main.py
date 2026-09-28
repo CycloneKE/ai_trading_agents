@@ -1183,15 +1183,15 @@ class TradingAgent:
                             logger.info("Executing periodic self-assessment and self-improvement loop...")
                             engine = self.components.get('self_assessment')
                             if engine:
-                                plan = engine.run_assessment(
+                                # Advisory only: the review's checked suggestions
+                                # are shown on the Notifications page; nothing is
+                                # applied or sent to the approval queue.
+                                engine.run_assessment(
                                     self.decision_journal,
                                     self.order_journal,
                                     self.performance_analytics,
                                     cycles_to_review=assessment_interval
                                 )
-                                # Auto-apply safe changes
-                                auto_applied, escalated = engine.apply_improvements(plan, require_approval=False)
-                                logger.info(f"Retrospective assessment completed: applied {len(auto_applied)} auto-improvements, escalated {len(escalated)} structural proposals.")
 
                                 # Prune expired local cache entries to prevent memory leaks in local offline mode
                                 if state_store:
@@ -1877,47 +1877,61 @@ class TradingAgent:
             return False
     
     def _extract_symbol_data(self, market_data: Dict[str, Any], symbol: str) -> Optional[Dict[str, Any]]:
-        """
-        Extract data for a specific symbol from the market data.
-        
-        Args:
-            market_data: Full market data from data manager
-            symbol: Symbol to extract data for
-            
-        Returns:
-            Symbol-specific data or None if not found
+        """This cycle's quote for one symbol, tagged with its source.
+
+        A real source wins over the synthetic fallback. The data manager
+        keeps every source's last batch, so an old fallback batch stays in
+        market_data for good; the first source holding the symbol used to
+        win, and crypto, which the Finnhub / Alpha Vantage quote path does
+        not cover, only ever found the fallback: every crypto signal was set
+        aside as fallback_price. When no real source has the symbol, the live
+        price feed (Yahoo Finance, which also serves the history warm-start)
+        is asked; the fallback is returned, and refused downstream, only
+        when that has nothing either.
         """
         try:
-            # Check different data sources
-            for data_type, sources in market_data.items():
-                if data_type == 'market_data':
-                    for source, source_data in sources.items():
-                        data = source_data.get('data', {})
-                        
-                        # Check if symbol data exists
-                        if symbol in data:
-                            symbol_data = data[symbol].copy()
-                            symbol_data['symbol'] = symbol
-                            symbol_data['source'] = source
-                            symbol_data['timestamp'] = source_data.get('timestamp')
-                            return symbol_data
-                        
-                        # Check if data is for this specific symbol
-                        if data.get('symbol') == symbol:
-                            symbol_data = data.copy()
-                            symbol_data['symbol'] = symbol
-                            symbol_data['source'] = source
-                            symbol_data['timestamp'] = source_data.get('timestamp')
-                            return symbol_data
-            
-            # If no data found, return None
-            logger.debug(f"No market data found for symbol {symbol}")
-            return None
-            
+            fallback = None
+            for source, source_data in ((market_data or {}).get('market_data') or {}).items():
+                data = (source_data or {}).get('data') or {}
+                if symbol in data:
+                    row = data[symbol]
+                elif data.get('symbol') == symbol:
+                    row = data
+                else:
+                    continue
+                found = {**row, 'symbol': symbol, 'source': source,
+                         'timestamp': source_data.get('timestamp')}
+                if source != 'fallback':
+                    return found
+                fallback = fallback or found
+            live = self._live_quote(symbol)
+            if live:
+                return live
+            if fallback is None:
+                logger.debug(f"No market data found for symbol {symbol}")
+            return fallback
         except Exception as e:
             logger.error(f"Error extracting data for symbol {symbol}: {str(e)}")
             return None
-    
+
+    @staticmethod
+    def _live_quote(symbol: str) -> Optional[Dict[str, Any]]:
+        """A real last price from the live price feed, or None."""
+        try:
+            from src.utils.real_price_feed import price_feed
+            price = price_feed.get_price(symbol)
+        except Exception as e:
+            logger.debug(f"Live price feed unavailable for {symbol}: {e}")
+            return None
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            return None
+        if not price > 0:
+            return None
+        return {'symbol': symbol, 'price': price, 'close': price, 'source': 'yfinance',
+                'timestamp': datetime.utcnow().isoformat()}
+
     def _execute_trades(self, signals: Dict[str, Dict[str, Any]], risk_assessment: Dict[str, Any]):
         """
         Execute trades based on signals and risk assessment with unified order routing.
