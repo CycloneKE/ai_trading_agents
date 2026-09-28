@@ -45,7 +45,7 @@ SKIP_MEANING = {
     'below_confidence': ('by design', 'signal too weak to act on'),
     'dissent': ('by design', 'strategies disagreed on direction'),
     'llm_veto': ('by design', 'the validation layer overruled the ensemble'),
-    'bias_downgrade': ('by design', 'the bias detector pushed the signal to hold'),
+    'bias_downgrade': ('by design', 'a new buy waited: its market already had several new buys that day'),
     'duplicate': ('by design', 'the journal blocked a repeated decision'),
     'fallback_price': ('DEGRADED', 'price was synthetic, so the trade was refused; '
                                    'the vendor feed was down for this symbol'),

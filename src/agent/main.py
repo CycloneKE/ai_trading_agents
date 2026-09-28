@@ -1118,14 +1118,14 @@ class TradingAgent:
                                     if validated_signal.get('action') == 'hold':
                                         dec['skip_reason'] = 'llm_veto'
 
-                                    # Check for Algorithmic/Cognitive Bias
-                                    is_biased = self.components['bias_detector'].detect_bias(validated_signal, symbol_data, market_data)
-                                    if is_biased:
-                                        logger.warning(f"Bias detected for {symbol} trade: {validated_signal}. Lowering confidence.")
-                                        validated_signal['confidence'] *= 0.5
-                                        if validated_signal['confidence'] < 0.3:
-                                            validated_signal['action'] = 'hold'
-                                            dec['skip_reason'] = 'bias_downgrade'
+                                    # Herding check (bias_detector.detect_bias): a new buy
+                                    # waits when its market has already had several new
+                                    # buys approved today. It used to halve the confidence
+                                    # of almost every buy, and could hold back exits.
+                                    if self.components['bias_detector'].detect_bias(
+                                            validated_signal, symbol_data, market_data, symbol=symbol):
+                                        validated_signal['action'] = 'hold'
+                                        dec['skip_reason'] = 'bias_downgrade'
 
                                     if validated_signal['action'] != 'hold':
                                         all_signals[symbol] = validated_signal

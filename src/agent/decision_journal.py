@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 SKIP_REASONS = {
     'hold',               # strategies produced no directional signal
     'below_confidence',   # under the execution confidence floor
-    'bias_downgrade',     # bias detector pushed the signal to hold
+    'bias_downgrade',     # buy waits: its market already had several new buys today
     'llm_veto',           # LLM validation changed action to hold
     'fallback_price',     # price was synthetic fallback, not tradeable
     'halted',             # kill switch engaged

@@ -4,6 +4,10 @@
   "groq_vision_model": "qwen/qwen3.8-27b",
   "gemini_model": "gemini-flash-lite-latest",
   "llm_cooldown_seconds": 60,
+  "bias_check": {
+    "_comment": "Herding check (src/agent/bias_detector.py): a new buy waits when this many other symbols in the same market (US stocks, crypto, forex) already had a buy approved in the last 24 hours, so the agent spreads new positions out instead of piling in at once. Sells are never held back.",
+    "max_new_buys_per_day": 3
+  },
   "sector_analysis_interval": 390,
   "data_manager": {
     "_symbol_lists": "Two kinds of list. TRADING lists say what the agent acts on: `symbols` is walked by the main loop every trading_loop_interval seconds, `nse_symbols` by the NSE pass every nse_eval_interval seconds during Nairobi hours. CLASSIFICATION lists say how a symbol is costed: `crypto_symbols` is expected to overlap `symbols`, since a pair must be in `symbols` to be traded and in `crypto_symbols` to be priced as crypto rather than as a US equity. An overlap between the two trading lists would be a real conflict; an overlap with the classification list is intended.",
