@@ -991,16 +991,12 @@ class TradingAgent:
                                             # Flat list with per-item symbol field
                                             symbol_news.extend([n for n in data if isinstance(n, dict) and n.get('symbol') == symbol])
 
-                                # Apply Adaptive Goals to strategy execution
-                                modified_params = self.components['adaptive_integration'].get_strategy_parameters('technical')
-                                if modified_params:
-                                    # Update momentum & reversion weights if adjusted by goals/performance
-                                    mw = modified_params.get('momentum_weight')
-                                    mr = modified_params.get('mean_reversion_weight')
-                                    if mw is not None and mr is not None:
-                                        self.components['strategy_manager'].strategy_weights['momentum'] = mw
-                                        self.components['strategy_manager'].strategy_weights['mean_reversion'] = mr
-                                
+                                # The adaptive goals layer used to overwrite the
+                                # ensemble's momentum / mean-reversion weights here
+                                # every cycle while the profit goal was behind:
+                                # chasing losses over the evidence-based weights.
+                                # It no longer sets weights (guardrails.py).
+
                                 # Generate trading signals for this symbol
                                 symbol_signals = self.components['strategy_manager'].generate_signals(symbol_data)
 

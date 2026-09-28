@@ -18,6 +18,9 @@ import json
 
 logger = logging.getLogger(__name__)
 
+# The lowest the adaptive layer may cut position sizes to (guardrails.py).
+MIN_SIZE_MULTIPLIER = 0.25
+
 class GoalType(Enum):
     PROFIT_TARGET = "profit_target"
     RISK_REDUCTION = "risk_reduction"
@@ -183,15 +186,9 @@ class SelfAdaptiveAgent:
                 confidence=0.8
             ))
         
-        # Strategy switching based on market regime
-        if self.market_regime == "high_volatility":
-            actions.append(AdaptationAction(
-                action_type="switch_strategy_weights",
-                parameters={"momentum_weight": 0.3, "mean_reversion_weight": 0.7},
-                expected_impact=0.5,
-                confidence=0.6
-            ))
-        
+        # Strategy weights are not this layer's to set: the ensemble weights
+        # strategies by their realised results (guardrails.py).
+
         # Goal adjustment
         underperforming_goals = [g for g in self.goals if g.progress < 0.3]
         if underperforming_goals:
@@ -212,15 +209,11 @@ class SelfAdaptiveAgent:
             self.config['risk_tolerance'] = action.parameters['new_risk_tolerance']
             
         elif action.action_type == "reduce_position_size":
+            # Reduce-only, with a floor so repeated cuts cannot stop trading.
             current_size = self.config.get('position_size_multiplier', 1.0)
-            self.config['position_size_multiplier'] = current_size * action.parameters['size_multiplier']
-            
-        elif action.action_type == "switch_strategy_weights":
-            self.config['strategy_weights'] = {
-                'momentum': action.parameters['momentum_weight'],
-                'mean_reversion': action.parameters['mean_reversion_weight']
-            }
-            
+            self.config['position_size_multiplier'] = max(
+                MIN_SIZE_MULTIPLIER, min(1.0, current_size * action.parameters['size_multiplier']))
+
         elif action.action_type == "adjust_goals":
             if action.parameters.get('reduce_targets'):
                 for goal in self.goals:

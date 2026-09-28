@@ -53,7 +53,8 @@ def test_swarm_orchestration_passes_sector_outlook(mock_config):
     
     # Verify return value
     assert res["action"] == "buy"
-    assert res["confidence"] == 0.9
+    # The AI asked for 0.9; it may not raise the ensemble's 0.8 (guardrails.bound_verdict).
+    assert res["confidence"] == 0.8 and 'raised confidence' in res["guardrail"]
     
     # Verify OpenRouter was called with the correct model and prompt content
     assert orchestrator._call_openrouter.call_count == 1
