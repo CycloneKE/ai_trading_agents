@@ -30,7 +30,7 @@ class BiasDetector:
 
     def detect_bias(self, signal: Dict[str, Any], symbol_data: Optional[Dict[str, Any]] = None,
                     market_data: Optional[Dict[str, Any]] = None, symbol: Optional[str] = None,
-                    now: Optional[datetime] = None) -> bool:
+                    now: Optional[datetime] = None, journal=None) -> bool:
         """Whether a buy should wait because the agent is piling into one
         market at once (herding). Returns True when it should wait.
 
@@ -47,7 +47,8 @@ class BiasDetector:
         `bias_check.max_new_buys_per_day` other symbols in its market have
         had a buy approved in the last 24 hours; the same symbol again is
         not a new position and does not count twice. A sell is never held
-        back: an exit reduces risk.
+        back: an exit reduces risk. With the order `journal`, buys placed in
+        the last 24 hours count too, so a restart does not reset the pace.
         """
         try:
             if not isinstance(signal, dict) or signal.get('action') != 'buy':
@@ -61,6 +62,8 @@ class BiasDetector:
             book = {s: t for s, t in self._approved_buys.get(market, {}).items()
                     if now - t < timedelta(hours=24)}
             self._approved_buys[market] = book
+            for s, t in self._journal_buys(journal, market, now).items():
+                book.setdefault(s, t)
             if sym in book:
                 return False
             if len(book) >= self.max_new_buys_per_day:
@@ -72,6 +75,27 @@ class BiasDetector:
         except Exception as e:
             logger.error(f"detect_bias error: {e}")
             return False
+
+    def _journal_buys(self, journal, market: str, now: datetime) -> Dict[str, datetime]:
+        """Symbols in `market` bought by the strategies in the last 24 hours,
+        from the order journal (the core's index funds and the kill switch
+        are not new positions)."""
+        out: Dict[str, datetime] = {}
+        if journal is None:
+            return out
+        try:
+            from src.agent.cost_model import classify
+            for o in journal.recent(300):
+                if (o.get('side') != 'buy' or o.get('status') not in ('intent', 'submitted', 'filled')
+                        or (o.get('strategy') or '') in ('core', 'kill_switch')):
+                    continue
+                sym = str(o.get('symbol') or '').upper()
+                at = datetime.fromisoformat(str(o.get('created_at'))[:26])
+                if sym and now - at < timedelta(hours=24) and classify(sym, self.config) == market:
+                    out.setdefault(sym, at)
+        except Exception as e:
+            logger.debug(f"Buy pace could not read the order journal: {e}")
+        return out
 
     def detect_sector_bias(self, decisions: List[Dict]) -> Dict[str, float]:
         """Detect bias towards specific sectors"""

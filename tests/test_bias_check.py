@@ -47,3 +47,18 @@ def test_sells_are_never_held_back():
 def test_the_pace_is_set_in_config():
     bd = detector(bias_check={'max_new_buys_per_day': 1})
     assert check(bd, 'NVDA') is False and check(bd, 'TSLA') is True
+
+
+def test_a_restart_does_not_reset_the_pace(tmp_path):
+    from src.agent.order_journal import OrderJournal
+    journal = OrderJournal(db_path=str(tmp_path / 'orders.db'))
+    for i, sym in enumerate(('NVDA', 'TSLA', 'XLV')):
+        journal.record_intent(f'b{i}', sym, 'buy', 1, 'market', strategy='momentum')
+    journal.record_intent('c1', 'VOO', 'buy', 1, 'market', strategy='core')     # the core, not a new position
+    journal.record_intent('b9', 'BTC-USD', 'buy', 1, 'market', strategy='crypto_trend')
+    fresh = detector()                                                     # a new process after a redeploy
+    now = datetime.utcnow()
+    assert fresh.detect_bias({'action': 'buy'}, {}, {}, symbol='QQQ', now=now, journal=journal) is True
+    assert fresh.detect_bias({'action': 'buy'}, {}, {}, symbol='NVDA', now=now, journal=journal) is False
+    assert fresh.detect_bias({'action': 'buy'}, {}, {}, symbol='ETH-USD', now=now, journal=journal) is False
+    journal.close()

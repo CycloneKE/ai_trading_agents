@@ -42,3 +42,26 @@ def dashboard_source_hash() -> Optional[str]:
         return source_hash()
     except OSError:
         return None
+
+
+@lru_cache(maxsize=1)
+def code_version() -> str:
+    """The version of the agent that is running, for tagging what it records.
+
+    A 90-day run spans many deploys; without a tag every decision and order
+    looks like evidence about one agent. Coolify's SOURCE_COMMIT (the commit
+    it built) when set, else a fingerprint of the Python source under src/
+    ('src-' and 12 hex digits), so two deploys of the same code share a tag.
+    """
+    import os
+    commit = os.getenv('SOURCE_COMMIT')
+    if commit:
+        return commit.strip()[:12]
+    root = Path(__file__).resolve().parent.parent
+    try:
+        digest = hashlib.sha256()
+        for f in sorted(root.rglob('*.py')):
+            digest.update(f.relative_to(root).as_posix().encode() + b'\0' + f.read_bytes() + b'\0')
+        return 'src-' + digest.hexdigest()[:12]
+    except OSError:
+        return 'unknown'

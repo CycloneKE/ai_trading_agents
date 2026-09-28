@@ -84,6 +84,22 @@ def reading(reason):
     return ('?', 'unrecognised reason')
 
 
+def unpaid_cost_pct(symbol, config):
+    """Per side, the modelled costs a journal fill price does not already
+    carry. NSE paper fills carry their slippage but pay commission (1.66%
+    a side at AIB-AXYS) separately, so profit from fill prices overstated
+    every NSE round trip by about 3.3%. The forex paper book's fills carry
+    its spread. Alpaca's paper fills carry neither slippage nor fees."""
+    try:
+        from src.agent.cost_model import classify, costs_for
+        c = costs_for(symbol, config)
+        commission = float(c.get('commission_pct') or 0.0)
+        slippage = float(c.get('slippage_pct') or 0.0)
+        return commission if classify(symbol, config) in ('nse', 'forex') else commission + slippage
+    except Exception:
+        return 0.0
+
+
 def currency_of(symbol, config):
     """KES for an NSE stock, USD for everything else the agent trades."""
     try:
@@ -166,6 +182,7 @@ def round_trips(fills):
         if side in ('buy', 'buy_to_cover'):
             lots[sym].append({'qty': qty, 'price': price,
                               'strategy': o.get('strategy') or 'unknown',
+                              'version': o.get('code_version') or 'untagged',
                               'opened_at': o.get('updated_at') or o.get('created_at')})
             continue
         if side not in ('sell', 'sell_short'):
@@ -177,6 +194,7 @@ def round_trips(fills):
             trips.append({
                 'symbol': sym,
                 'strategy': lot['strategy'],
+                'version': lot.get('version', 'untagged'),
                 'quantity': matched,
                 'entry_price': lot['price'],
                 'exit_price': price,
@@ -197,10 +215,11 @@ def aggregate(trips, key):
     out = {}
     for t in trips:
         k = t[key]
-        a = out.setdefault(k, {'trips': 0, 'wins': 0, 'pnl': 0.0,
+        a = out.setdefault(k, {'trips': 0, 'wins': 0, 'pnl': 0.0, 'net': 0.0,
                                'gross_win': 0.0, 'gross_loss': 0.0})
         a['trips'] += 1
         a['pnl'] += t['pnl']
+        a['net'] += t.get('net_pnl', t['pnl'])
         if t['pnl'] > 0:
             a['wins'] += 1
             a['gross_win'] += t['pnl']
@@ -222,6 +241,11 @@ def build(args):
 
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=args.since) if args.since else None
+    # With no window given, the run itself: rows from before it started
+    # (earlier runs, tests of the deployment) are not its evidence.
+    run_start = parse_ts((manifest or {}).get('started_at'))
+    if cutoff is None and run_start is not None:
+        cutoff = run_start
     # Both journals write datetime.utcnow().isoformat(), which is naive. Compare
     # against a naive string so a timezone suffix does not sort rows out.
     cutoff_iso = cutoff.replace(tzinfo=None).isoformat() if cutoff else None
@@ -266,9 +290,24 @@ def build(args):
     stuck = [{'symbol': o.get('symbol'), 'side': o.get('side'), 'status': o.get('status'),
               'created_at': o.get('created_at'), 'strategy': o.get('strategy')}
              for o in all_orders if (o.get('status') or '') in ('intent', 'submitted')]
-    realised_by_currency = defaultdict(float)
+    realised_by_currency = {}
     for t in trips:
-        realised_by_currency[currency_of(t.get('symbol'), config)] += t['pnl']
+        cost = unpaid_cost_pct(t['symbol'], config) * (t['entry_price'] + t['exit_price']) * t['quantity']
+        t['net_pnl'] = t['pnl'] - cost
+        r = realised_by_currency.setdefault(currency_of(t.get('symbol'), config), {'gross': 0.0, 'net': 0.0})
+        r['gross'] += t['pnl']
+        r['net'] += t['net_pnl']
+    versions = {}
+    for d in decisions:
+        v = versions.setdefault(d.get('code_version') or 'untagged',
+                                {'decisions': 0, 'orders': 0, 'first': d.get('ts'), 'last': d.get('ts')})
+        v['decisions'] += 1
+        v['first'] = min(v['first'] or d.get('ts'), d.get('ts') or v['first'])
+        v['last'] = max(v['last'] or d.get('ts'), d.get('ts') or v['last'])
+    for o in all_orders:
+        versions.setdefault(o.get('code_version') or 'untagged',
+                            {'decisions': 0, 'orders': 0, 'first': o.get('created_at'),
+                             'last': o.get('created_at')})['orders'] += 1
 
     started = parse_ts((manifest or {}).get('started_at'))
     elapsed_days = ((now - started).total_seconds() / 86400.0) if started else None
@@ -276,6 +315,8 @@ def build(args):
     return {
         'generated_at': now.isoformat(),
         'window_days': args.since,
+        'window_start': cutoff.isoformat() if cutoff else None,
+        'versions': versions,
         'manifest_path': manifest_path,
         'manifest': manifest,
         'elapsed_days': elapsed_days,
@@ -305,6 +346,7 @@ def build(args):
             'realised_by_currency': dict(realised_by_currency),
             'by_symbol': aggregate(trips, 'symbol'),
             'by_strategy': aggregate(trips, 'strategy'),
+            'by_version': aggregate(trips, 'version'),
             'open_positions': {s: {'lots': len(q),
                                    'quantity': sum(l['qty'] for l in q),
                                    'cost_basis': sum(l['qty'] * l['price'] for l in q),
@@ -348,6 +390,7 @@ def render(rep, config_path):
     add('')
     add(f"Generated {rep['generated_at'][:19]}Z"
         + (f" | window: last {rep['window_days']} days" if rep['window_days']
+           else f" | window: since the run started ({rep['window_start'][:10]})" if rep.get('window_start')
            else ' | window: entire journal'))
     add('')
 
@@ -379,6 +422,25 @@ def render(rep, config_path):
         if m.get('warnings_at_start'):
             add(f"- Warnings at start: {', '.join(m['warnings_at_start'])}")
     add('')
+
+    # Which versions of the agent this window's evidence comes from.
+    versions = rep.get('versions') or {}
+    if len(versions) > 1:
+        add('## Versions')
+        add('')
+        add(f"This window mixes {len(versions)} versions of the agent. A result from before a "
+            f"fix is not evidence about the agent as it is now, so judge each version on its "
+            f"own trades (P&L by version, below). 'untagged' is from before versions were recorded.")
+        add('')
+        add('| version | decisions | orders | first seen | last seen |')
+        add('|---|---:|---:|---|---|')
+        for name, v in sorted(versions.items(), key=lambda x: str(x[1]['first'] or '')):
+            add(f"| {name} | {v['decisions']:,} | {v['orders']:,} | {str(v['first'] or '')[:16]} "
+                f"| {str(v['last'] or '')[:16]} |")
+        add('')
+    elif versions:
+        add(f"All of this window comes from one version of the agent: {next(iter(versions))}.")
+        add('')
 
     # 2. Is it trading?
     o = rep['orders']
@@ -444,15 +506,18 @@ def render(rep, config_path):
     add(f"- Closed round trips: {p['closed_trips']:,}")
     by_ccy = p.get('realised_by_currency') or {}
     if by_ccy:
-        add('- Realised P&L: ' + '; '.join(f"{c} {v:,.2f}" for c, v in sorted(by_ccy.items())))
+        add('- Realised P&L: ' + '; '.join(f"{c} {v['gross']:,.2f}" for c, v in sorted(by_ccy.items()))
+            + ' at fill prices')
+        add('- After the costs the fill prices leave out: '
+            + '; '.join(f"{c} {v['net']:,.2f}" for c, v in sorted(by_ccy.items())))
     else:
         add(f"- Realised P&L: {p['realised']:,.2f}")
     add('')
-    add('Realised P&L is computed from actual fill prices, FIFO matched. '
-        'Broker commission and the slippage already embedded in those fills '
-        'are *not* subtracted again here, because doing so would double-count '
-        'them. Compare each return against its market round-trip cost hurdle '
-        'from `src/agent/cost_model.py` before calling an edge real.')
+    add('Realised P&L is computed from actual fill prices, FIFO matched. The second '
+        'line subtracts the modelled costs those prices do not carry (cost_model.py): '
+        'NSE commission, which the paper account charges separately from the fill '
+        'price, and for Alpaca\'s paper fills the slippage and crypto fees a real '
+        'order would pay. Judge the run on that line.')
     add('')
     concentration = concentration_note(p['by_symbol'])
     if concentration:
@@ -461,13 +526,13 @@ def render(rep, config_path):
     if p['by_symbol']:
         add('### By symbol')
         add('')
-        add('| symbol | trips | win rate | profit factor | P&L |')
-        add('|---|---:|---:|---:|---:|')
+        add('| symbol | trips | win rate | profit factor | P&L | after costs |')
+        add('|---|---:|---:|---:|---:|---:|')
         for sym, a in sorted(p['by_symbol'].items(), key=lambda x: -x[1]['pnl']):
             pf = ('inf' if a['profit_factor'] == float('inf')
                   else f"{a['profit_factor']:.2f}")
             add(f"| {sym} | {a['trips']} | {a['win_rate']:.0%} | {pf} "
-                f"| {a['pnl']:,.2f} |")
+                f"| {a['pnl']:,.2f} | {a['net']:,.2f} |")
         add('')
     if p['by_strategy']:
         add('### By strategy')
@@ -475,13 +540,24 @@ def render(rep, config_path):
         add('Attributed to the strategy that *opened* the position, so a '
             'stop-loss exit is charged to the entry that needed stopping.')
         add('')
-        add('| strategy | trips | win rate | profit factor | P&L |')
-        add('|---|---:|---:|---:|---:|')
+        add('| strategy | trips | win rate | profit factor | P&L | after costs |')
+        add('|---|---:|---:|---:|---:|---:|')
         for name, a in sorted(p['by_strategy'].items(), key=lambda x: -x[1]['pnl']):
             pf = ('inf' if a['profit_factor'] == float('inf')
                   else f"{a['profit_factor']:.2f}")
             add(f"| {name} | {a['trips']} | {a['win_rate']:.0%} | {pf} "
-                f"| {a['pnl']:,.2f} |")
+                f"| {a['pnl']:,.2f} | {a['net']:,.2f} |")
+        add('')
+    if len(p.get('by_version') or {}) > 1:
+        add('### By version')
+        add('')
+        add('Attributed to the version of the agent that opened the position. Amounts mix '
+            'currencies only if the version traded both markets.')
+        add('')
+        add('| version | trips | win rate | P&L | after costs |')
+        add('|---|---:|---:|---:|---:|')
+        for name, a in sorted(p['by_version'].items()):
+            add(f"| {name} | {a['trips']} | {a['win_rate']:.0%} | {a['pnl']:,.2f} | {a['net']:,.2f} |")
         add('')
     if p['open_positions']:
         add('### Still open')

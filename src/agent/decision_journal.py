@@ -81,8 +81,13 @@ class DecisionJournal:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute('PRAGMA journal_mode=WAL')
         self._conn.executescript(_SCHEMA)
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(decisions)").fetchall()]
+        if 'code_version' not in cols:  # journals written before version tags
+            self._conn.execute("ALTER TABLE decisions ADD COLUMN code_version TEXT")
         self._conn.commit()
         self.db_path = db_path
+        from src.utils.build_info import code_version
+        self.code_version = code_version()
         # Per-symbol last recorded state + cycle, for change-detection.
         self._last_state: Dict[str, tuple] = {}
         self._last_cycle: Dict[str, int] = {}
@@ -114,8 +119,8 @@ class DecisionJournal:
             self._conn.execute(
                 "INSERT INTO decisions (ts, cycle, symbol, action, executed,"
                 " skip_reason, ensemble_confidence, per_strategy_json,"
-                " llm_verdict_json, price, target_value, client_order_id)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " llm_verdict_json, price, target_value, client_order_id, code_version)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     datetime.utcnow().isoformat(), cycle, symbol,
                     decision.get('action'),
@@ -127,6 +132,7 @@ class DecisionJournal:
                     decision.get('price'),
                     decision.get('target_value'),
                     decision.get('client_order_id'),
+                    self.code_version,
                 ))
             self._conn.commit()
             self._last_state[symbol] = key

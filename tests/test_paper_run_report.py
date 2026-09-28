@@ -229,7 +229,7 @@ def test_a_run_started_with_blockers_says_so(journals):
 
 def test_a_silent_run_is_called_stopped_not_quiet(journals, monkeypatch):
     tmp_path, oj, dj = journals
-    _manifest(tmp_path)
+    _manifest(tmp_path, started_at=(datetime.now(timezone.utc) - timedelta(days=10)).isoformat())
     dj.record({'symbol': 'AAPL', 'cycle': 0, 'action': 'hold',
                'skip_reason': 'hold'})
     # Age the only row past the staleness threshold.
@@ -262,7 +262,7 @@ def test_empty_journals_render_without_crashing(tmp_path, monkeypatch):
 
 def test_the_window_excludes_older_rows(journals):
     tmp_path, oj, dj = journals
-    _manifest(tmp_path)
+    _manifest(tmp_path, started_at=(datetime.now(timezone.utc) - timedelta(days=60)).isoformat())
     dj.record({'symbol': 'AAPL', 'cycle': 0, 'action': 'hold',
                'skip_reason': 'hold'})
     dj.record({'symbol': 'MSFT', 'cycle': 1, 'action': 'buy',
@@ -403,9 +403,60 @@ def test_a_run_started_without_git_records_what_code_it_ran(monkeypatch):
     def no_git(*a, **k):
         raise FileNotFoundError('git')
     monkeypatch.setattr(start.subprocess, 'check_output', no_git)
+    from src.utils.build_info import code_version
     monkeypatch.delenv('SOURCE_COMMIT', raising=False)
+    code_version.cache_clear()
     first = start.git_commit()
-    assert first.startswith('source ') and len(first) == len('source ') + 12
+    assert first.startswith('src-') and len(first) == len('src-') + 12
     assert start.git_commit() == first                                     # stable for the same code
-    monkeypatch.setenv('SOURCE_COMMIT', 'caafb1402d60')
+    monkeypatch.setenv('SOURCE_COMMIT', 'caafb1402d60f00d')
+    code_version.cache_clear()
     assert start.git_commit() == 'caafb1402d60'
+    code_version.cache_clear()
+
+
+def test_with_no_window_the_report_covers_the_run_only(journals):
+    tmp_path, oj, dj = journals
+    _manifest(tmp_path, started_at=(datetime.now(timezone.utc) - timedelta(days=3)).isoformat())
+    dj.record({'symbol': 'AAPL', 'cycle': 0, 'action': 'hold', 'skip_reason': 'hold'})
+    dj.record({'symbol': 'MSFT', 'cycle': 1, 'action': 'hold', 'skip_reason': 'hold'})
+    conn = sqlite3.connect(str(tmp_path / 'decision_journal.db'))
+    conn.execute("UPDATE decisions SET ts = ? WHERE symbol = 'AAPL'",
+                 ((datetime.utcnow() - timedelta(days=5)).isoformat(),))           # before the run
+    conn.commit()
+    conn.close()
+    rep = report.build(Args())
+    assert rep['decisions']['total'] == 1
+    assert 'window: since the run started' in report.render(rep, 'config/config.json')
+
+
+def test_nse_profit_is_reported_after_the_commission_its_fill_prices_leave_out(journals):
+    tmp_path, oj, dj = journals
+    _manifest(tmp_path)
+    _fill(oj, 'b1', 'SCOM', 'buy', 1000, 30.0)
+    _fill(oj, 's1', 'SCOM', 'sell', 1000, 31.0)                            # +1,000 KES at fill prices
+    rep = report.build(Args())
+    kes = rep['pnl']['realised_by_currency']['KES']
+    assert kes['gross'] == pytest.approx(1000.0)
+    assert kes['net'] == pytest.approx(1000.0 - 0.0166 * (30.0 + 31.0) * 1000)   # -12.6 KES
+    text = report.render(rep, 'config/config.json')
+    assert '- After the costs the fill prices leave out: KES -12.60' in text
+
+
+def test_results_are_split_by_the_version_that_made_them(journals):
+    tmp_path, oj, dj = journals
+    _manifest(tmp_path)
+    oj.code_version = 'src-old000000000'
+    _fill(oj, 'b1', 'AAPL', 'buy', 10, 100.0)
+    _fill(oj, 's1', 'AAPL', 'sell', 10, 110.0)
+    oj.code_version = 'src-new111111111'
+    _fill(oj, 'b2', 'MSFT', 'buy', 10, 100.0)
+    _fill(oj, 's2', 'MSFT', 'sell', 10, 95.0)
+    dj.code_version = 'src-new111111111'
+    dj.record({'symbol': 'AAPL', 'cycle': 0, 'action': 'hold', 'skip_reason': 'hold'})
+    rep = report.build(Args())
+    assert set(rep['versions']) == {'src-old000000000', 'src-new111111111'}
+    assert rep['pnl']['by_version']['src-old000000000']['pnl'] == pytest.approx(100.0)
+    assert rep['pnl']['by_version']['src-new111111111']['pnl'] == pytest.approx(-50.0)
+    text = report.render(rep, 'config/config.json')
+    assert 'This window mixes 2 versions of the agent' in text and '### By version' in text

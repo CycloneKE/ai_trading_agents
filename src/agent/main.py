@@ -1114,6 +1114,7 @@ class TradingAgent:
                                         'action': validated_signal.get('action'),
                                         'confidence': validated_signal.get('confidence'),
                                         'reasoning': validated_signal.get('reasoning'),
+                                        'model': validated_signal.get('_model'),
                                     }
                                     if validated_signal.get('action') == 'hold':
                                         dec['skip_reason'] = 'llm_veto'
@@ -1123,7 +1124,8 @@ class TradingAgent:
                                     # buys approved today. It used to halve the confidence
                                     # of almost every buy, and could hold back exits.
                                     if self.components['bias_detector'].detect_bias(
-                                            validated_signal, symbol_data, market_data, symbol=symbol):
+                                            validated_signal, symbol_data, market_data, symbol=symbol,
+                                            journal=self.order_journal):
                                         validated_signal['action'] = 'hold'
                                         dec['skip_reason'] = 'bias_downgrade'
 
@@ -1484,6 +1486,7 @@ class TradingAgent:
                         'action': validated.get('action'),
                         'confidence': validated.get('confidence'),
                         'reasoning': validated.get('reasoning'),
+                        'model': validated.get('_model'),
                     }
                     if validated.get('action') == 'hold':
                         dec['skip_reason'] = 'llm_veto'

@@ -216,6 +216,10 @@ class LLMOrchestrator:
                 result = callers[provider](system_prompt, user_prompt, fallback,
                                            model_override=model_override)
                 self._record(provider)
+                # Which AI answered, so a verdict can say (the journal tags
+                # each AI review with it; a change of model mid-run changes
+                # what the reviews are evidence of).
+                self.last_answered = f"{provider}:{self._model_of(provider, model_override, purpose)}"
                 return result
             except Exception as e:
                 self._record(provider, e)
@@ -239,6 +243,20 @@ class LLMOrchestrator:
         h['failures'] += 1
         if h['failures'] == 1 or h['failures'] % 20 == 0:
             logger.warning(f"AI provider '{provider}' failed ({h['failures']} in a row): {h['last_error']}")
+
+    def _model_of(self, provider: str, model_override: Optional[str] = None,
+                  purpose: str = 'review') -> Optional[str]:
+        """The model a provider answers with."""
+        if provider == 'groq':
+            return self.groq_model
+        if provider == 'gemini':
+            return self.gemini_model
+        if provider == 'openrouter':
+            return (self._openrouter_substitute or model_override or
+                    self.config.get('swarm', {}).get('agents', {}).get('synthesizer'))
+        if provider == 'anthropic' and self.claude is not None:
+            return self.claude.review_model if purpose == 'review' else self.claude.volume_model
+        return None
 
     def provider_health(self) -> List[Dict[str, Any]]:
         """Each configured AI provider: its model, whether it can read
@@ -348,6 +366,7 @@ class LLMOrchestrator:
             # validation for this (symbol, action, confidence) bucket for the
             # full TTL even after the provider recovers from a brief 429.
             if isinstance(verdict, dict) and verdict is not strategy_signal:
+                verdict['_model'] = getattr(self, 'last_answered', None)
                 self._verdict_cache[cache_key] = (time.time() + self.cache_ttl, dict(verdict))
             # The AI may confirm, weaken or veto; never reverse or strengthen
             # (guardrails.bound_verdict).
