@@ -1912,10 +1912,11 @@ class TradingAgent:
         market_data for good; the first source holding the symbol used to
         win, and crypto, which the Finnhub / Alpha Vantage quote path does
         not cover, only ever found the fallback: every crypto signal was set
-        aside as fallback_price. When no real source has the symbol, the live
-        price feed (Yahoo Finance, which also serves the history warm-start)
-        is asked; the fallback is returned, and refused downstream, only
-        when that has nothing either.
+        aside as fallback_price. When no real source has the symbol, the
+        primary broker's own market data is asked (Alpaca: the venue crypto
+        fills on), then the live price feed (Yahoo Finance, which throttles
+        the server at times); the fallback is returned, and refused
+        downstream, only when neither has a price.
         """
         try:
             fallback = None
@@ -1932,7 +1933,7 @@ class TradingAgent:
                 if source != 'fallback':
                     return found
                 fallback = fallback or found
-            live = self._live_quote(symbol)
+            live = self._live_quote(symbol, TradingAgent._quote_broker(self))
             if live:
                 return live
             if fallback is None:
@@ -1942,9 +1943,27 @@ class TradingAgent:
             logger.error(f"Error extracting data for symbol {symbol}: {str(e)}")
             return None
 
+    def _quote_broker(self):
+        """The primary broker, when it can quote prices; None otherwise."""
+        bm = (getattr(self, 'components', None) or {}).get('broker_manager')
+        broker = bm.get_broker() if bm is not None else None
+        if broker is None or not getattr(broker, 'is_connected', False):
+            return None
+        return broker if callable(getattr(broker, 'get_market_data', None)) else None
+
     @staticmethod
-    def _live_quote(symbol: str) -> Optional[Dict[str, Any]]:
-        """A real last price from the live price feed, or None."""
+    def _live_quote(symbol: str, broker=None) -> Optional[Dict[str, Any]]:
+        """A real last price: the broker's own market data first (not for
+        currency pairs, which Alpaca does not trade), then the live price
+        feed. None when neither has one."""
+        if broker is not None and classify(symbol, {}) != 'forex':
+            try:
+                quote = broker.get_market_data(symbol)
+                if isinstance(quote, dict) and float(quote.get('price') or 0) > 0:
+                    return {**quote, 'symbol': symbol, 'close': quote.get('close') or quote['price'],
+                            'source': quote.get('source') or 'broker'}
+            except Exception as e:
+                logger.debug(f"Broker quote unavailable for {symbol}: {e}")
         try:
             from src.utils.real_price_feed import price_feed
             price = price_feed.get_price(symbol)

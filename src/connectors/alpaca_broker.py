@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 
 PAPER_BASE_URL = 'https://paper-api.alpaca.markets'
 LIVE_BASE_URL = 'https://api.alpaca.markets'
+# Market data: the same keys, paper or live. Crypto is free for every
+# account; stocks use the free IEX feed.
+DATA_URL = 'https://data.alpaca.markets'
 
 # Every request carries a deadline. The SDK applied its own; plain requests
 # does not, and a socket that never answers would hang the trading loop
@@ -373,6 +376,38 @@ class AlpacaBroker(BaseBroker):
                 return None
             raise
         return self._to_order_response(o) if o else None
+
+    def get_market_data(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """The latest trade for `symbol` from Alpaca's market data: its
+        price, and when it happened. None when Alpaca has none.
+
+        For crypto this is the venue the orders fill on, and it answers when
+        Yahoo Finance throttles the server (which left crypto on the
+        synthetic fallback price, and every crypto signal refused).
+        """
+        try:
+            if self.session is None:
+                self.session = self._build_session()
+            if is_crypto_symbol(symbol):
+                pair = to_alpaca_symbol(symbol)
+                resp = self.session.get(f"{DATA_URL}/v1beta3/crypto/us/latest/trades",
+                                        params={'symbols': pair}, timeout=self.timeout)
+                resp.raise_for_status()
+                trade = ((resp.json() or {}).get('trades') or {}).get(pair) or {}
+            else:
+                resp = self.session.get(f"{DATA_URL}/v2/stocks/{symbol}/trades/latest",
+                                        params={'feed': 'iex'}, timeout=self.timeout)
+                resp.raise_for_status()
+                trade = (resp.json() or {}).get('trade') or {}
+            price = _as_float(trade.get('p'))
+            if not price or price <= 0:
+                return None
+            at = _parse_timestamp(trade.get('t'))
+            return {'symbol': symbol, 'price': price, 'close': price, 'source': 'alpaca',
+                    'timestamp': at.isoformat() if at else None}
+        except Exception as e:
+            logger.debug(f"Alpaca market data unavailable for {symbol}: {e}")
+            return None
 
     def get_portfolio_history(self, period: str = '1D', timeframe: str = '1Min') -> Dict[str, Any]:
         """Get Alpaca portfolio history."""
