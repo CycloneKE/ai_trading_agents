@@ -18,6 +18,10 @@ class BiasDetector:
         self.bias_threshold = config.get('bias_threshold', 0.15)  # 15% bias threshold
         self.lookback_days = config.get('bias_lookback_days', 30)
         
+        # Buys approved in the last 24 hours, per market (detect_bias).
+        self.max_new_buys_per_day = int((config.get('bias_check') or {}).get('max_new_buys_per_day', 3))
+        self._approved_buys: Dict[str, Dict[str, datetime]] = {}
+
         # Bias tracking
         self.decision_history = []
         self.performance_by_sector = {}
@@ -25,62 +29,73 @@ class BiasDetector:
         self.performance_by_volatility = {}
 
     def detect_bias(self, signal: Dict[str, Any], symbol_data: Optional[Dict[str, Any]] = None,
-                    market_data: Optional[Dict[str, Any]] = None) -> bool:
-        """Real-time, per-signal bias check used in the trading loop.
+                    market_data: Optional[Dict[str, Any]] = None, symbol: Optional[str] = None,
+                    now: Optional[datetime] = None, journal=None) -> bool:
+        """Whether a buy should wait because the agent is piling into one
+        market at once (herding). Returns True when it should wait.
 
-        Records the incoming decision and flags the signal as biased when recent
-        directional decisions are over-concentrated in the same direction
-        (herding / confirmation bias) beyond the configured threshold AND this
-        signal reinforces that dominant direction. Returns True if biased.
+        The check it replaces counted the last 30 calls across every market
+        and flagged any signal going the same way as 65% of them. In a book
+        that only buys (a sell is always the exit of a holding) nearly every
+        signal reaching it is a buy, so after the fifth it flagged nearly
+        every buy; each re-check of one stock's signal counted as a fresh
+        vote; and in a sell-off it could hold back exits. In the first week
+        of the paper run it downgraded 216 signals while 11 orders went out.
 
-        This is intentionally conservative — it needs a minimum sample and only
-        flags reinforcing signals — to avoid suppressing legitimate trades.
+        Now it guards what herding means for this book: opening many new
+        positions in the same market at once. A buy waits when
+        `bias_check.max_new_buys_per_day` other symbols in its market have
+        had a buy approved in the last 24 hours; the same symbol again is
+        not a new position and does not count twice. A sell is never held
+        back: an exit reduces risk. With the order `journal`, buys placed in
+        the last 24 hours count too, so a restart does not reset the pace.
         """
         try:
-            if not isinstance(signal, dict):
+            if not isinstance(signal, dict) or signal.get('action') != 'buy':
                 return False
-
-            action = signal.get('action', 'hold')
-            symbol_data = symbol_data or {}
-
-            # Record this decision (bounded history window).
-            self.decision_history.append({
-                'action': action,
-                'sector': symbol_data.get('sector', 'unknown'),
-                'returns': symbol_data.get('returns', 0.0),
-                'timestamp': datetime.utcnow(),
-            })
-            max_history = max(20, self.lookback_days)
-            if len(self.decision_history) > max_history:
-                self.decision_history = self.decision_history[-max_history:]
-
-            # Only judge directional (buy/sell) decisions, with a minimum sample.
-            recent = [d for d in self.decision_history if d['action'] in ('buy', 'sell')]
-            if action not in ('buy', 'sell') or len(recent) < 5:
+            sym = str(symbol or signal.get('symbol') or (symbol_data or {}).get('symbol') or '').upper()
+            if not sym:
                 return False
-
-            buys = sum(1 for d in recent if d['action'] == 'buy')
-            sells = sum(1 for d in recent if d['action'] == 'sell')
-            total = buys + sells
-            if total == 0:
+            from src.agent.cost_model import classify
+            market = classify(sym, self.config)
+            now = now or datetime.utcnow()
+            book = {s: t for s, t in self._approved_buys.get(market, {}).items()
+                    if now - t < timedelta(hours=24)}
+            self._approved_buys[market] = book
+            for s, t in self._journal_buys(journal, market, now).items():
+                book.setdefault(s, t)
+            if sym in book:
                 return False
-
-            dominant_action = 'buy' if buys >= sells else 'sell'
-            dominant_ratio = max(buys, sells) / total
-
-            # Flag only when concentration exceeds the threshold and the current
-            # signal reinforces the already-dominant direction.
-            if action == dominant_action and dominant_ratio > (0.5 + self.bias_threshold):
-                logger.info(
-                    f"Real-time bias flag: {dominant_ratio:.0%} of recent {total} "
-                    f"directional decisions are '{dominant_action}'"
-                )
+            if len(book) >= self.max_new_buys_per_day:
+                logger.info(f"Buy pace: {sym} waits; {len(book)} new {market} buys approved in the "
+                            f"last 24 hours ({', '.join(sorted(book))})")
                 return True
+            book[sym] = now
             return False
-
         except Exception as e:
             logger.error(f"detect_bias error: {e}")
             return False
+
+    def _journal_buys(self, journal, market: str, now: datetime) -> Dict[str, datetime]:
+        """Symbols in `market` bought by the strategies in the last 24 hours,
+        from the order journal (the core's index funds and the kill switch
+        are not new positions)."""
+        out: Dict[str, datetime] = {}
+        if journal is None:
+            return out
+        try:
+            from src.agent.cost_model import classify
+            for o in journal.recent(300):
+                if (o.get('side') != 'buy' or o.get('status') not in ('intent', 'submitted', 'filled')
+                        or (o.get('strategy') or '') in ('core', 'kill_switch')):
+                    continue
+                sym = str(o.get('symbol') or '').upper()
+                at = datetime.fromisoformat(str(o.get('created_at'))[:26])
+                if sym and now - at < timedelta(hours=24) and classify(sym, self.config) == market:
+                    out.setdefault(sym, at)
+        except Exception as e:
+            logger.debug(f"Buy pace could not read the order journal: {e}")
+        return out
 
     def detect_sector_bias(self, decisions: List[Dict]) -> Dict[str, float]:
         """Detect bias towards specific sectors"""

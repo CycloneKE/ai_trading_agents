@@ -111,6 +111,11 @@ class OrderJournal:
         if 'strategy_weights' not in cols:  # journals written before credit sharing
             self._conn.execute("ALTER TABLE orders ADD COLUMN strategy_weights TEXT")
             self._conn.commit()
+        if 'code_version' not in cols:  # journals written before version tags
+            self._conn.execute("ALTER TABLE orders ADD COLUMN code_version TEXT")
+            self._conn.commit()
+        from src.utils.build_info import code_version
+        self.code_version = code_version()
         self.db_path = db_path
 
     # ------------------------------------------------------------------
@@ -140,10 +145,10 @@ class OrderJournal:
                 self._conn.execute(
                     "INSERT INTO orders (client_order_id, symbol, side, quantity,"
                     " order_type, limit_price, strategy, strategy_weights, status,"
-                    " created_at, updated_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'intent', ?, ?)",
+                    " created_at, updated_at, code_version)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'intent', ?, ?, ?)",
                     (client_order_id, symbol, side, quantity, order_type,
-                     limit_price, strategy, weights, now, now))
+                     limit_price, strategy, weights, now, now, self.code_version))
                 self._conn.commit()
                 return True
             except sqlite3.IntegrityError:

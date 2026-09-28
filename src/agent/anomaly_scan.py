@@ -51,8 +51,8 @@ HELD_BACK = {
     'turnover_budget': "this week's allowance of new NSE holdings is used up",
     'order_pending': "an earlier order for it is still working",
     'below_confidence': "the combined signal was not confident enough to trade",
-    'bias_downgrade': "the bias check found the signal one-sided and lowered its confidence "
-                      "below the level needed to trade",
+    'bias_downgrade': "several new positions were already opened in this market today; the agent "
+                      "spreads new buys out rather than piling in at once, and looks again tomorrow",
     'llm_veto': "the AI review advised against it",
     'dissent': "no strategy agreed with the direction",
     'liquidity_cap': "the stock trades too thinly to buy even one share within the volume limit",

@@ -162,25 +162,16 @@ def load_bars(csv_dir, cfg):
 
 def git_commit():
     """The code this run started on. The server's image carries no git
-    history, so there it is the commit Coolify built from (SOURCE_COMMIT),
-    else a fingerprint of the agent's source."""
+    history, so there it is the code version the journals are tagged with
+    (build_info.code_version: Coolify's SOURCE_COMMIT or a source
+    fingerprint)."""
     try:
         return subprocess.check_output(['git', 'rev-parse', 'HEAD'],
                                        stderr=subprocess.DEVNULL).decode().strip()
     except Exception:
         pass
-    if os.getenv('SOURCE_COMMIT'):
-        return os.getenv('SOURCE_COMMIT')
-    try:
-        import hashlib
-        from pathlib import Path
-        root = Path(__file__).resolve().parent.parent / 'src'
-        digest = hashlib.sha256()
-        for f in sorted(root.rglob('*.py')):
-            digest.update(f.relative_to(root).as_posix().encode() + b'\0' + f.read_bytes() + b'\0')
-        return f"source {digest.hexdigest()[:12]}"
-    except Exception:
-        return 'unknown'
+    from src.utils.build_info import code_version
+    return code_version()
 
 
 def write_manifest(cfg, readiness, args, path=None):

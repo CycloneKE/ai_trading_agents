@@ -3,6 +3,7 @@ Real-time Risk Management Engine
 Monitors and controls trading risk in real-time with automatic position sizing and limits
 """
 
+import json
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timedelta
@@ -90,6 +91,7 @@ class RealTimeRiskManager:
             self._risk_db_conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
             self._risk_db_conn.execute("CREATE TABLE IF NOT EXISTS risk_state (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
             self._risk_db_conn.commit()
+            self._saved_peaks = self._load_peaks()
             
             cur = self._risk_db_conn.execute("SELECT value, updated_at FROM risk_state WHERE key='kill_switch_active'")
             row = cur.fetchone()
@@ -102,6 +104,35 @@ class RealTimeRiskManager:
                 logger.warning("Persistent Kill Switch active: emergency stop restored from DB")
         except Exception as e:
             logger.error(f"Failed to initialize persistent risk state DB: {e}")
+
+    # Trailing-stop peaks, kept in risk_state.db under 'peak:<SYMBOL>' as
+    # {"peak": highest price since entry, "avg": the entry price it belongs
+    # to}. They lived in memory only, so every restart or redeploy reset the
+    # peak to the current price and moved each trailing stop down.
+    def _load_peaks(self) -> Dict[str, Dict[str, float]]:
+        peaks = {}
+        try:
+            rows = self._risk_db_conn.execute(
+                "SELECT key, value FROM risk_state WHERE key LIKE 'peak:%'").fetchall()
+            for key, value in rows:
+                data = json.loads(value or '{}')
+                peaks[key[5:]] = {'peak': float(data['peak']), 'avg': float(data.get('avg') or 0)}
+        except Exception as e:
+            logger.warning(f"Could not read saved trailing-stop peaks: {e}")
+        return peaks
+
+    def _save_peaks(self, changed: Dict[str, Dict[str, float]]) -> None:
+        conn = getattr(self, '_risk_db_conn', None)
+        if conn is None or not changed:
+            return
+        try:
+            now = datetime.utcnow().isoformat()
+            for sym, data in changed.items():
+                conn.execute("INSERT OR REPLACE INTO risk_state (key, value, updated_at) VALUES (?, ?, ?)",
+                             (f"peak:{sym}", json.dumps(data), now))
+            conn.commit()
+        except Exception as e:
+            logger.warning(f"Could not save trailing-stop peaks: {e}")
 
     def set_persistent_kill_switch(self, active: bool, reason: str = ""):
         """Set kill switch state in memory and persist to DB."""
@@ -488,19 +519,37 @@ class RealTimeRiskManager:
         """
         try:
             new_positions = {}
+            saved = getattr(self, '_saved_peaks', None)
+            if saved is None:
+                saved = self._saved_peaks = {}
+            changed = {}
             for p in positions or []:
                 qty = float(getattr(p, 'quantity', 0) or 0)
                 if qty == 0:
                     continue
                 price = float(getattr(p, 'current_price', 0) or getattr(p, 'avg_entry_price', 0) or 0)
+                avg = float(getattr(p, 'avg_entry_price', 0) or 0)
                 prev_hwm = self.positions.get(p.symbol, {}).get('high_watermark', 0.0)
+                mine = saved.get(p.symbol)
+                # A saved peak belongs to this holding only if it was bought at
+                # the same average price; a new holding starts afresh.
+                if mine and (not avg or abs(mine['avg'] - avg) <= 0.005 * avg):
+                    prev_hwm = max(prev_hwm, mine['peak'])
+                hwm = max(prev_hwm, price)
+                if not mine or hwm > mine['peak'] or abs(mine['avg'] - avg) > 0.005 * max(avg, 1e-9):
+                    changed[p.symbol] = {'peak': hwm, 'avg': avg}
                 new_positions[p.symbol] = {
                     'quantity': qty,
-                    'avg_price': float(getattr(p, 'avg_entry_price', 0) or 0),
+                    'avg_price': avg,
                     'market_value': float(getattr(p, 'market_value', 0) or qty * price),
-                    'high_watermark': max(prev_hwm, price),
+                    'high_watermark': hwm,
                 }
             self.positions = new_positions
+            # Peaks of symbols no longer held are kept: an empty answer from a
+            # broker having a bad minute must not wipe them, and the entry
+            # price check above stops one being applied to a new holding.
+            saved.update(changed)
+            self._save_peaks(changed)
             if cash:
                 self.cash = float(cash)
             self._update_portfolio_metrics()

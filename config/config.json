@@ -4,6 +4,10 @@
   "groq_vision_model": "qwen/qwen3.8-27b",
   "gemini_model": "gemini-flash-lite-latest",
   "llm_cooldown_seconds": 60,
+  "bias_check": {
+    "_comment": "Herding check (src/agent/bias_detector.py): a new buy waits when this many other symbols in the same market (US stocks, crypto, forex) already had a buy approved in the last 24 hours, so the agent spreads new positions out instead of piling in at once. Sells are never held back.",
+    "max_new_buys_per_day": 3
+  },
   "sector_analysis_interval": 390,
   "data_manager": {
     "_symbol_lists": "Two kinds of list. TRADING lists say what the agent acts on: `symbols` is walked by the main loop every trading_loop_interval seconds, `nse_symbols` by the NSE pass every nse_eval_interval seconds during Nairobi hours. CLASSIFICATION lists say how a symbol is costed: `crypto_symbols` is expected to overlap `symbols`, since a pair must be in `symbols` to be traded and in `crypto_symbols` to be priced as crypto rather than as a US equity. An overlap between the two trading lists would be a real conflict; an overlap with the classification list is intended.",
@@ -441,11 +445,11 @@
       "note": "Per side: 1.30% brokerage on AIB DigiTrader (desk orders can reach 1.6%), statutory levies for the NSE, CMA, CDSC and ICF of 0.29-0.34% taken at 0.34%, and stamp duty of KES 2 per KES 10,000. commission_pct is their sum. Slippage is an estimate, not a fee. Never use the optional 5% instant-settlement fee: the paper account waits for T+3 settlement instead. Check the first real contract note against these figures."
     },
     "crypto": {
-      "commission_pct": 0.006,
+      "commission_pct": 0.0025,
       "min_commission": 0.0,
       "slippage_pct": 0.001,
       "verified": false,
-      "note": "PLACEHOLDER \u2014 Coinbase taker fees vary by 30-day volume tier."
+      "note": "Alpaca crypto taker fee at the lowest 30-day volume tier (0.25%; maker 0.15%): crypto trades on Alpaca, the Coinbase broker is off. It was Coinbase's 0.6%, which overstated every crypto round trip by 0.7%. Verify on Alpaca's crypto fee page."
     },
     "forex": {
       "commission_pct": 0.0,

@@ -45,11 +45,12 @@ DEFAULT_COSTS: Dict[str, Dict[str, Any]] = {
         'note': 'AIB-AXYS schedule, 26 Sep 2026. Slippage is an estimate.',
     },
     'crypto': {
-        'commission_pct': 0.006,
+        # Crypto trades on Alpaca (the Coinbase broker is off by default).
+        'commission_pct': 0.0025,
         'min_commission': 0.0,
         'slippage_pct': 0.0010,
         'verified': False,
-        'note': 'PLACEHOLDER. Coinbase taker fees vary by volume tier.',
+        'note': 'Alpaca crypto taker fee, lowest volume tier. Verify on Alpaca\'s fee page.',
     },
     'forex': {
         # Currency brokers charge through the spread, not a commission.

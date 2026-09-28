@@ -8,7 +8,7 @@ import { columns, money, signedMoney, useIsMobile } from './ui';
 const REASON_LABEL = {
   hold: 'No directional signal',
   below_confidence: 'Below confidence floor',
-  bias_downgrade: 'Bias detector downgrade',
+  bias_downgrade: 'Waiting: enough new buys in this market today',
   llm_veto: 'LLM vetoed the trade',
   fallback_price: 'Price was synthetic fallback',
   stale_price: 'Latest price is too old (stock suspended or not trading)',
