@@ -29,7 +29,7 @@ function reviewItems(review) {
     return {
       key: `review-${i}`, severity: 'info', attention: false,
       message: `AI review suggests changing ${name} from ${settingValue(kind, s.current)} to ${settingValue(kind, s.proposed)}${s.reasoning ? `: ${s.reasoning}` : '.'}`,
-      hint: `Based on ${review.executed_trades} trades. Advice only: nothing changes unless config.json is changed.`,
+      hint: `Based on ${review.closed_trades ?? review.executed_trades} closed trades. Advice only: nothing changes unless config.json is changed.`,
       lastAt: review.at, lastLabel: 'Reviewed',
     };
   });

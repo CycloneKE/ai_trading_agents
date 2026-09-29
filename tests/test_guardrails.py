@@ -99,3 +99,49 @@ def test_the_adaptive_agent_only_cuts_size_down_to_a_floor():
     agent.market_regime = 'high_volatility'
     assert all(a.action_type != 'switch_strategy_weights' for a in agent._generate_adaptation_actions())
     assert 'strategy_weights' not in cfg
+
+
+# ---- the evidence tilt: how a strategy's own results scale its vote
+
+def test_no_tilt_until_a_strategy_has_a_record():
+    assert g.evidence_tilt(0, 5.0) == 1.0 and g.evidence_tilt(4, 5.0) == 1.0     # too few trades
+    assert g.evidence_tilt(None, None) == 1.0 and g.evidence_tilt('x', 'y') == 1.0
+    assert g.evidence_tilt(10, float('nan')) == 1.0
+
+
+def test_the_tilt_is_symmetric_and_bounded_by_how_convincing_the_record_is():
+    assert g.evidence_tilt(20, 0.0) == 1.0                                       # no edge: neutral
+    assert g.evidence_tilt(20, 1.0) == 1.25 and g.evidence_tilt(20, -1.0) == 0.75
+    assert g.evidence_tilt(20, 2.0) == 1.5 and g.evidence_tilt(20, 9.0) == 1.5   # t of 2: the most it can earn
+    assert g.evidence_tilt(20, -2.0) == 0.5 and g.evidence_tilt(20, -9.0) == 0.5  # halved, never switched off
+
+
+def _ensemble(perf):
+    from src.agent.strategy_manager import StrategyManager
+    m = StrategyManager({'ensemble_method': 'adaptive_confidence', 'min_trade_confidence': 0.0,
+                         'regime_filter': {'enabled': False}})
+    m.strategy_weights = {'a': 0.5, 'b': 0.5}
+    m.strategy_performance = perf
+    # a says buy with 0.60, b says sell with 0.65: with no record, b wins narrowly.
+    sigs = {'a': {'action': 'buy', 'confidence': 0.60, 'position_size': 0.0},
+            'b': {'action': 'sell', 'confidence': 0.65, 'position_size': 0.0}}
+    return m._adaptive_confidence_ensemble(sigs, 'X', {'close': 100, 'open': 100})['action']
+
+
+def test_two_lucky_trades_no_longer_double_a_strategys_weight():
+    # Before: a's weight was x2.0 on a sharpe of 3 and a 100% win rate over two
+    # trades, which overturned b. Now a record needs five trades to count at all.
+    lucky_two = {'a': {'closed_trades': 2, 'sharpe_ratio': 3.0, 'win_rate': 1.0}, 'b': {}}
+    assert _ensemble({'a': {}, 'b': {}}) == 'sell'
+    assert _ensemble(lucky_two) == 'sell'
+
+
+def test_a_real_record_does_tilt_the_vote():
+    proven = {'a': {'closed_trades': 30, 'sharpe_ratio': 2.5, 'win_rate': 0.7}, 'b': {}}
+    assert _ensemble(proven) == 'buy'                                            # a x1.5 beats b
+
+
+def test_a_significantly_losing_strategy_is_now_reduced():
+    # Before, a losing record was simply ignored. b is the loser here: it is halved.
+    losing_b = {'a': {}, 'b': {'closed_trades': 30, 'sharpe_ratio': -2.5, 'win_rate': 0.3}}
+    assert _ensemble(losing_b) == 'buy'

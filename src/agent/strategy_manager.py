@@ -15,6 +15,7 @@ import threading
 
 from src.utils.paths import DATA_DIR
 from src.agent.regime import RegimeDetector, filter_signals, UNKNOWN
+from src.agent.guardrails import evidence_tilt
 
 logger = logging.getLogger(__name__)
 
@@ -658,12 +659,13 @@ class StrategyManager:
             # were ignored entirely on this path. Start from the configured
             # weight and only tilt it once real attribution exists.
             base_weight = self.strategy_weights.get(name, 1.0)
-            sharpe_ratio = performance.get('sharpe_ratio') or 0.0
-            win_rate = performance.get('win_rate') or 0.0
-            if sharpe_ratio > 0 and win_rate > 0:
-                # Scaled around 0.5 win rate so an average performer keeps its
-                # configured weight rather than being halved.
-                base_weight *= max(0.25, min(2.0, sharpe_ratio * win_rate * 2.0))
+            # Tilted by its own realised results, and only on evidence: none
+            # under five closed trades, then 0.5x to 1.5x by how convincing
+            # its record is (guardrails.evidence_tilt). This used to double a
+            # strategy's weight on a couple of lucky trades and never reduce
+            # a losing one.
+            base_weight *= evidence_tilt(performance.get('closed_trades'),
+                                         performance.get('sharpe_ratio'))
             base_weight = max(0.01, base_weight)
             
             # Adaptive logic:

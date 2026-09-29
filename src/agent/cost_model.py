@@ -155,3 +155,15 @@ def unverified_markets(config: Optional[Dict[str, Any]] = None) -> Dict[str, str
         if not merged.get('verified', False):
             out[market] = merged.get('note', 'Cost assumptions not verified.')
     return out
+
+
+def fill_gap_pct(symbol: str, config: Optional[Dict[str, Any]] = None) -> float:
+    """Per side, the modelled costs a journal fill price does not already
+    carry. NSE paper fills carry their slippage but pay commission (1.66% a
+    side at AIB-AXYS) separately; the forex paper book's fills carry its
+    spread; Alpaca's paper fills carry neither slippage nor fees. Profit
+    from fill prices is overstated by twice this on a round trip."""
+    c = costs_for(symbol, config)
+    commission = float(c.get('commission_pct') or 0.0)
+    slippage = float(c.get('slippage_pct') or 0.0)
+    return commission if classify(symbol, config) in ('nse', 'forex') else commission + slippage
