@@ -9,7 +9,7 @@ import MarketClock from './MarketClock';
 import HelpPanel from './HelpPanel';
 import SymbolDrilldown from './SymbolDrilldown';
 import SectorDrilldown from './SectorDrilldown';
-import UnifiedPortfolio from './UnifiedPortfolio';
+import PortfolioSection from './views/PortfolioSection';
 import OverviewView from './views/OverviewView';
 import ResearchView from './views/ResearchView';
 import NseSection from './views/NseSection';
@@ -28,7 +28,7 @@ const SECTIONS = [
   { id: 'insights', label: 'Insights', short: 'Insights', icon: ChartLine },
   { id: 'system', label: 'Risk & System', short: 'System', icon: Shield },
 ];
-const DEFAULT_SUB = { nse: 'watch', insights: 'analytics', system: 'risk' };
+const DEFAULT_SUB = { portfolio: 'all', nse: 'watch', insights: 'analytics', system: 'risk' };
 
 // Pages reached from the header rather than the navigation bar.
 const HEADER_PAGES = ['notifications'];
@@ -293,7 +293,7 @@ const AdvancedDashboard = ({ onLogout }) => {
 
   const page = () => {
     switch (section) {
-      case 'portfolio': return <UnifiedPortfolio onDrill={drill} />;
+      case 'portfolio': return <PortfolioSection sub={sub} onSub={onSub} onGo={go} mobile={mobile} onDrill={drill} />;
       case 'research': return <ResearchView active onChanged={fetchData} onDrill={drill} mobile={mobile} />;
       case 'nse': return <NseSection active sub={sub} onSub={onSub} nseData={nseData} isOperator={isOperator} mobile={mobile} onDrill={drill} />;
       case 'insights': return <InsightsSection sub={sub} onSub={onSub} data={data} mobile={mobile} onSector={setDrilldownSector} />;
