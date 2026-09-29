@@ -85,17 +85,11 @@ def reading(reason):
 
 
 def unpaid_cost_pct(symbol, config):
-    """Per side, the modelled costs a journal fill price does not already
-    carry. NSE paper fills carry their slippage but pay commission (1.66%
-    a side at AIB-AXYS) separately, so profit from fill prices overstated
-    every NSE round trip by about 3.3%. The forex paper book's fills carry
-    its spread. Alpaca's paper fills carry neither slippage nor fees."""
+    """Per side, the modelled costs a journal fill price does not carry
+    (cost_model.fill_gap_pct)."""
     try:
-        from src.agent.cost_model import classify, costs_for
-        c = costs_for(symbol, config)
-        commission = float(c.get('commission_pct') or 0.0)
-        slippage = float(c.get('slippage_pct') or 0.0)
-        return commission if classify(symbol, config) in ('nse', 'forex') else commission + slippage
+        from src.agent.cost_model import fill_gap_pct
+        return fill_gap_pct(symbol, config)
     except Exception:
         return 0.0
 

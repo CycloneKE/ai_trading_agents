@@ -4,6 +4,14 @@
   "groq_vision_model": "qwen/qwen3.8-27b",
   "gemini_model": "gemini-flash-lite-latest",
   "llm_cooldown_seconds": 60,
+  "llm_allocator": {
+    "_comment": "An AI re-weighting of the strategies, OFF by default: the ensemble already tilts each strategy by its realised results (guardrails.evidence_tilt), and the AI is shown nothing more. To layer an AI on top set enabled to true; it then asks at most once a day, and only after min_new_trades more trades have closed.",
+    "enabled": false,
+    "interval_hours": 24,
+    "min_closed_trades": 10,
+    "min_strategy_trades": 5,
+    "min_new_trades": 5
+  },
   "bias_check": {
     "_comment": "Herding check (src/agent/bias_detector.py): a new buy waits when this many other symbols in the same market (US stocks, crypto, forex) already had a buy approved in the last 24 hours, so the agent spreads new positions out instead of piling in at once. Sells are never held back.",
     "max_new_buys_per_day": 3
@@ -355,7 +363,10 @@
     }
   },
   "self_assessment": {
-    "assessment_interval": 390
+    "_comment": "The AI stop-setting review waits for min_closed_trades closed round trips, then asks again only after min_new_trades more. It is advice only.",
+    "assessment_interval": 390,
+    "min_closed_trades": 15,
+    "min_new_trades": 5
   },
   "swarm": {
     "enabled": true,

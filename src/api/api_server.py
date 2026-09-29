@@ -276,6 +276,21 @@ class TradingAPI:
             logger.error(f"NSE holdings unavailable: {e}")
         return rows, account
 
+    def _closed_trade_counts(self) -> Optional[Dict[str, Any]]:
+        """Closed, winning and losing trades and the win rate, from the
+        order journal's fills (round_trips), or None when there is no
+        journal. Never raises."""
+        try:
+            journal = getattr(self.trading_agent, 'order_journal', None)
+            if journal is None:
+                return None
+            from src.agent.round_trips import closed_round_trips, trade_counts
+            config = getattr(self.trading_agent, 'config', None) or self.config
+            return trade_counts(closed_round_trips(journal.filled_orders(), config))
+        except Exception as e:
+            logger.debug(f"Closed-trade counts unavailable: {e}")
+            return None
+
     def _core_summary(self) -> Dict[str, Any]:
         """The core-satellite split's settings and last rebalance, for the
         Portfolio page. Values are filled in from the broker's positions."""
@@ -504,6 +519,14 @@ class TradingAPI:
                 initial = current_value / (1 + total_return) if total_return > -1 else current_value
                 report['portfolio_value'] = current_value
                 report['total_pnl'] = round(current_value - initial, 2)
+                # Closed trades come from the order journal. The analytics
+                # engine's own trade list is never filled by the agent, so
+                # its count and win rate stayed at 0 however many trades had
+                # closed. Sharpe and drawdown still come from the equity curve.
+                closed = self._closed_trade_counts()
+                if closed is not None:
+                    metrics = {**metrics, **closed}
+                    report['metrics'] = metrics
                 report['win_rate'] = metrics.get('win_rate', 0)
                 report['total_trades'] = metrics.get('total_trades', 0)
                 report['sharpe_ratio'] = metrics.get('sharpe_ratio', 0)

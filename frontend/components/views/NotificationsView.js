@@ -29,7 +29,7 @@ function reviewItems(review) {
     return {
       key: `review-${i}`, severity: 'info', attention: false,
       message: `AI review suggests changing ${name} from ${settingValue(kind, s.current)} to ${settingValue(kind, s.proposed)}${s.reasoning ? `: ${s.reasoning}` : '.'}`,
-      hint: `Based on ${review.executed_trades} trades. Advice only: nothing changes unless config.json is changed.`,
+      hint: `Based on ${review.closed_trades ?? review.executed_trades} closed trades. Advice only: nothing changes unless config.json is changed.`,
       lastAt: review.at, lastLabel: 'Reviewed',
     };
   });
@@ -57,7 +57,7 @@ function aiItems(ai) {
   if (answering.length) {
     items.push({
       key: 'ai-ok', severity: 'info', attention: false,
-      message: `AI answering: ${answering.map((a) => `${PROVIDER[a.provider] || a.provider}${a.model ? ` (${a.model})` : ''}, last at ${clock(a.last_ok)}`).join('; ')}.`,
+      message: `AI answering: ${answering.map((a) => `${PROVIDER[a.provider] || a.provider}${a.model ? ` (${a.model})` : ''}, last at ${clock(a.last_ok)}${a.calls_today ? `, ${a.calls_today} calls and ${a.tokens_today ? `${Math.round(a.tokens_today / 1000)}k tokens` : 'some tokens'} used today` : ''}`).join('; ')}.`,
     });
   }
   return items;

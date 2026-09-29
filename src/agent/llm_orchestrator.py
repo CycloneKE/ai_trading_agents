@@ -6,6 +6,7 @@ import os
 import json
 import logging
 import time
+from datetime import datetime
 import re
 import requests
 from typing import Dict, Any, List, Optional
@@ -35,6 +36,7 @@ GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models"
 GROQ_TEXT_FAMILIES = ("openai/gpt-oss-120b", "qwen", "openai/gpt-oss", "kimi", "llama")
 GROQ_VISION_FAMILIES = ("qwen/qwen3.", "llama-4-maverick", "llama-4-scout", "vision", "-vl")
 GROQ_SUBSTITUTE_TRIES = 3
+GROQ_TEXT_MAX_TOKENS = 800
 GROQ_NOT_CHAT = ("whisper", "guard", "tts", "orpheus", "playai", "distil")
 
 
@@ -134,6 +136,7 @@ class LLMOrchestrator:
         self.groq_model = config.get("groq_model", "openai/gpt-oss-120b")
         self.groq_vision_model = config.get("groq_vision_model", "qwen/qwen3.8-27b")
         self._groq_models_cache: tuple = (0.0, [])
+        self._usage: Dict[str, Dict[str, Any]] = {}
 
         # Determine primary model strategy
         self.primary_provider = config.get("primary_llm_provider", "openrouter")
@@ -143,7 +146,10 @@ class LLMOrchestrator:
         # with the largest daily allowance. Override with config 'gemini_model'.
         self.gemini_model = config.get("gemini_model", "gemini-flash-lite-latest")
 
-        self.cache_ttl = config.get('llm_cache_ttl', 900)  # 15 min default
+        # A verdict is reused for an hour: the strategies work on daily bars,
+        # so the same signal on the same stock is the same question; it was 15
+        # minutes, which asked it again four times an hour all day.
+        self.cache_ttl = config.get('llm_cache_ttl', 3600)
         self._verdict_cache: Dict[str, tuple] = {}  # key -> (expires_at, verdict)
 
         # Per-provider 429 circuit-breaker: when a provider rate-limits us, skip
@@ -279,8 +285,30 @@ class LLMOrchestrator:
                         'advice': advice(name, h.get('last_error')) if failing else None,
                         'status': 'failing' if failing else ('ok' if h.get('last_ok') else 'unused'),
                         'last_ok': h.get('last_ok'), 'last_error': h.get('last_error'),
-                        'last_error_at': h.get('last_error_at'), 'failures': h.get('failures', 0)})
+                        'last_error_at': h.get('last_error_at'), 'failures': h.get('failures', 0),
+                        **self._usage_today(name)})
         return out
+
+    # What each provider has used today (UTC), counted from its own replies.
+    # The free plans limit tokens a day, not just calls, so this is what shows
+    # how close the agent is to a limit.
+    def _note_usage(self, provider: str, response, key: str, field: str) -> None:
+        try:
+            tokens = int(((response.json() or {}).get(key) or {}).get(field) or 0)
+        except Exception:
+            tokens = 0
+        today = datetime.utcnow().date().isoformat()
+        used = self._usage.get(provider)
+        if not used or used['day'] != today:
+            used = self._usage[provider] = {'day': today, 'calls': 0, 'tokens': 0}
+        used['calls'] += 1
+        used['tokens'] += tokens
+
+    def _usage_today(self, provider: str) -> Dict[str, int]:
+        used = self._usage.get(provider)
+        if not used or used['day'] != datetime.utcnow().date().isoformat():
+            return {'calls_today': 0, 'tokens_today': 0}
+        return {'calls_today': used['calls'], 'tokens_today': used['tokens']}
 
     def validate_trade(self, symbol: str, strategy_signal: Dict[str, Any], market_data: Dict[str, Any], news_data: list = None, research_context: Dict[str, Any] = None, sector_outlook: Dict[str, Any] = None, track_record: str = None) -> Dict[str, Any]:
         """
@@ -299,63 +327,60 @@ class LLMOrchestrator:
         if cached and cached[0] > time.time():
             return bound_verdict(strategy_signal, dict(cached[1]))
 
+        # A short prompt, and honest about the rules the answer is held to
+        # (guardrails.bound_verdict): the AI may approve, lower confidence or
+        # veto, so it is not asked for a size or a reversal it would lose.
         system_prompt = (
-            "You are a quantitative trading risk reviewer.\n"
-            "A proposed trade signal from a technical/statistical ensemble has already cleared its "
-            "own confidence threshold before reaching you — treat it as a real signal worth taking "
-            "seriously, not a default you're expected to talk yourself out of.\n"
-            "Review it against the available fundamental data, market news, and volatility context, "
-            "and decide whether to approve it, resize it, or reject it.\n"
-            "Only downgrade confidence or switch the action to 'hold' when you have a SPECIFIC, "
-            "concrete reason: fresh news that directly contradicts the signal's direction, volatility "
-            "that is genuinely elevated (not just unreported), or a clear fundamental red flag. "
-            "Incomplete information or general uncertainty is normal and is NOT by itself a reason "
-            "to veto — approve the signal as given unless something concrete argues against it.\n"
-            "Return your response EXACTLY as a valid JSON object with the following schema:\n"
-            '{"action": "buy|sell|hold", "confidence": <float 0.0-1.0>, "position_size": <float 0.0-1.0>, "reasoning": "<your rationale>"}\n'
-            "Ensure the JSON output is raw JSON without markdown codeblocks or trailing characters."
+            "You are a risk reviewer for a long-only paper-trading agent. A technical ensemble proposes "
+            "the signal below and it already cleared its own confidence threshold: treat it as a real "
+            "signal. You may approve it, lower its confidence, or veto it (action \"hold\"). You cannot "
+            "reverse it or raise its confidence. Veto only for a SPECIFIC concrete reason: fresh news "
+            "contradicting its direction, genuinely elevated volatility, or a clear fundamental red flag. "
+            "Missing information is normal and is not a reason.\n"
+            "Reply with raw JSON only: "
+            '{"action": "buy|sell|hold", "confidence": <0.0-1.0>, "reasoning": "<25 words at most>"}'
         )
 
-        # Extract volatility explicitly for the prompt. market_data here is the
-        # already per-symbol-extracted dict from main.py's _extract_symbol_data
-        # (flat: close/open/price/... at the top level, not nested under a
-        # 'data'/symbol wrapper) — read the fields directly off it.
+        # Volatility proxy for the prompt. market_data is the per-symbol dict
+        # from main.py (flat: close/open/price at the top level).
         volatility = market_data.get('volatility', 'Unknown')
         if isinstance(market_data, dict) and market_data.get('close') and market_data.get('open'):
             try:
-                volatility = f"{abs((market_data['close'] - market_data['open']) / market_data['open']):.4f} (Intraday proxy)"
+                volatility = f"{abs((market_data['close'] - market_data['open']) / market_data['open']):.4f} (intraday)"
             except (TypeError, ZeroDivisionError):
                 pass
 
-        user_prompt = f"Target Asset: {symbol}\n" \
-                      f"Proposed Ensemble Signal: {json.dumps(strategy_signal)}\n" \
-                      f"Market Data Context (Close Price): {json.dumps(market_data.get('close', 'Unknown'))}\n" \
-                      f"Current Asset Volatility: {volatility}\n"
-        
+        # The signal as a line, not a JSON dump: its scalar fields and each
+        # strategy's vote, without the per-strategy internals.
+        votes = strategy_signal.get('per_strategy') or {}
+        vote_text = ', '.join(f"{n} {v.get('action')} {float(v.get('confidence') or 0):.2f}"
+                              for n, v in votes.items() if isinstance(v, dict))
+        user_prompt = (f"Asset: {symbol}\n"
+                       f"Signal: {action}, confidence {float(strategy_signal.get('confidence') or 0):.2f}\n"
+                       + (f"Strategy votes: {vote_text}\n" if vote_text else '')
+                       + f"Price: {market_data.get('close', 'Unknown')}; volatility {volatility}\n")
+
         if research_context:
             user_prompt += (
-                f"Broker Research Context (AIB AXYS): "
-                f"Recommendation={research_context.get('recommendation')}, "
-                f"Target Price={research_context.get('target_price')}, "
-                f"Rationale: {research_context.get('rationale')}\n"
+                f"Broker research: {research_context.get('recommendation')}, "
+                f"target {research_context.get('target_price')}. {str(research_context.get('rationale') or '')[:300]}\n"
             )
 
         if sector_outlook:
             user_prompt += (
-                f"Sector Outlook Context: "
-                f"Outlook Score={sector_outlook.get('outlook_score')}\n"
-                f"Sector Analysis: {sector_outlook.get('updated_profile_text')}\n"
-                f"Sector Risks: {json.dumps(sector_outlook.get('risk_factors', []))}\n"
+                f"Sector outlook {sector_outlook.get('outlook_score')}: "
+                f"{str(sector_outlook.get('updated_profile_text') or '')[:300]}. "
+                f"Risks: {', '.join(str(r) for r in (sector_outlook.get('risk_factors') or [])[:3])}\n"
             )
 
         if news_data:
-            user_prompt += f"Recent News Context: {json.dumps(news_data[:3])}\n"
+            user_prompt += "News: " + ' | '.join(
+                f"{str(n.get('title') or n.get('headline') or n)[:120]} ({n.get('sentiment', 'n/a')})"
+                if isinstance(n, dict) else str(n)[:120] for n in news_data[:3]) + "\n"
 
         if track_record:
-            user_prompt += f"Agent Track Record: {track_record}\n"
+            user_prompt += f"Agent track record: {track_record}\n"
 
-        user_prompt += "\nEvaluate this signal critically. Do you agree with the ensemble? Provide your validated JSON output now."
-        
         # Resolve dynamic model config
         model = self.config.get("swarm", {}).get("agents", {}).get("synthesizer", "meta-llama/llama-3.1-8b-instruct")
         
@@ -512,6 +537,7 @@ class LLMOrchestrator:
             if response.status_code == 404 and candidate != tried[-1]:
                 continue
             response.raise_for_status()
+            self._note_usage('gemini', response, 'usageMetadata', 'totalTokenCount')
             if candidate != first:
                 logger.warning(f"Gemini model '{first}' is not available (404); using '{candidate}' instead. "
                                f"Set gemini_model in config.json to make it permanent.")
@@ -592,6 +618,7 @@ class LLMOrchestrator:
             model = substitute
         response.raise_for_status()
         setattr(self, attr, model)
+        self._note_usage('groq', response, 'usage', 'total_tokens')
         return response
 
     @staticmethod
@@ -634,8 +661,12 @@ class LLMOrchestrator:
                    fallback_signal: Optional[Dict[str, Any]],
                    model_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
         # model_override names an OpenRouter or Gemini model; Groq uses its own.
+        # Capped: a review is a short JSON verdict, and on the free plan the
+        # daily allowance is counted in tokens (about 200,000 a day), reasoning
+        # tokens included.
         response = self._groq_post([{"role": "system", "content": system_prompt},
-                                    {"role": "user", "content": user_prompt}])
+                                    {"role": "user", "content": user_prompt}],
+                                   max_tokens=GROQ_TEXT_MAX_TOKENS)
         text = response.json()['choices'][0]['message']['content']
         try:
             result = json.loads(text)

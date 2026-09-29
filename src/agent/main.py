@@ -413,6 +413,13 @@ class TradingAgent:
                 return 'already_held'
             if price and avg_entry and price < avg_entry * (1 + float(add_rule['min_gain_pct'])):
                 return 'add_not_profitable'
+        # A new buy the pace limit would hold anyway needs no AI review first
+        # (bias_detector; it used to be asked, then held).
+        bias = (getattr(self, 'components', None) or {}).get('bias_detector')
+        if action == 'buy' and bias is not None and bias.detect_bias(
+                {'action': 'buy'}, {}, {}, symbol=symbol, journal=getattr(self, 'order_journal', None),
+                record=False):
+            return 'bias_downgrade'
         return None
 
     def _forex_broker(self):
@@ -938,8 +945,14 @@ class TradingAgent:
                                                 sect_news.extend([n for n in (data.get(sym) or []) if isinstance(n, dict)])
                                             else:
                                                 sect_news.extend([n for n in data if isinstance(n, dict) and n.get('symbol') == sym])
-                                res = sector_specialist.run_sector_analysis(sect, sect_news)
-                                state_store.set(f"swarm:sector_outlook:{sect}", json.dumps(res), ttl_seconds=900)
+                                res = sector_specialist.run_sector_analysis(
+                                    sect, sect_news, min_interval_seconds=sector_interval_s)
+                                # Kept as long as it stays valid (two passes): it
+                                # used to expire after 15 minutes of a 6.5 hour
+                                # pass, so trade reviews saw it about 4% of the time.
+                                state_store.set(f"swarm:sector_outlook:{sect}", json.dumps(
+                                    {k: v for k, v in res.items() if not k.startswith('_')}),
+                                    ttl_seconds=int(2 * sector_interval_s))
                                 return sect, res
                                 
                             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
@@ -1083,14 +1096,19 @@ class TradingAgent:
                                     sector_outlook = None
                                     ss = self.components.get('sector_specialist')
                                     state_store = self.components.get('swarm_state_store')
-                                    if ss and state_store:
+                                    if ss:
                                         sect = ss.get_sector_for_symbol(symbol)
-                                        cached_out = state_store.get(f"swarm:sector_outlook:{sect}")
+                                        cached_out = state_store.get(f"swarm:sector_outlook:{sect}") if state_store else None
                                         if cached_out:
                                             try:
                                                 sector_outlook = json.loads(cached_out)
                                             except Exception:
                                                 pass
+                                        if sector_outlook is None:
+                                            # After a restart the state store is empty; the
+                                            # persisted profile still holds the last analysis.
+                                            sector_outlook = ss.load_recent_profile(
+                                                sect, 2 * self.config.get('sector_analysis_interval', 390) * loop_interval)
 
                                     # Compute the agent's own hit-rate track record at most once per
                                     # ~10 minutes (guarded), then feed it into the LLM validation prompt.

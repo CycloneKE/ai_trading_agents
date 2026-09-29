@@ -30,7 +30,7 @@ class BiasDetector:
 
     def detect_bias(self, signal: Dict[str, Any], symbol_data: Optional[Dict[str, Any]] = None,
                     market_data: Optional[Dict[str, Any]] = None, symbol: Optional[str] = None,
-                    now: Optional[datetime] = None, journal=None) -> bool:
+                    now: Optional[datetime] = None, journal=None, record: bool = True) -> bool:
         """Whether a buy should wait because the agent is piling into one
         market at once (herding). Returns True when it should wait.
 
@@ -49,6 +49,8 @@ class BiasDetector:
         not a new position and does not count twice. A sell is never held
         back: an exit reduces risk. With the order `journal`, buys placed in
         the last 24 hours count too, so a restart does not reset the pace.
+        `record=False` only asks, without using up a slot (the check before
+        the AI review, which spares it a call for a buy that would wait).
         """
         try:
             if not isinstance(signal, dict) or signal.get('action') != 'buy':
@@ -70,7 +72,8 @@ class BiasDetector:
                 logger.info(f"Buy pace: {sym} waits; {len(book)} new {market} buys approved in the "
                             f"last 24 hours ({', '.join(sorted(book))})")
                 return True
-            book[sym] = now
+            if record:
+                book[sym] = now
             return False
         except Exception as e:
             logger.error(f"detect_bias error: {e}")

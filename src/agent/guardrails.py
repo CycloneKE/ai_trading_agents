@@ -19,7 +19,8 @@ Where each rule lives:
 |---|---|---|
 | strategy_tuner.py | strategy settings | fixed bounds, one step, held-out evidence, weekly, frozen when halted |
 | strategy_manager rebalance | strategy weights from results | 0.1 floor, 0.3 smoothing, weekly |
-| llm_allocator.py (AI) | strategy weights | 0 to 2, step 0.5, evidence gate (enough_evidence), frozen when halted |
+| strategy_manager adaptive_confidence | each vote's weight | evidence_tilt: none under 5 closed trades, then 0.5 to 1.5 by t-statistic, recomputed from the journal |
+| llm_allocator.py (AI, off by default) | strategy weights | relative to neutral, 0.5 to 1.5, step 0.25, new-evidence gate, frozen when halted |
 | adaptive_integration.py | position size, risk tolerance | reduce-only, floors, capped at max_position_size |
 | self_assessment.py (AI) | nothing: advice only | evidence gate, checked suggestions |
 | llm_orchestrator.validate_trade (AI) | a trade signal | bound_verdict: confirm, weaken or veto only |
@@ -103,3 +104,29 @@ def enough_evidence(closed_trades: int, minimum: int) -> bool:
         return int(closed_trades) >= int(minimum)
     except (TypeError, ValueError):
         return False
+
+
+TILT_LOW, TILT_HIGH = 0.5, 1.5
+MIN_TILT_TRADES = 5
+
+
+def evidence_tilt(closed_trades: Any, t_stat: Any, min_trades: int = MIN_TILT_TRADES) -> float:
+    """How much a strategy's vote is scaled by its own realised results.
+
+    `t_stat` is the mean of its per-trade returns over their standard error
+    (strategy_manager's `sharpe_ratio` field: mean / std * sqrt(n)), so it
+    already grows with the number of trades: a lucky handful cannot look
+    as convincing as a long record. The tilt is 1.0 (no change) until the
+    strategy has `min_trades` closed trades, then 1 + t/4, held to 0.5 to
+    1.5: a t of 2 (about 95% confidence) earns the largest boost, and a
+    strategy that is losing significantly is halved, never switched off.
+    It is symmetric (before, losers were never reduced) and it is
+    recomputed from the order journal, so a redeploy cannot lose it.
+    """
+    try:
+        n, t = int(closed_trades or 0), float(t_stat or 0.0)
+    except (TypeError, ValueError):
+        return 1.0
+    if n < int(min_trades) or t != t:
+        return 1.0
+    return max(TILT_LOW, min(TILT_HIGH, 1.0 + t / 4.0))
