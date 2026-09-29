@@ -586,6 +586,8 @@ class TradingAgent:
                 self.order_journal.close()
             if getattr(self, 'decision_journal', None):
                 self.decision_journal.close()
+            if getattr(self, 'paper_equity_log', None):
+                self.paper_equity_log.close()
             if 'escalation_manager' in self.components:
                 self.components['escalation_manager'].close()
             if 'nse_order_queue' in self.components:
@@ -660,6 +662,15 @@ class TradingAgent:
         except Exception as e:
             logger.error(f"Order journal init/reconcile failed: {e}")
             self.order_journal = None
+
+        # One equity reading a day per paper book that has no history of its
+        # own (the forex book), so its page can draw a curve.
+        try:
+            from src.agent.paper_accounts import PaperEquityLog
+            self.paper_equity_log = PaperEquityLog()
+        except Exception as e:
+            logger.error(f"Paper equity log unavailable: {e}")
+            self.paper_equity_log = None
 
         # Decision journal: records WHY the agent acts or holds each cycle,
         # for the per-symbol drill-down. Shares the journal DB.
@@ -887,6 +898,20 @@ class TradingAgent:
                             self.performance_analytics.record_portfolio_value(float(acct.equity))
                 except Exception as e:
                     logger.debug(f"Portfolio value recording error: {e}")
+
+                # The forex book's value, every five minutes (the last reading
+                # of the day is the one kept), for its Paper Accounts page.
+                try:
+                    equity_log = getattr(self, 'paper_equity_log', None)
+                    fx_book = TradingAgent._forex_broker(self)
+                    if (equity_log is not None and fx_book is not None
+                            and time.time() - getattr(self, '_last_fx_equity', 0) > 300):
+                        acct = fx_book.get_account_info()
+                        if acct is not None and acct.equity is not None:
+                            equity_log.record('forex', acct.cash, acct.equity)
+                            self._last_fx_equity = time.time()
+                except Exception as e:
+                    logger.debug(f"Forex equity recording error: {e}")
 
                 # Refresh strategy performance from REAL journal attribution
                 # every 5 minutes, so performance-weighted decisions and the

@@ -276,6 +276,63 @@ class TradingAPI:
             logger.error(f"NSE holdings unavailable: {e}")
         return rows, account
 
+    def _paper_view(self, kind: str) -> Dict[str, Any]:
+        """One paper account's page (paper_accounts.build_view), from the
+        agent's live books, the order journal and the equity histories."""
+        from src.agent import core_portfolio as core
+        from src.agent import paper_accounts as pa
+        agent = self.trading_agent
+        cfg = getattr(agent, 'config', None) or self.config or {}
+        brokers = agent.components.get('broker_manager')
+        name = pa.BOOKS[kind]['broker']
+        broker = (brokers.get_broker(name) if name else brokers.get_broker()) if brokers else None
+
+        risk = cfg.get('risk_limits') or {}
+        fixed = (float(risk.get('stop_loss_pct', 0.05)), float(risk.get('trailing_stop_pct', 0.03)))
+        distances = getattr(agent, '_stop_distances_for', None)
+
+        def stops_for(symbol):
+            if callable(distances):
+                return distances(symbol, *fixed)
+            return {'stop_loss_pct': fixed[0], 'trailing_stop_pct': fixed[1], 'source': 'fixed'}
+
+        risk_manager = getattr(agent, 'risk_manager', None)
+
+        def peak_for(symbol):
+            held = (getattr(risk_manager, 'positions', None) or {}).get(symbol) or {}
+            return held.get('high_watermark')
+
+        core_symbols = agent._core_symbols() if callable(getattr(agent, '_core_symbols', None)) else set()
+        if kind == 'forex':
+            log = getattr(agent, 'paper_equity_log', None)
+            curve = [{'day': r['day'], 'equity': r['equity']} for r in log.history('forex')] if log else []
+            session = {'open': core.fx_session_open(),
+                       'hours': 'Sunday 17:00 to Friday 17:00 New York time'}
+        else:
+            analytics = getattr(agent, 'performance_analytics', None)
+            curve = pa.daily_curve(getattr(analytics, 'portfolio_values', None))
+            session = {'open': core.us_session_open(),
+                       'hours': 'US stocks trade 9:30 to 16:00 New York time on weekdays; crypto trades around the clock'}
+        view = pa.build_view(kind, broker, getattr(agent, 'order_journal', None), cfg,
+                             stops_for=stops_for, peak_for=peak_for, core_symbols=core_symbols,
+                             curve=curve, session=session)
+
+        # The US account is drawn against the S&P 500 from its own start.
+        points = view.get('equity_curve') or []
+        if kind == 'us' and view.get('enabled') and len(points) > 1:
+            try:
+                from src.agent import benchmarks as bm
+                symbol = self._benchmark_config().get('us_symbol', 'SPY')
+                prices = self._daily_closes(symbol)
+                start = float(points[0].get('equity') or 0)
+                if prices and start > 0:
+                    bm.overlay(points, 'benchmark',
+                               bm.rebased_values([p['day'] for p in points], prices, start))
+                    view['benchmark_name'] = 'S&P 500' if symbol == 'SPY' else symbol
+            except Exception as e:
+                logger.debug(f"US paper benchmark unavailable: {e}")
+        return view
+
     def _closed_trade_counts(self) -> Optional[Dict[str, Any]]:
         """Closed, winning and losing trades and the win rate, from the
         order journal's fills (round_trips), or None when there is no
@@ -1591,6 +1648,50 @@ class TradingAPI:
                 },
                 'paper_account': self._nse_paper_summary(),
             }), 200
+
+        @self.app.route('/api/paper/<kind>', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_paper_account(kind):
+            """A paper account's page: value against its start, cash, holdings
+            with their stops, trades, closed-trade results and costs."""
+            from src.agent import paper_accounts as pa
+            if kind not in pa.BOOKS:
+                return jsonify({'error': 'Unknown paper account'}), 404
+            try:
+                return jsonify(self._paper_view(kind)), 200
+            except Exception as e:
+                logger.error(f"Error building the {kind} paper account view: {e}")
+                return jsonify({'error': 'Failed to build the paper account view'}), 500
+
+        @self.app.route('/api/paper-accounts', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_paper_accounts():
+            """The headline figures of every paper account (US and crypto,
+            forex, NSE), for the strip at the top of the Portfolio page."""
+            from src.agent import paper_accounts as pa
+            accounts = []
+            for kind in pa.BOOKS:
+                try:
+                    accounts.append(pa.headline(self._paper_view(kind)))
+                except Exception as e:
+                    logger.error(f"Paper account headline for {kind} failed: {e}")
+                    accounts.append({'id': kind, 'title': pa.BOOKS[kind]['title'], 'enabled': False,
+                                     'currency': 'USD', 'reason': 'The account could not be read.'})
+            try:
+                summ = self._nse_paper_summary() if self.trading_agent.components.get('nse_paper_account') else None
+                paper = self.trading_agent.components.get('nse_paper_account')
+                if summ and paper is not None and getattr(paper, 'enabled', False):
+                    accounts.append({'id': 'nse', 'title': 'NSE Kenya', 'enabled': True, 'currency': 'KES',
+                                     'equity': summ.get('equity_kes'),
+                                     'starting_capital': summ.get('starting_capital_kes'),
+                                     'return_pct': summ.get('return_pct'), 'cash': summ.get('cash_kes'),
+                                     'holdings': len(summ.get('holdings') or []), 'closed_trades': None,
+                                     'reason': None})
+            except Exception as e:
+                logger.debug(f"NSE paper headline unavailable: {e}")
+            return jsonify({'accounts': accounts}), 200
 
         @self.app.route('/api/nse/paper', methods=['GET'])
         @require_rate_limit
