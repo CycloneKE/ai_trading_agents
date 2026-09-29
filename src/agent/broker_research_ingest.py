@@ -57,6 +57,22 @@ class BrokerResearchIngest:
         # Get list of configured active symbols
         dm_cfg = config.get("data_manager", {})
         self.configured_symbols = set([s.upper() for s in dm_cfg.get("symbols", []) + dm_cfg.get("nse_symbols", [])])
+        # A rating sheet names many stocks the agent does not trade. By default
+        # those are kept for reference only; set this to send them to the
+        # approval queue as well (one request per stock, never repeated).
+        self.queue_untracked_ratings = bool(ingest_cfg.get("queue_untracked_ratings", False))
+
+    def _is_tracked(self, symbol: str) -> bool:
+        """Whether the agent trades `symbol`: it is in the configured lists or
+        the operator has approved it onto the watchlist."""
+        symbol = symbol.upper()
+        if symbol in self.configured_symbols:
+            return True
+        try:
+            return any(str(w.get("symbol", "")).upper() == symbol and w.get("status", "active") == "active"
+                       for w in self.escalation_manager.get_active_watchlist())
+        except Exception:
+            return False
 
     def process_pdf(self, file_path: str, source: str = 'aib_axys') -> Dict[str, Any]:
         """
@@ -80,6 +96,20 @@ class BrokerResearchIngest:
                 return self._summarised(upload_id, {
                     "status": "completed", "signals_processed": 0, "auto_followed": [],
                     "escalated": [], **summary})
+
+            # 0b. A primary bond auction note has no stock ratings either: read
+            #     its figures exactly (bond_auctions.py) and keep them for
+            #     the operator, who bids through the broker.
+            from src.agent import bond_auctions
+            if bond_auctions.is_bond_auction(texts):
+                note = bond_auctions.ingest(file_path, texts)
+                if not note["stored"]:
+                    raise ValueError("this is a bond auction note, but its papers and sale period could "
+                                     "not be read: " + "; ".join(note["warnings"]))
+                self.escalation_manager.update_upload_status(upload_id, "completed", len(note["papers"]))
+                return self._summarised(upload_id, {
+                    "document_type": "bond_auction", "status": "completed", "signals_processed": 0,
+                    "auto_followed": [], "escalated": [], "note": note})
 
             # 1. Parse PDF with full table & page structure
             extracted = pdf_parser.extract_all(file_path)
@@ -108,13 +138,14 @@ class BrokerResearchIngest:
         try:
             sheet = daily_whispers.read(file_path, self.llm)
             daily_whispers.remember(sheet['accepted'], os.path.basename(file_path))
-            signals = [{'symbol': r['symbol'], 'market': 'kenyan',
+            signals = [{'symbol': r['symbol'], 'market': r.get('market') or 'kenyan',
                         'current_price': r['current_price'], 'target_price': r['target_price'],
                         'upside_pct': r['upside_pct'], 'recommendation': r['recommendation'],
                         'rationale': r['rationale'], 'risk_factors': [],
                         'time_horizon': 'medium_term', 'confidence': 1.0}
                        for r in sheet['accepted']]
-            return self._summarised(upload_id, {**sheet, **self._handle_signals(upload_id, signals)})
+            return self._summarised(upload_id, {**sheet, **self._handle_signals(
+                upload_id, signals, queue_untracked=self.queue_untracked_ratings)})
         except Exception as e:
             logger.error(f"Error processing research image {file_path}: {e}")
             self.escalation_manager.update_upload_status(upload_id, "failed", 0)
@@ -133,11 +164,21 @@ class BrokerResearchIngest:
             logger.warning(f"Could not store the upload summary: {e}")
         return result
 
-    def _handle_signals(self, upload_id: int, signals: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Record each signal, then follow it or ask the operator."""
+    def _handle_signals(self, upload_id: int, signals: List[Dict[str, Any]],
+                        queue_untracked: bool = True) -> Dict[str, Any]:
+        """Record each signal, then follow it or ask the operator.
+
+        With `queue_untracked` False, a rating for a stock the agent does not
+        trade is kept (recorded here, listed on the Research page with a Follow
+        button) but not sent to the approval queue: it is information, and a
+        daily sheet of untraded stocks would fill the queue with the same
+        requests every day. A stock already waiting in the queue is never
+        queued twice."""
         processed_count = 0
         auto_followed = []
         escalated = []
+        reference_only = []
+        already_queued = []
         
         # 3. Process each signal
         for signal in signals:
@@ -149,6 +190,11 @@ class BrokerResearchIngest:
             signal_id = self.escalation_manager.record_signal(upload_id, signal)
             signal["id"] = signal_id
             
+            if not queue_untracked and not self._is_tracked(symbol):
+                reference_only.append(symbol)
+                processed_count += 1
+                continue
+
             # 4. Evaluate signal against auto-follow/escalation rules
             action, reason, risk_level = self._evaluate_signal(signal)
             
@@ -164,6 +210,8 @@ class BrokerResearchIngest:
                 )
                 auto_followed.append(symbol)
                 logger.info(f"Auto-followed symbol: {symbol}. Reason: {reason}")
+            elif self.escalation_manager.has_pending(symbol, "follow"):
+                already_queued.append(symbol)
             else:
                 # Create escalation in DB for operator approval
                 self.escalation_manager.create_escalation(
@@ -185,7 +233,9 @@ class BrokerResearchIngest:
             "status": "completed",
             "signals_processed": processed_count,
             "auto_followed": auto_followed,
-            "escalated": escalated
+            "escalated": escalated,
+            "reference_only": reference_only,
+            "already_queued": already_queued,
         }
 
     def _extract_signals_fallback(self, text: str) -> List[Dict[str, Any]]:
@@ -390,7 +440,7 @@ class BrokerResearchIngest:
             signal["upside_pct"] = upside_pct
 
         # Check 1: Symbol config validation
-        is_known = symbol in self.configured_symbols
+        is_known = self._is_tracked(symbol)
         if self.require_existing_symbol and not is_known:
             return "escalate", f"Symbol '{symbol}' is not in active trading configuration.", "high"
 
@@ -462,11 +512,21 @@ def describe(result: Dict[str, Any]) -> List[str]:
     followed = result.get("auto_followed") or []
     queued = [e[0] if isinstance(e, (list, tuple)) else e for e in result.get("escalated") or []]
     follow_lines = []
+    reference = result.get("reference_only") or []
+    if reference:
+        follow_lines.append(f"Kept for reference, not sent to the approval queue, because the agent does not "
+                            f"trade them: {', '.join(reference)}. They are listed under Broker Ratings on the "
+                            f"Research page; press Follow there to ask for one.")
+    waiting = result.get("already_queued") or []
+    if waiting:
+        follow_lines.append(f"Already waiting in the approval queue, so not queued again: {', '.join(waiting)}.")
     if followed:
         follow_lines.append(f"Added to the research watchlist (stocks the agent trades): {', '.join(followed)}.")
     if queued:
         follow_lines.append(f"Sent to the approval queue for your decision, because the agent does not "
                             f"trade them yet or the rating needs a look: {', '.join(queued)}.")
+    if kind == "bond_auction":
+        return _describe_bond_auction(result.get("note") or {})
     if kind == "market_pulse":
         lines = [f"Read as the AIB-AXYS Market Pulse of {result.get('as_of')}."]
         lines.append(f"Stored price, earnings, dividend, P/E and yield for {result.get('stocks_mapped', 0)} of "
@@ -509,3 +569,25 @@ def describe(result: Dict[str, Any]) -> List[str]:
     if not n:
         lines.append("Nothing was changed.")
     return lines + follow_lines
+
+
+def _describe_bond_auction(note: Dict[str, Any]) -> List[str]:
+    """What the agent made of a bond auction note, in plain words."""
+    def p(v):
+        return f"{v:g}%" if v is not None else "not given"
+    lines = [f"Read as a bond auction note ({note.get('title')}): the Republic of Kenya is offering "
+             f"KES {note.get('total_kes_bn'):g} billion from {note.get('sale_from')} to {note.get('sale_to')}."
+             if note.get("total_kes_bn") is not None else
+             f"Read as a bond auction note ({note.get('title')}), sale period {note.get('sale_from')} to "
+             f"{note.get('sale_to')}."]
+    for paper in note.get("papers") or []:
+        rng = (f"{paper['bid_low_pct']:g} to {paper['bid_high_pct']:g}%"
+               if paper.get("bid_low_pct") is not None and paper.get("bid_high_pct") is not None else "not given")
+        lines.append(f"{paper['paper']}: coupon {p(paper.get('coupon_pct'))}, "
+                     f"{paper.get('tenor_years') if paper.get('tenor_years') is not None else '?'} years, "
+                     f"matures {paper.get('maturity') or 'not given'}; AXYS recommends bidding {rng}.")
+    for warning in note.get("warnings") or []:
+        lines.append(f"Check this: {warning}.")
+    lines.append("Kept on the Research page for you. The agent trades no bonds, so nothing was queued for "
+                 "approval and nothing was bought or watched.")
+    return lines

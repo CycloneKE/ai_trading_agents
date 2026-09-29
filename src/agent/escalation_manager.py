@@ -238,6 +238,23 @@ class EscalationManager:
             self._conn.commit()
             return cur.lastrowid
 
+    def has_pending(self, symbol: str, action: str) -> bool:
+        """Whether a request of this kind for this symbol is already waiting."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM escalations WHERE status = 'pending' AND symbol = ? AND action = ? LIMIT 1",
+                (symbol.upper(), action)).fetchone()
+        return row is not None
+
+    def latest_signal(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """The newest recorded research signal for a symbol, or None."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM research_signals WHERE symbol = ? ORDER BY id DESC LIMIT 1", (symbol.upper(),))
+            cur.row_factory = sqlite3.Row
+            row = cur.fetchone()
+        return dict(row) if row else None
+
     def get_pending_escalations(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Get all pending operator escalations along with their associated research signals."""
         with self._lock:
