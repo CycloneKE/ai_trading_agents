@@ -31,6 +31,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 from src.agent.escalation_manager import EscalationManager
+from src.agent.round_trips import closed_round_trips
 from src.utils.paths import DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,6 @@ MAX_RELATIVE_CHANGE = 0.5      # a suggestion moves a setting by at most half it
 MAX_SUGGESTIONS = 3
 DEFAULT_MIN_CLOSED = 15
 DEFAULT_MIN_NEW = 5
-STOP_TAGS = ('stop_loss', 'trailing_stop', 'kill_switch')     # how the journal labels forced exits
 
 _RETROSPECTIVE_SYSTEM_PROMPT = """
 You review an algorithmic trading system's recent results and may suggest changes to its stop-loss
@@ -224,47 +224,13 @@ def closed_trade_evidence(fills: List[Dict[str, Any]], config: Optional[Dict[str
     """What the agent's closed round trips did, from the order journal's
     filled orders (oldest first): FIFO-matched, long only, each exit tagged
     by what closed it (a stop-loss, a trailing stop, the kill switch, or a
-    signal). Returns are after the modelled costs a fill price leaves out
-    (cost_model.fill_gap_pct), as fractions of the entry price.
+    signal), with returns after the modelled costs a fill price leaves out
+    (see round_trips.closed_round_trips), as fractions of the entry price.
 
     This replaces judging decisions by the next journal row's price, which
     could be minutes or hours later and counted buys as trades.
     """
-    from collections import deque
-    from src.agent.cost_model import fill_gap_pct
-
-    def when(o):
-        try:
-            return datetime.fromisoformat(str(o.get('created_at'))[:26])
-        except ValueError:
-            return None
-
-    lots: Dict[str, Any] = {}
-    trades = []
-    for o in fills:
-        sym = str(o.get('symbol') or '').upper()
-        qty, price = float(o.get('filled_quantity') or 0), o.get('filled_avg_price')
-        if not sym or qty <= 0 or price is None or float(price) <= 0:
-            continue
-        price, side = float(price), str(o.get('side') or '').lower()
-        if side == 'buy':
-            lots.setdefault(sym, deque()).append([qty, price, when(o)])
-            continue
-        if side != 'sell':
-            continue
-        tag = o.get('strategy') if o.get('strategy') in STOP_TAGS else 'signal'
-        remaining, q = qty, lots.setdefault(sym, deque())
-        while remaining > 1e-9 and q:
-            lot = q[0]
-            matched = min(remaining, lot[0])
-            gap = fill_gap_pct(sym, config)
-            ratio = price / lot[1]
-            held = ((when(o) - lot[2]).total_seconds() / 86400.0) if lot[2] and when(o) else None
-            trades.append({'exit': tag, 'ret': ratio - 1.0 - gap * (1.0 + ratio), 'days': held})
-            lot[0] -= matched
-            remaining -= matched
-            if lot[0] <= 1e-9:
-                q.popleft()
+    trades = closed_round_trips(fills, config)
 
     def pct(v):
         return round(v * 100, 2)

@@ -112,6 +112,17 @@ export default function UnifiedPortfolio({ onDrill }) {
   const nseCashKES = portfolioData.nse_account?.cash_kes ?? null;
   // Cash held by the forex paper book, in USD (null when it is off).
   const forexCashUSD = portfolioData.forex_account?.cash ?? null;
+  // The cash card shows the US account's cash; the other paper books' cash is
+  // named beside it, and is counted in Net Portfolio Equity.
+  const cashNote = (() => {
+    const others = [
+      nseCashKES === null ? null
+        : `KES ${nseCashKES.toLocaleString(undefined, { maximumFractionDigits: 0 })} in the NSE paper account`,
+      forexCashUSD === null ? null
+        : `$${forexCashUSD.toLocaleString(undefined, { maximumFractionDigits: 0 })} in the forex paper book`,
+    ].filter(Boolean);
+    return others.length ? `US account · plus ${others.join(' and ')}` : 'USD Primary Account';
+  })();
   // The core-satellite split of the US account ({enabled: false} when off).
   const core = portfolioData.core || null;
 
@@ -136,13 +147,17 @@ export default function UnifiedPortfolio({ onDrill }) {
     }, 0);
   }, [positions, KES_FX_RATE]);
 
-  // Sector Exposure Breakdown
+  // Exposure by asset group. The backend has no industry sector for a
+  // holding, and every US holding used to be filed as "US Technology & ETFs",
+  // which put a bond fund, a gold fund, energy and health funds under
+  // technology. The core index funds are their own group.
   const sectorBreakdown = useMemo(() => {
     const sectors = {};
     let totalVal = 0;
     positions.forEach(p => {
       const sec = p.region === 'Crypto' ? 'Cryptocurrency' : p.region === 'Kenya/Africa' ? 'Kenyan Equities'
-        : p.region === 'Forex' ? 'Currencies' : 'US Technology & ETFs';
+        : p.region === 'Forex' ? 'Currencies'
+        : p.market_name === 'US Core (index funds)' ? 'US Core (index funds)' : 'US Stocks & ETFs';
       const val = p.currency === 'KES' ? (p.market_value || 0) / KES_FX_RATE : (p.market_value || 0);
       sectors[sec] = (sectors[sec] || 0) + val;
       totalVal += val;
@@ -227,8 +242,7 @@ export default function UnifiedPortfolio({ onDrill }) {
             ${(portfolioData.account?.cash || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
           </h3>
           <span style={{ fontSize: '11px', color: theme.colors.primary, display: 'block', marginTop: '4px' }}>
-            {nseCashKES === null ? 'USD Primary Account'
-              : `US account · plus KES ${nseCashKES.toLocaleString(undefined, { maximumFractionDigits: 0 })} in the NSE paper account`}
+            {cashNote}
           </span>
         </div>
 
@@ -386,7 +400,7 @@ export default function UnifiedPortfolio({ onDrill }) {
       {/* Sector Exposure Progress Bars */}
       <div style={{ ...glassCard, padding: '20px' }}>
         <h3 style={{ margin: '0 0 16px 0', fontSize: '14px', fontWeight: '800', color: theme.colors.textSecondary, textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <Layers3 size={16} color={theme.colors.primary} /> Sector Risk Exposure & Concentration
+          <Layers3 size={16} color={theme.colors.primary} /> Exposure & Concentration by Asset Group
         </h3>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
