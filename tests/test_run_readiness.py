@@ -10,7 +10,8 @@ import pytest
 from src.agent.run_readiness import (BLOCK, WARN, Readiness, assess_readiness,
                                      check_broker, check_costs, check_journals,
                                      check_market_data, check_risk_settings,
-                                     check_signal_path, check_strategies)
+                                     check_signal_path, check_strategies, check_symbols,
+                                     foreign_listing)
 
 
 def _cfg(**over):
@@ -329,3 +330,32 @@ def test_enabled_monitoring_passes():
     r = Readiness()
     check_health_endpoint(_cfg(monitoring={'enabled': True, 'port': 8080}), r)
     assert _named(r, 'liveness endpoint enabled').ok
+
+
+# ------------------------------------------------------------- symbols
+
+def test_a_share_on_a_foreign_exchange_blocks_the_run():
+    """SAP.DE, 7203.T and the like would be traded as US stocks: US hours, no
+    fees, and orders sent to Alpaca, which cannot trade them."""
+    r = Readiness()
+    check_symbols(_cfg(data_manager={'symbols': ['AAPL', 'SAP.DE', '7203.T', 'BRK.B'], 'nse_symbols': ['SCOM']}), r)
+    check = _named(r, 'every symbol is one the agent can trade')
+    assert check.level == BLOCK and not check.ok
+    assert '7203.T' in check.detail and 'SAP.DE' in check.detail and 'BRK.B' not in check.detail
+
+
+def test_us_class_shares_and_the_shipped_config_pass():
+    assert not foreign_listing('BRK.B') and not foreign_listing('AAPL') and foreign_listing('0700.HK')
+    from src.utils.config_validator import load_config
+    r = Readiness()
+    check_symbols(load_config('config/config.json'), r)
+    assert all(c.ok for c in r.checks)
+
+
+def test_a_currency_pair_not_quoted_in_dollars_warns():
+    r = Readiness()
+    check_symbols(_cfg(data_manager={'symbols': ['EUR_USD', 'USD_JPY'], 'forex_symbols': ['EUR_USD', 'USD_JPY']}), r)
+    named = {c.name: c for c in r.checks}
+    assert named['every symbol is one the agent can trade'].ok
+    warn = named['currency pairs are quoted in dollars']
+    assert warn.level == WARN and not warn.ok and 'USD_JPY' in warn.detail and 'EUR_USD' not in warn.detail

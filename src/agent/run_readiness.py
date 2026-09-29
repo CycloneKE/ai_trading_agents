@@ -272,6 +272,45 @@ def check_costs(cfg: Dict[str, Any], r: Readiness) -> None:
           f"those markets is provisional" if unverified else '')
 
 
+# Yahoo Finance's exchange suffixes: SAP.DE is SAP on Xetra, 7203.T is Toyota
+# in Tokyo. (US class shares such as BRK.B carry a share-class letter, not
+# one of these.)
+FOREIGN_SUFFIXES = frozenset({
+    'L', 'T', 'V', 'F', 'DE', 'PA', 'AS', 'MI', 'MC', 'SW', 'SS', 'SZ', 'HK', 'JO', 'LG', 'CA', 'CS',
+    'KE', 'TO', 'AX', 'KS', 'KQ', 'TW', 'SI', 'NS', 'BO', 'SA', 'MX', 'ST', 'CO', 'OL', 'HE', 'BR',
+    'LS', 'VI', 'IR', 'TA', 'IS', 'WA', 'PR', 'AT', 'NZ'})
+
+
+def foreign_listing(symbol: str) -> bool:
+    """Whether `symbol` names a share on a foreign exchange (SAP.DE)."""
+    head, dot, tail = str(symbol or '').upper().rpartition('.')
+    return bool(dot and head and tail in FOREIGN_SUFFIXES)
+
+
+def check_symbols(cfg: Dict[str, Any], r: Readiness) -> None:
+    """Every symbol is one the agent has a book for.
+
+    Anything the config does not name as NSE, crypto or a currency pair is
+    treated as a US stock: costed with no fees, held to US hours, and sent to
+    Alpaca. A share on a foreign exchange added to the lists would be all
+    three, wrongly, and its orders would be refused by a broker that cannot
+    trade it. Currency pairs must be quoted in dollars, because the forex
+    book is valued in dollars.
+    """
+    dm = cfg.get('data_manager', {}) or {}
+    core = (cfg.get('core_satellite') or {}).get('core_symbols', []) or []
+    listed = [str(s) for key in ('symbols', 'crypto_symbols', 'forex_symbols') for s in (dm.get(key) or [])] + [str(s) for s in core]
+    foreign = sorted({s for s in listed if foreign_listing(s)})
+    r.add(BLOCK, 'every symbol is one the agent can trade', not foreign,
+          f"{', '.join(foreign)} are listed on foreign exchanges. The agent has no book for them: "
+          f"it would trade them as US stocks (US hours, no fees) through Alpaca, which cannot"
+          if foreign else '')
+    pairs = sorted({s.upper() for s in listed if len(s) == 7 and s[3] == '_' and s[4:].upper() != 'USD'})
+    r.add(WARN, 'currency pairs are quoted in dollars', not pairs,
+          f"{', '.join(pairs)} are not quoted in US dollars; the forex book is valued in dollars, "
+          f"so their results are only approximately right" if pairs else '')
+
+
 def check_risk_settings(cfg: Dict[str, Any], r: Readiness) -> None:
     """Stops wide enough to survive ordinary noise."""
     limits = cfg.get('risk_limits', {})
@@ -377,5 +416,6 @@ def assess_readiness(cfg: Dict[str, Any], *, broker=None,
     check_journals(r, data_dir)
     check_health_endpoint(cfg, r)
     check_costs(cfg, r)
+    check_symbols(cfg, r)
     check_risk_settings(cfg, r)
     return r
