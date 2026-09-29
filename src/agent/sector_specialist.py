@@ -4,6 +4,7 @@ Maintains progressive knowledge profiles and outlooks for individual market sect
 by analyzing news feeds and persisting summaries into SQLite.
 """
 import os
+import hashlib
 import json
 import sqlite3
 import logging
@@ -200,6 +201,25 @@ class SectorSpecialistManager:
                 "catalysts": []
             }
 
+    def load_recent_profile(self, sector: str, max_age_seconds: float) -> Optional[Dict[str, Any]]:
+        """The sector's profile if the AI wrote it within `max_age_seconds`,
+        else None. A trade review is given this as context; the seeded
+        starting profile and a stale one carry nothing worth the prompt."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT last_updated, knowledge_json FROM sector_knowledge_profiles WHERE sector = ?",
+                (sector.lower(),)).fetchone()
+        if not row:
+            return None
+        try:
+            profile = json.loads(row[1])
+            age = (datetime.utcnow() - datetime.fromisoformat(row[0])).total_seconds()
+        except Exception:
+            return None
+        if not profile.get('_ai') or age > max_age_seconds:
+            return None
+        return {k: v for k, v in profile.items() if not k.startswith('_')}
+
     def save_sector_profile(self, sector: str, profile: Dict[str, Any]) -> None:
         """Saves/overwrites the sector knowledge profile to SQLite."""
         with self._lock:
@@ -214,24 +234,36 @@ class SectorSpecialistManager:
             )
             self._conn.commit()
 
-    def run_sector_analysis(self, sector: str, news_list: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def run_sector_analysis(self, sector: str, news_list: List[Dict[str, Any]],
+                            min_interval_seconds: float = 0.0) -> Dict[str, Any]:
         """
         Runs sector analysis using the swarm's configured sector specialist model.
         Fuses new headlines with the previous persistent knowledge.
+
+        The AI is asked only when there is something new to say: no call
+        when there are no headlines (it used to be asked to analyse "no new
+        headlines"), none when they are the same headlines it last analysed,
+        and none within `min_interval_seconds` of its last answer, so a
+        redeploy does not re-ask every sector.
         """
         previous_profile = self.load_sector_profile(sector)
-        
+        headlines = [n for n in (news_list or []) if isinstance(n, dict) and n.get('title')][:8]
+        if not headlines:
+            return previous_profile
+        digest = hashlib.sha256('\n'.join(sorted(str(n['title']) for n in headlines)).encode()).hexdigest()[:16]
+        if previous_profile.get('_news_digest') == digest:
+            return previous_profile
+        if min_interval_seconds and self.load_recent_profile(sector, min_interval_seconds) is not None:
+            return previous_profile
+
         # Build prompt variables
-        news_summary = ""
-        if news_list:
-            news_summary = "\n".join([f"- [{n.get('time', 'recent')}] {n.get('title', '')} (Sentiment: {n.get('sentiment', 'N/A')})" for n in news_list[:15]])
-        else:
-            news_summary = "No new headlines collected in this cycle."
-            
+        news_summary = "\n".join(f"- [{n.get('time', 'recent')}] {str(n.get('title', ''))[:140]} "
+                                 f"(Sentiment: {n.get('sentiment', 'N/A')})" for n in headlines)
+        shown = {k: v for k, v in previous_profile.items() if not k.startswith('_')}
         system_prompt = _SPECIALIST_PROMPT.format(sector=sector)
         user_prompt = (
             f"--- PREVIOUS SECTOR PROFILE ---\n"
-            f"{json.dumps(previous_profile, indent=2)}\n\n"
+            f"{json.dumps(shown)}\n\n"
             f"--- LATEST NEWS HEADLINES ---\n"
             f"{news_summary}\n\n"
             f"Analyze and output the updated sector profile JSON now."
@@ -247,7 +279,7 @@ class SectorSpecialistManager:
                 proposal = self.llm.propose_json(system_prompt, user_prompt, model_override=model_to_use)
                 
                 if proposal and isinstance(proposal, dict) and "outlook_score" in proposal:
-                    updated_profile = proposal
+                    updated_profile = {**proposal, '_ai': True, '_news_digest': digest}
                     # Save updated state to SQLite
                     self.save_sector_profile(sector, updated_profile)
                     logger.info(f"Sector Specialist: Updated profile saved for {sector}. Outlook score: {updated_profile.get('outlook_score')}")

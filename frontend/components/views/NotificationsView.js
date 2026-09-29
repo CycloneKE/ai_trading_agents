@@ -57,7 +57,7 @@ function aiItems(ai) {
   if (answering.length) {
     items.push({
       key: 'ai-ok', severity: 'info', attention: false,
-      message: `AI answering: ${answering.map((a) => `${PROVIDER[a.provider] || a.provider}${a.model ? ` (${a.model})` : ''}, last at ${clock(a.last_ok)}`).join('; ')}.`,
+      message: `AI answering: ${answering.map((a) => `${PROVIDER[a.provider] || a.provider}${a.model ? ` (${a.model})` : ''}, last at ${clock(a.last_ok)}${a.calls_today ? `, ${a.calls_today} calls and ${a.tokens_today ? `${Math.round(a.tokens_today / 1000)}k tokens` : 'some tokens'} used today` : ''}`).join('; ')}.`,
     });
   }
   return items;

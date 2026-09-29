@@ -64,6 +64,7 @@ def test_swarm_orchestration_passes_sector_outlook(mock_config):
     model_override = kwargs.get("model_override")
     
     assert model_override == "deepseek/deepseek-r1"
-    assert "Sector Outlook Context" in user_prompt
-    assert "Outlook Score=0.6" in user_prompt
+    assert "Sector outlook 0.6" in user_prompt
     assert "Tech sector demand is high" in user_prompt
+    assert "supply constraints" in user_prompt
+    assert "\"position_size\"" not in system_prompt             # a size the AI may not raise is not asked for
