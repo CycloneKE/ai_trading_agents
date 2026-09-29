@@ -1776,6 +1776,60 @@ class TradingAPI:
                 logger.error(f"Error building the NSE scan: {e}")
                 return jsonify({'error': 'Failed to build the NSE scan'}), 500
 
+        @self.app.route('/api/research/ratings', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_broker_ratings():
+            """The latest broker rating of each stock from the uploaded rating
+            sheets (last 30 days), tracked or not, with whether the agent
+            trades it and whether a request to follow it is already waiting."""
+            try:
+                from src.agent import daily_whispers
+                ingest = self.trading_agent.components.get('research_ingest')
+                em = self.trading_agent.components.get('escalation_manager')
+                rows = []
+                for r in daily_whispers.recent_ratings():
+                    tracked = bool(ingest and ingest._is_tracked(r['symbol']))
+                    rows.append({**r, 'tracked': tracked,
+                                 'follow_pending': bool(em and em.has_pending(r['symbol'], 'follow'))})
+                return jsonify({'ratings': rows}), 200
+            except Exception as e:
+                logger.error(f"Error reading broker ratings: {e}")
+                return jsonify({'error': 'Failed to read the broker ratings'}), 500
+
+        @self.app.route('/api/research/ratings/<symbol>/follow', methods=['POST'])
+        @require_rate_limit
+        @token_required
+        @role_required('operator')
+        def follow_rated_stock(symbol):
+            """Ask to follow a stock from a rating sheet: puts one request in
+            the approval queue (approving it adds the stock to the watchlist)."""
+            em = self.trading_agent.components.get('escalation_manager')
+            if not em:
+                return jsonify({'error': 'Escalation manager not initialized'}), 500
+            symbol = (symbol or '').upper()
+            signal = em.latest_signal(symbol)
+            if not signal:
+                return jsonify({'error': f'No rating on record for {symbol}'}), 404
+            if em.has_pending(symbol, 'follow'):
+                return jsonify({'success': True, 'already_queued': True}), 200
+            em.create_escalation(signal['id'], symbol, 'follow',
+                                 'You asked to follow this stock from a broker rating sheet.', 'medium')
+            return jsonify({'success': True, 'already_queued': False}), 200
+
+        @self.app.route('/api/research/bond-auctions', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_bond_auctions():
+            """Bond auction notes read from uploads, newest first, each with
+            whether its sale period is upcoming, open or closed."""
+            try:
+                from src.agent import bond_auctions
+                return jsonify({'auctions': bond_auctions.recent()}), 200
+            except Exception as e:
+                logger.error(f"Error reading bond auctions: {e}")
+                return jsonify({'error': 'Failed to read the bond auctions'}), 500
+
         @self.app.route('/api/research/market-pulse', methods=['GET'])
         @require_rate_limit
         @token_required
