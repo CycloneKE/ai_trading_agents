@@ -11,7 +11,7 @@ import threading
 import time
 import os
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Dict, Any, List, Optional, Tuple
 from src.agent.sentiment_analyzer import FinancialSentimentAnalyzer
@@ -993,6 +993,80 @@ class TradingAPI:
             except Exception as e:
                 logger.error(f"Error scanning anomalies: {e}")
                 return jsonify({'anomalies': [], 'count': 0})
+
+        @self.app.route('/api/agent-alerts', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_agent_alerts():
+            """The alerts the agent has raised (halts, worker restarts, missing
+            prices, crashes: src/agent/alerts.py), newest first, and what is
+            wrong right now, for the Notifications page. Recorded whether or
+            not email is set up. Viewers see each alert's headline only; the
+            detail (halt reasons, error text) is the operator's."""
+            try:
+                from src.agent.alerts import AlertLog
+                agent = self.trading_agent
+                alerter = getattr(agent, 'alerter', None)
+                log = alerter.log if alerter is not None else AlertLog()
+                try:
+                    days = max(1, min(int(request.args.get('days', 7)), 30))
+                    limit = max(1, min(int(request.args.get('limit', 200)), 500))
+                except ValueError:
+                    days, limit = 7, 200
+                since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+                operator = getattr(g, 'current_role', 'viewer') == 'operator'
+                alerts = []
+                for a in log.recent(limit=limit, since=since):
+                    row = {'id': f"{a.get('ts')}|{a.get('key')}", 'ts': a.get('ts'), 'key': a.get('key'),
+                           'severity': a.get('severity', 'warning'), 'subject': a.get('subject', ''),
+                           # True: emailed. False: email failed or was capped. None: email is not set up.
+                           'emailed': {'sent': True, 'failed': False, 'suppressed': False}.get(a.get('status'))}
+                    if operator:
+                        row['body'] = a.get('body', '')
+                    alerts.append(row)
+                healing = getattr(agent, 'self_healing', None)
+                status = healing.status() if healing is not None else {}
+                live = {'workers_down': [w['worker'] for w in status.get('workers', []) if w.get('alive') is False],
+                        'symbols_without_price': status.get('symbols_without_price') or {},
+                        'loop_errors': status.get('consecutive_loop_errors') or 0,
+                        'last_loop_error': (status.get('last_loop_error') or '') if operator else '',
+                        'halt_clears_itself': bool(status.get('halt_clears_itself'))}
+                return jsonify({'alerts': alerts, 'live': live,
+                                'email': alerter.status() if alerter is not None else {'configured': False}})
+            except Exception as e:
+                logger.error(f"Error reading agent alerts: {e}")
+                return jsonify({'alerts': [], 'live': {}, 'email': {'configured': False}})
+
+        @self.app.route('/api/scorecard', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_scorecard():
+            """Where the agent is now against where the paper run needs it to
+            be (src/agent/scorecard.py). Read from the journals, read-only;
+            cached for five minutes because the forecast check reads daily
+            price history for every symbol traded."""
+            def produce():
+                from src.agent import scorecard
+                from src.utils.paths import DATA_DIR
+                agent = self.trading_agent
+                cfg = getattr(agent, 'config', None) or self.config or {}
+                healing = getattr(agent, 'self_healing', None)
+                alerter = getattr(agent, 'alerter', None)
+                try:
+                    spy = self._daily_closes('SPY') or None
+                except Exception:
+                    spy = None
+                inputs = scorecard.read_inputs(
+                    str(DATA_DIR), cfg, closes_for=self._daily_closes, spy=spy,
+                    healing=healing.status() if healing else None,
+                    alerter=alerter.status() if alerter else None)
+                return scorecard.build(inputs, cfg)
+
+            try:
+                return jsonify(self._cached('scorecard', 300, produce))
+            except Exception as e:
+                logger.error(f"Error building the scorecard: {e}")
+                return jsonify({'error': 'Failed to build the scorecard'}), 500
 
         @self.app.route('/api/trading/halt', methods=['POST'])
         @require_rate_limit

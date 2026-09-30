@@ -16,6 +16,7 @@ import NseSection from './views/NseSection';
 import InsightsSection from './views/InsightsSection';
 import SystemSection from './views/SystemSection';
 import NotificationsView, { notificationItems } from './views/NotificationsView';
+import { SEEN_KEY, newestAlertTime } from './agentAlerts';
 import { theme } from './DashboardStyles';
 import { useIsMobile } from './ui';
 import { getApiBase } from '../utils/apiBase';
@@ -95,6 +96,8 @@ const AdvancedDashboard = ({ onLogout }) => {
   const [anomalies, setAnomalies] = useState([]);
   const [pendingApprovals, setPendingApprovals] = useState(0);
   const [aiHealth, setAiHealth] = useState(null);
+  const [agentAlerts, setAgentAlerts] = useState(null);
+  const [alertsSeenAt, setAlertsSeenAt] = useState(null);
   const [heartbeat, setHeartbeat] = useState({ healthy: true, elapsed_seconds: 0, triggered: false });
   const [searchOpen, setSearchOpen] = useState(false);
 
@@ -173,11 +176,37 @@ const AdvancedDashboard = ({ onLogout }) => {
     return () => { alive = false; clearInterval(id); };
   }, []);
 
+  // The agent's own alerts and what is wrong right now (src/agent/alerts.py).
+  // What has been read is remembered in this browser only.
+  useEffect(() => {
+    try { setAlertsSeenAt(localStorage.getItem(SEEN_KEY)); } catch (e) { /* storage blocked */ }
+    let alive = true;
+    const load = async () => {
+      try {
+        const token = localStorage.getItem('trading_token');
+        const res = await fetch(`${getApiBase()}/api/agent-alerts`, { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok) return;
+        const json = await res.json();
+        if (alive) setAgentAlerts(json);
+      } catch (e) { /* transient */ }
+    };
+    load();
+    const id = setInterval(load, 30000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const markAlertsRead = useCallback(() => {
+    const seen = newestAlertTime(agentAlerts && agentAlerts.alerts);
+    try { localStorage.setItem(SEEN_KEY, seen); } catch (e) { /* storage blocked: this session only */ }
+    setAlertsSeenAt(seen);
+  }, [agentAlerts]);
+
   // Built from different code than the server: an old copy of the page, or
   // only one of the two images rebuilt.
   const serverBuilt = data.status.dashboard_source;
   const staleDashboard = !!(serverBuilt && BUILT_FROM && serverBuilt !== BUILT_FROM);
-  const notices = notificationItems({ anomalies, pendingApprovals, status: data.status, staleDashboard, ai: aiHealth });
+  const notices = notificationItems({ anomalies, pendingApprovals, status: data.status, staleDashboard, ai: aiHealth,
+    agentAlerts, alertsSeenAt });
   const needsYou = notices.filter((n) => n.attention).length;
 
   // Heartbeat monitor polling
@@ -298,7 +327,8 @@ const AdvancedDashboard = ({ onLogout }) => {
       case 'nse': return <NseSection active sub={sub} onSub={onSub} nseData={nseData} isOperator={isOperator} mobile={mobile} onDrill={drill} />;
       case 'insights': return <InsightsSection sub={sub} onSub={onSub} data={data} mobile={mobile} onSector={setDrilldownSector} />;
       case 'system': return <SystemSection sub={sub} onSub={onSub} data={data} mobile={mobile} />;
-      case 'notifications': return <NotificationsView items={notices} isOperator={isOperator} mobile={mobile} onDrill={drill} onGo={(id) => go(id)} />;
+      case 'notifications': return <NotificationsView items={notices} isOperator={isOperator} mobile={mobile} onDrill={drill} onGo={(id) => go(id)}
+        agentAlerts={agentAlerts} alertsSeenAt={alertsSeenAt} onMarkRead={markAlertsRead} />;
       default: return <OverviewView data={data} isConnected={isConnected} onDrill={drill} mobile={mobile} />;
     }
   };
