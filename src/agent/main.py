@@ -555,6 +555,68 @@ class TradingAgent:
             logger.info(f"History warm-start: {len(live) + len(nse)} symbols seeded "
                         f"with at least {need} daily bars")
 
+    def _spawn_watched(self, label: str, target) -> None:
+        """Run `target` on a daemon thread and have the supervisor restart it
+        if the thread dies while the agent is running."""
+        threads = self.__dict__.setdefault('_bg_threads', {})
+
+        def spawn():
+            t = threading.Thread(target=target, daemon=True, name=label)
+            threads[label] = t
+            t.start()
+
+        spawn()
+        sh = getattr(self, 'self_healing', None)
+        if sh is not None:
+            sh.supervisor.watch(label, lambda: (not self.running) or threads[label].is_alive(), spawn)
+
+    def _watch_workers(self) -> None:
+        """Have the supervisor watch the workers other components run, and
+        start self-healing. Called once everything else has started."""
+        sh = getattr(self, 'self_healing', None)
+        if sh is None:
+            return
+        sup = getattr(sh, 'supervisor')
+        dm = self.components.get('data_manager')
+        if dm is not None and hasattr(dm, 'data_thread'):
+            def respawn(attr, target):
+                def go():
+                    t = threading.Thread(target=target, daemon=True)
+                    setattr(dm, attr, t)
+                    t.start()
+                return go
+            for attr, loop in (('data_thread', '_data_collection_loop'), ('processing_thread', '_data_processing_loop')):
+                if hasattr(dm, loop):
+                    sup.watch(f'data_manager.{attr}',
+                              lambda a=attr: (not self.running) or (not dm.is_running) or getattr(dm, a).is_alive(),
+                              respawn(attr, getattr(dm, loop)))
+        scraper = getattr(self, 'nse_scraper', None)
+        if scraper is not None and hasattr(scraper, '_thread'):
+            def restart_scraper():
+                scraper._running = False
+                scraper.start()
+            sup.watch('nse_scraper',
+                      lambda: (not self.running) or (not scraper._running) or scraper._thread.is_alive(),
+                      restart_scraper)
+        api = getattr(self, 'api_server', None)
+        if api is not None and hasattr(api, 'server_thread'):
+            sup.watch('api_server',
+                      lambda: (not self.running) or api.server_thread is None or api.server_thread.is_alive(),
+                      api.start)
+        hb = getattr(self, 'heartbeat_monitor', None)
+        if hb is not None and hasattr(hb, '_daemon_thread'):
+            sup.watch('heartbeat_watchdog',
+                      lambda: (not self.running) or hb._daemon_thread is None or hb._daemon_thread.is_alive(),
+                      hb.start_watchdog)
+        try:
+            from src.utils.build_info import code_version
+            version = code_version()
+        except Exception:
+            version = ''
+        sh.start(version)
+        if self.trading_halted:
+            sh.note_halt(self.halt_reason or 'unknown reason')
+
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals by performing a full graceful shutdown."""
         logger.info(f"Received signal {signum}, initiating graceful shutdown...")
@@ -567,6 +629,8 @@ class TradingAgent:
         self._stopped = True
         self.running = False
         logger.info("Trading agent stopping...")
+        if getattr(self, 'self_healing', None):
+            self.self_healing.stop()
         # Attempt to gracefully stop threads (if any custom threads are tracked)
         # Example: if hasattr(self, 'broker_health_thread'): self.broker_health_thread.join(timeout=5)
         # Stop data manager and event risk manager if they have stop methods
@@ -622,6 +686,20 @@ class TradingAgent:
         """Start the trading agent with full automation."""
         logger.info("Starting AI Trading Agent...")
         self.running = True
+
+        # Email alerts and self-healing (alerts.py, self_healing.py): restart
+        # dead background workers, lift a halt the agent's own freeze caused,
+        # and tell the operator about everything else. Built first so a
+        # failure while connecting the brokers can already raise an alert.
+        try:
+            from src.agent.alerts import EmailAlerter
+            from src.agent.self_healing import SelfHealing
+            self.alerter = EmailAlerter(self.config)
+            self.self_healing = SelfHealing(self, self.alerter, self.config)
+        except Exception as e:
+            logger.error(f"Alerts and self-healing unavailable: {e}")
+            self.alerter = None
+            self.self_healing = None
 
         # Per-symbol ATR, used to scale stop distances to each instrument's
         # own volatility instead of applying one flat percentage to all.
@@ -720,27 +798,37 @@ class TradingAgent:
         # Health check loop (threaded)
         def broker_health_loop():
             while self.running:
-                for name, broker in broker_manager.brokers.items():
-                    if hasattr(broker, 'get_status'):
-                        status = broker.get_status()
-                        if not status.get('is_connected', False):
-                            logger.warning(f"Broker {name} disconnected, attempting reconnect...")
-                            broker.connect()
+                # One broker's failure to reconnect must not end the loop, or
+                # no broker would ever be reconnected again.
+                for name, broker in list(broker_manager.brokers.items()):
+                    try:
+                        if hasattr(broker, 'get_status'):
+                            status = broker.get_status()
+                            if not status.get('is_connected', False):
+                                logger.warning(f"Broker {name} disconnected, attempting reconnect...")
+                                broker.connect()
+                    except Exception as e:
+                        logger.error(f"Broker {name} health check failed: {e}")
                 time.sleep(60)
-        threading.Thread(target=broker_health_loop, daemon=True).start()
 
         # Failover logic: switch to backup broker if primary fails
         def failover_monitor():
             while self.running:
-                primary = broker_manager.get_broker()
-                if primary and not primary.is_connected:
-                    for name, broker in broker_manager.brokers.items():
-                        if broker.is_connected:
-                            broker_manager.set_primary_broker(name)
-                            logger.info(f"Failover: switched primary broker to {name}")
-                            break
+                try:
+                    primary = broker_manager.get_broker()
+                    if primary and not primary.is_connected:
+                        for name, broker in broker_manager.brokers.items():
+                            if broker.is_connected:
+                                broker_manager.set_primary_broker(name)
+                                logger.info(f"Failover: switched primary broker to {name}")
+                                break
+                except Exception as e:
+                    logger.error(f"Broker failover check failed: {e}")
                 time.sleep(30)
-        threading.Thread(target=failover_monitor, daemon=True).start()
+
+        # Each one is watched: if its thread ever dies it is started again.
+        for label, target in (('broker_health', broker_health_loop), ('broker_failover', failover_monitor)):
+            self._spawn_watched(label, target)
 
             # Start data ingestion
         logger.info("Starting data ingestion...")
@@ -785,7 +873,9 @@ class TradingAgent:
                 logger.warning(f"NSE scraper startup failed: {e}")
 
         logger.info("AI Trading Agent initialized successfully")
-        
+
+        self._watch_workers()
+
         # Start the main trading loop
         self.run_main_loop()
 
@@ -1045,6 +1135,13 @@ class TradingAgent:
                                 self._cycle_decisions[symbol]['skip_reason'] = 'fallback_price'
                                 continue
 
+                            if not symbol_data:
+                                # No source has a price for it at all (a vendor
+                                # throttling, a wrong ticker). It used to read as
+                                # a quiet "hold", so nothing could tell a symbol
+                                # with nothing to trade on from one with no signal.
+                                self._cycle_decisions[symbol]['skip_reason'] = 'no_price'
+
                             if symbol_data:
                                 # Retrieve recent news if NLP manager is functioning and data is available
                                 symbol_news = []
@@ -1231,6 +1328,13 @@ class TradingAgent:
                             self.components['adaptive_integration'].update_with_performance(real_performance, market_data)
                         else:
                             logger.warning("Risk limits exceeded, skipping trade execution")
+                            if getattr(self, 'alerter', None):
+                                self.alerter.send(
+                                    'heal:risk_limits', 'a risk limit is blocking every new trade',
+                                    f"Signals were generated for {', '.join(sorted(all_signals))}, but the agent's "
+                                    f"risk limits (portfolio risk, position size or drawdown) are exceeded, so it "
+                                    f"placed nothing. It looks again every cycle and resumes when they clear.",
+                                    'warning', cooldown_s=6 * 3600)
                             for s in all_signals:
                                 if s in self._cycle_decisions:
                                     self._cycle_decisions[s]['skip_reason'] = 'risk_limits'
@@ -1242,6 +1346,9 @@ class TradingAgent:
                                 self.decision_journal.record(dec)
                             except Exception as e:
                                 logger.debug(f"Decision record error: {e}")
+
+                    if getattr(self, 'self_healing', None):
+                        self.self_healing.observe_cycle(self._cycle_decisions)
 
                     # Update portfolio optimization (once daily, not every loop)
                     self._update_portfolio_optimization(market_data)
@@ -1333,6 +1440,8 @@ class TradingAgent:
                 # Dead-Man's Switch heartbeat ping
                 if getattr(self, 'heartbeat_monitor', None):
                     self.heartbeat_monitor.ping()
+                if getattr(self, 'self_healing', None):
+                    self.self_healing.loop_ok()
 
                 # Calculate sleep time to maintain consistent loop interval
                 loop_duration = time.time() - loop_start_time
@@ -1342,6 +1451,8 @@ class TradingAgent:
 
             except Exception as e:
                 logger.error(f"Error in trading loop: {str(e)}")
+                if getattr(self, 'self_healing', None):
+                    self.self_healing.loop_failed(e)
                 time.sleep(loop_interval)  # Wait before retrying
 
     def _evaluate_nse_symbols(self):
@@ -2381,6 +2492,8 @@ class TradingAgent:
             except Exception as e:
                 logger.error(f"Could not persist the kill switch: {e}")
         logger.warning(f"KILL SWITCH ENGAGED ({reason}); flatten={flatten}")
+        if getattr(self, 'self_healing', None):
+            self.self_healing.note_halt(reason, flatten)
         result = {'halted': True, 'canceled_orders': 0, 'close_orders': 0, 'errors': []}
         if not flatten:
             return result
@@ -2448,7 +2561,7 @@ class TradingAgent:
             result['errors'].append(str(e))
         return result
 
-    def resume_trading(self) -> Dict[str, Any]:
+    def resume_trading(self, by: str = 'an operator') -> Dict[str, Any]:
         """Release the kill switch, in memory and in the database, and re-arm
         the heartbeat watchdog; the loop resumes submitting orders."""
         self.trading_halted = False
@@ -2457,13 +2570,13 @@ class TradingAgent:
         rm = getattr(self, 'risk_manager', None)
         if rm is not None and hasattr(rm, 'set_persistent_kill_switch'):
             try:
-                rm.set_persistent_kill_switch(False, 'resumed by an operator')
+                rm.set_persistent_kill_switch(False, f'resumed by {by}')
             except Exception as e:
                 logger.error(f"Could not clear the stored kill switch: {e}")
         hb = getattr(self, 'heartbeat_monitor', None)
         if hb is not None and hasattr(hb, 'reset'):
             hb.reset()
-        logger.warning("Kill switch released; trading resumed")
+        logger.warning(f"Kill switch released by {by}; trading resumed")
         return {'halted': False}
 
     def _restore_halt(self) -> None:

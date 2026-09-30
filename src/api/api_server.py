@@ -994,6 +994,37 @@ class TradingAPI:
                 logger.error(f"Error scanning anomalies: {e}")
                 return jsonify({'anomalies': [], 'count': 0})
 
+        @self.app.route('/api/scorecard', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_scorecard():
+            """Where the agent is now against where the paper run needs it to
+            be (src/agent/scorecard.py). Read from the journals, read-only;
+            cached for five minutes because the forecast check reads daily
+            price history for every symbol traded."""
+            def produce():
+                from src.agent import scorecard
+                from src.utils.paths import DATA_DIR
+                agent = self.trading_agent
+                cfg = getattr(agent, 'config', None) or self.config or {}
+                healing = getattr(agent, 'self_healing', None)
+                alerter = getattr(agent, 'alerter', None)
+                try:
+                    spy = self._daily_closes('SPY') or None
+                except Exception:
+                    spy = None
+                inputs = scorecard.read_inputs(
+                    str(DATA_DIR), cfg, closes_for=self._daily_closes, spy=spy,
+                    healing=healing.status() if healing else None,
+                    alerter=alerter.status() if alerter else None)
+                return scorecard.build(inputs, cfg)
+
+            try:
+                return jsonify(self._cached('scorecard', 300, produce))
+            except Exception as e:
+                logger.error(f"Error building the scorecard: {e}")
+                return jsonify({'error': 'Failed to build the scorecard'}), 500
+
         @self.app.route('/api/trading/halt', methods=['POST'])
         @require_rate_limit
         @token_required

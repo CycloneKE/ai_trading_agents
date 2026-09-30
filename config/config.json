@@ -4,6 +4,22 @@
   "groq_vision_model": "qwen/qwen3.8-27b",
   "gemini_model": "gemini-flash-lite-latest",
   "llm_cooldown_seconds": 60,
+  "alerts": {
+    "_comment": "Email alerts from the agent itself (src/agent/alerts.py). The mail server and recipient come from environment variables, never from this file: ALERT_EMAIL_TO, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM, SMTP_SECURITY (see .env.example). The same alert is not sent again within its cooldown; non-critical mail is capped per hour. Every alert is also recorded in data/alerts.jsonl, sent or not.",
+    "enabled": true,
+    "max_per_hour": 20,
+    "cooldown_seconds": {"info": 0, "warning": 3600, "critical": 900}
+  },
+  "self_healing": {
+    "_comment": "What the agent does about its own failures (src/agent/self_healing.py). A background worker that dies is restarted, at most max_restarts_per_hour times. A halt caused by the loop freezing (never any other halt: not a loss limit, not the operator's button) is lifted once the loop and the primary broker have been healthy for healthy_seconds, at most max_per_day times a day; set auto_resume.enabled to false to make every halt wait for a person. The operator is emailed at these loop-error counts in a row, and every loop_error_repeat_every after; and when a symbol has had no real price for degraded_symbol_minutes.",
+    "enabled": true,
+    "check_interval_seconds": 30,
+    "max_restarts_per_hour": 6,
+    "auto_resume": {"enabled": true, "healthy_seconds": 600, "max_per_day": 3},
+    "loop_error_alert_at": [3, 10],
+    "loop_error_repeat_every": 30,
+    "degraded_symbol_minutes": 30
+  },
   "llm_allocator": {
     "_comment": "An AI re-weighting of the strategies, OFF by default: the ensemble already tilts each strategy by its realised results (guardrails.evidence_tilt), and the AI is shown nothing more. To layer an AI on top set enabled to true; it then asks at most once a day, and only after min_new_trades more trades have closed.",
     "enabled": false,

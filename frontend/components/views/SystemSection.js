@@ -3,6 +3,7 @@
 import { Shield, TrendingDown, Zap, Lock, Bell, Cpu, Activity, Terminal } from 'lucide-react';
 import { theme } from '../DashboardStyles';
 import { card, columns, SectionHeader, StatCard, HudRow, SubTabs } from '../ui';
+import Scorecard from './Scorecard';
 
 const RiskView = ({ data, mobile }) => {
   const rm = data.riskMetrics || {};
@@ -88,12 +89,15 @@ const SystemPulse = ({ data, mobile }) => (
 );
 
 export default function SystemSection({ sub, onSub, data, mobile }) {
-  const tabs = [{ id: 'risk', label: 'Risk & Controls' }, { id: 'pulse', label: 'System Pulse' }];
+  const tabs = [{ id: 'risk', label: 'Risk & Controls' }, { id: 'pulse', label: 'System Pulse' },
+    { id: 'scorecard', label: 'Scorecard' }];
   const current = tabs.some((t) => t.id === sub) ? sub : 'risk';
   return (
     <div>
       <SubTabs tabs={tabs} active={current} onChange={onSub} />
-      {current === 'risk' ? <RiskView data={data} mobile={mobile} /> : <SystemPulse data={data} mobile={mobile} />}
+      {current === 'risk' && <RiskView data={data} mobile={mobile} />}
+      {current === 'pulse' && <SystemPulse data={data} mobile={mobile} />}
+      {current === 'scorecard' && <Scorecard mobile={mobile} />}
     </div>
   );
 }

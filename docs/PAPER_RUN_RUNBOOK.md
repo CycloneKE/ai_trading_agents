@@ -148,6 +148,70 @@ orders the broker rejected, decisions with no LLM verdict attached (which is
 what running out of quota looks like from the journal), and decisions that saw
 synthetic prices.
 
+## Where the agent stands against where it needs to be
+
+The weekly report says what happened. The scorecard says whether that is good
+enough, measure by measure, each with a target and a status:
+
+```bash
+python scripts/agent_scorecard.py
+```
+
+It is also on the dashboard, under Risk & System, in the Scorecard tab.
+
+Each line is marked `[PASS]`, `[WATCH]`, `[FAIL]`, `[early]` (not enough
+evidence yet, and it says how much more is needed) or `[info]`. It covers six
+questions: is the agent healthy, has it traded enough for a result to mean
+anything, do its closed trades make money after costs, is the account ahead of
+simply holding the S&P 500 with drawdown inside its limit, do its buy and sell
+signals move the price the right way by more than chance, and is it learning
+from its own results.
+
+The forecast check judges every signal, traded or not, by what the price did
+5 and 20 trading days later, against how often that symbol simply went up
+anyway. A buy in a rising market is not counted as skill just because the
+market rose. Add `--offline` to skip the checks that need the internet.
+
+The targets are proposals, kept in `config/config.json` under
+`scorecard.targets`. Change them there if you disagree with a number.
+
+## Email alerts and self-repair
+
+The agent emails you when it needs a person, and repairs what is safe to
+repair by itself. It emails when:
+
+- trading is halted (unless you pressed the button yourself);
+- a background worker dies and is restarted, or keeps dying;
+- the trading loop fails three times in a row, and again at ten;
+- a symbol has had no real price for half an hour;
+- the agent was killed rather than stopped (a crash, or out of memory) and
+  has started again;
+- a risk limit is blocking every new trade.
+
+It repairs: dead background workers (restarted, up to six times an hour), and
+one kind of halt, the one it causes itself when its loop freezes. That halt is
+lifted once the loop and the broker have been healthy for ten minutes, at most
+three times a day. It never lifts any other halt (a loss limit, or your own
+button); those wait for you to press Resume. To turn that off, set
+`self_healing.auto_resume.enabled` to `false`.
+
+To switch email on, set these in Coolify's Environment Variables tab (they are
+the mail account's details, the same ones you gave Coolify for its own
+notifications) and redeploy:
+
+| Variable | What to put |
+|---|---|
+| `ALERT_EMAIL_TO` | the address to email (several allowed, separated by commas) |
+| `SMTP_HOST` | the mail server, for example `smtp.gmail.com` |
+| `SMTP_PORT` | `587` (the usual), or `465` for SSL |
+| `SMTP_USER` | the mail account's login, often its address |
+| `SMTP_PASSWORD` | its password; Gmail needs an "app password" |
+| `SMTP_FROM` | optional; defaults to `SMTP_USER` |
+
+The Scorecard's Health section shows "Email alerts: on" once it is working.
+Every alert is also recorded in `data/alerts.jsonl`, sent or not. The same
+alert is not repeated within an hour (15 minutes for a critical one).
+
 ## What the numbers mean
 
 Two cautions the report repeats, because both are easy to get wrong.
