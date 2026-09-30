@@ -54,7 +54,10 @@ def nse_bars(symbol: str, csv_dir: Path, days: int = 250) -> List[Dict[str, Any]
 def yfinance_bars(symbol: str, period: str = '2y') -> List[Dict[str, Any]]:
     """Daily bars from yfinance, the live feed's own source, oldest first."""
     import yfinance as yf
-    df = yf.Ticker(symbol).history(period=period, interval='1d', auto_adjust=True)
+    from src.utils.real_price_feed import yahoo_symbol
+    # A pair is written EUR_USD here and EURUSD=X at Yahoo; asked for by our
+    # name, Yahoo has no such ticker and the chart came back empty.
+    df = yf.Ticker(yahoo_symbol(symbol)).history(period=period, interval='1d', auto_adjust=True)
     if df is None or df.empty:
         return []
     return [_bar(idx.date().isoformat(), _num(r['Open']), _num(r['High']), _num(r['Low']),
@@ -108,4 +111,6 @@ def tradingview_symbol(symbol: str, market: str) -> str:
         return f'NSEKE:{s}'
     if market == 'crypto':
         return f"COINBASE:{s.replace('-', '').replace('/', '')}"
+    if market == 'forex':
+        return f"FX:{s.replace('_', '')}"
     return s

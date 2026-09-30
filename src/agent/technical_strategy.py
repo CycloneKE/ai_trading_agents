@@ -7,6 +7,7 @@ except ImportError:  # pandas_ta's remaining PyPI releases need Python >= 3.12
 import logging
 from typing import Dict, Any, List, Optional
 from .base_strategy import BaseStrategy
+from .cost_model import classify as market_of
 from .daily_bars import APPEND, REPLACE, classify
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,20 @@ class TechnicalStrategy(BaseStrategy):
         # Date of the last bar per symbol, for live daily-bar building.
         # See daily_bars.py; None means the next dated price appends.
         self._bar_dates = {}
+
+    def _params(self, symbol: str) -> Dict[str, float]:
+        """The thresholds for `symbol`'s market.
+
+        The defaults suit stocks, which move about 1.5% a day. A major
+        currency pair moves about 0.5%, so the same 2% bars almost never
+        cross there; `market_overrides` in the strategy's settings lets a
+        market carry its own (threshold, band, rsi_oversold, rsi_overbought).
+        """
+        params = {'threshold': self.momentum_threshold, 'band': self.mean_reversion_band,
+                  'rsi_oversold': self.rsi_oversold, 'rsi_overbought': self.rsi_overbought}
+        overrides = (self.config.get('market_overrides') or {}).get(market_of(symbol)) or {}
+        params.update({k: float(v) for k, v in overrides.items() if k in params})
+        return params
 
     def generate_signals(self, data: Dict[str, Any]) -> Dict[str, Any]:
         symbol = data.get('symbol', 'UNKNOWN')
@@ -73,12 +88,13 @@ class TechnicalStrategy(BaseStrategy):
         # regardless of name, making "momentum"/"mean_reversion"/"rsi_strategy"
         # near-identical clones that always agreed with each other. Real
         # diversity requires them to actually measure different things.
+        params = self._params(symbol)
         if 'momentum' in self.name:
-            action, confidence = self._momentum_signal(price, sma_50, momentum)
+            action, confidence = self._momentum_signal(price, sma_50, momentum, params['threshold'])
         elif 'reversion' in self.name:
-            action, confidence = self._mean_reversion_signal(price, sma_20)
+            action, confidence = self._mean_reversion_signal(price, sma_20, params['band'])
         elif 'rsi' in self.name:
-            action, confidence = self._rsi_signal(rsi_val)
+            action, confidence = self._rsi_signal(rsi_val, params['rsi_oversold'], params['rsi_overbought'])
         else:
             action, confidence = self._combined_signal(price, sma_20, sma_50, momentum, rsi_val)
 
@@ -100,16 +116,16 @@ class TechnicalStrategy(BaseStrategy):
         1.0 at double the threshold's distance, capped at 1.0."""
         return min(0.5 + 0.5 * max(distance_beyond, 0.0) / span, 1.0) if span else 1.0
 
-    def _momentum_signal(self, price, sma_50, momentum):
-        t = self.momentum_threshold
+    def _momentum_signal(self, price, sma_50, momentum, threshold=None):
+        t = self.momentum_threshold if threshold is None else threshold
         if price > sma_50 and momentum > t:
             return 'buy', self._scale(momentum - t, t)
         if price < sma_50 and momentum < -t:
             return 'sell', self._scale(-momentum - t, t)
         return 'hold', 0.0
 
-    def _mean_reversion_signal(self, price, sma_20):
-        band = self.mean_reversion_band
+    def _mean_reversion_signal(self, price, sma_20, band=None):
+        band = self.mean_reversion_band if band is None else band
         lower, upper = sma_20 * (1 - band), sma_20 * (1 + band)
         if price < lower:
             return 'buy', self._scale(lower - price, sma_20 * band)
@@ -117,11 +133,13 @@ class TechnicalStrategy(BaseStrategy):
             return 'sell', self._scale(price - upper, sma_20 * band)
         return 'hold', 0.0
 
-    def _rsi_signal(self, rsi_val):
-        if rsi_val < self.rsi_oversold:
-            return 'buy', self._scale(self.rsi_oversold - rsi_val, self.rsi_oversold)
-        if rsi_val > self.rsi_overbought:
-            return 'sell', self._scale(rsi_val - self.rsi_overbought, 100 - self.rsi_overbought)
+    def _rsi_signal(self, rsi_val, oversold=None, overbought=None):
+        oversold = self.rsi_oversold if oversold is None else oversold
+        overbought = self.rsi_overbought if overbought is None else overbought
+        if rsi_val < oversold:
+            return 'buy', self._scale(oversold - rsi_val, oversold)
+        if rsi_val > overbought:
+            return 'sell', self._scale(rsi_val - overbought, 100 - overbought)
         return 'hold', 0.0
 
     def _combined_signal(self, price, sma_20, sma_50, momentum, rsi_val):

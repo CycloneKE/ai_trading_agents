@@ -99,6 +99,10 @@
       "enabled": true,
       "lookback_period": 50,
       "threshold": 0.02,
+      "market_overrides": {
+        "_comment": "Forex only: a major pair moves about 0.5% a day against a stock's 1.5%, so the 2% bar above almost never crossed there (about one buy day a year per pair). 0.6% gives forex about the pace stocks have.",
+        "forex": {"threshold": 0.006}
+      },
       "weight": 1.0,
       "max_position_size": 0.05
     },
@@ -106,6 +110,10 @@
       "type": "technical",
       "enabled": true,
       "lookback_period": 20,
+      "market_overrides": {
+        "_comment": "Forex only, for the same reason as momentum's: a 2% band around the 20-day average is rarely reached by a currency pair.",
+        "forex": {"band": 0.006}
+      },
       "weight": 1.0,
       "max_position_size": 0.05
     },
@@ -125,6 +133,16 @@
       "markets": ["crypto"],
       "sma_period": 200,
       "band": 0.02,
+      "weight": 1.0,
+      "max_position_size": 0.05
+    },
+    "forex_trend": {
+      "_comment": "Forex only (src/agent/slow_strategies.py). The forex counterpart of crypto_trend: holds a pair while its close is more than `band` above its sma_period-day average and sells when it is more than `band` below. Long-only, no leverage. Unlike crypto it votes alongside momentum and mean reversion (their forex thresholds are set in market_overrides), so it confirms a trend rather than trading alone. It abstains until it has sma_period daily bars.",
+      "type": "trend_following",
+      "enabled": true,
+      "markets": ["forex"],
+      "sma_period": 50,
+      "band": 0.004,
       "weight": 1.0,
       "max_position_size": 0.05
     },
