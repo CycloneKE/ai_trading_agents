@@ -208,6 +208,14 @@ notifications) and redeploy:
 | `SMTP_PASSWORD` | its password; Gmail needs an "app password" |
 | `SMTP_FROM` | optional; defaults to `SMTP_USER` |
 
+To check it works, run this from the project folder (in Coolify, the
+backend container's terminal) and look for the email:
+
+```bash
+python scripts/send_test_alert.py
+```
+
+It says exactly what is missing, or what the mail server replied if it refused.
 The Scorecard's Health section shows "Email alerts: on" once it is working.
 Every alert is also recorded in `data/alerts.jsonl`, sent or not. The same
 alert is not repeated within an hour (15 minutes for a critical one).

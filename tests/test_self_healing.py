@@ -409,3 +409,24 @@ def test_a_lasting_problem_is_one_log_line_with_or_without_email(tmp_path):
         assert len(a.log.recent()) == 1
     off = alerter(tmp_path / 'off', env={}, clock=clock)
     assert off.log.recent()[0]['status'] == 'not_configured'
+
+
+# ------------------------------------------------------- the test-email command
+
+def test_the_test_email_command_says_what_is_missing_and_what_the_server_said(tmp_path, capsys):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('send_test_alert', 'scripts/send_test_alert.py')
+    cmd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cmd)
+    assert cmd.main(env={'SMTP_HOST': 'smtp.example.com'}, log_path=tmp_path / 'a.jsonl') == 1
+    out = capsys.readouterr().out
+    assert 'ALERT_EMAIL_TO' in out and 'SMTP_USER or SMTP_FROM' in out and 'SMTP_HOST' not in out.split('Missing:')[1]
+
+    def refuse(s, m):
+        raise PermissionError('535 authentication failed')
+    assert cmd.main(env=ENV, transport=refuse, log_path=tmp_path / 'a.jsonl') == 1
+    assert '535 authentication failed' in capsys.readouterr().out
+
+    sent = []
+    assert cmd.main(env=ENV, transport=lambda s, m: sent.append(m), log_path=tmp_path / 'a.jsonl') == 0
+    assert sent[0]['Subject'].endswith('test alert: email is working') and 'b***@example.com' in capsys.readouterr().out
