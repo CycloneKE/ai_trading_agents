@@ -372,6 +372,47 @@ def _base_rate(closes: Dict[date, float], ordered: List[date], horizon: int) -> 
     return ups / (len(ordered) - horizon)
 
 
+def _forecast_metric(h: int, n: int, hits: int, rets: List[float], chance: List[float],
+                     by_market: Dict[str, List[int]], t: Dict[str, Any]) -> Dict[str, Any]:
+    """The verdict on `n` signals with a known `h`-day outcome, `hits` of them
+    the right way, against how often chance would have given that."""
+    label = f'Signals that moved the right way within {h} trading days'
+    if n < t['min_forecast_watch']:
+        return _m(f'forecast_{h}d', label, None, f"too early ({n} with a known outcome)", EARLY,
+                  'above the chance rate',
+                  f"Judged from {int(t['min_forecast_watch'])} signals whose {h}-day outcome is known; "
+                  f"{n} so far. A signal's outcome is known {h} trading days after it.")
+    rate = hits / n
+    base = mean(chance)
+    lo, hi = wilson(hits, n)
+    if n < t['min_forecast_signals']:
+        status, note = WATCH, (f"{n} signals; a verdict needs {int(t['min_forecast_signals'])}. "
+                               f"Chance rate for the same symbols and days: {base:.0%}.")
+    elif lo > base:
+        status, note = PASS, f"Beyond doubt better than the {base:.0%} that chance (the market's own drift) gives."
+    elif hi < base:
+        status, note = FAIL, f"Worse than the {base:.0%} that chance gives."
+    else:
+        status, note = WATCH, f"The range includes the {base:.0%} that chance gives: no proven skill yet."
+    return _m(f'forecast_{h}d', label, round(rate, 3), f"{rate:.0%} of {n} ({lo:.0%} to {hi:.0%})", status,
+              f"above {base:.0%} (chance)", note + f" Average move in the signal's direction: {mean(rets) * 100:+.2f}%.",
+              detail={m: {'n': len(v), 'hit_rate': round(sum(v) / len(v), 3)} for m, v in by_market.items()})
+
+
+def _forecast_from_ledger(rows: List[Dict[str, Any]], start_day: str, t: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The same verdict from the signal ledger (signal_ledger.py): outcomes
+    recorded once known, kept for good, and read without any price lookup."""
+    out = []
+    for h in [int(x) for x in t['horizons']]:
+        sel = [r for r in rows if r['source'] == 'ensemble' and int(r['horizon']) == h and str(r['day']) >= start_day]
+        by_market: Dict[str, List[int]] = {}
+        for r in sel:
+            by_market.setdefault(r.get('market') or '?', []).append(1 if r['ret'] > 0 else 0)
+        out.append(_forecast_metric(h, len(sel), sum(1 for r in sel if r['ret'] > 0),
+                                    [r['ret'] for r in sel], [r['chance'] for r in sel], by_market, t))
+    return out
+
+
 def _forecast(sigs: List[Dict[str, Any]], closes_for: Optional[Callable[[str], Dict[date, float]]],
               config: Optional[Dict[str, Any]], t: Dict[str, Any]) -> List[Dict[str, Any]]:
     from src.agent.ai_scorecard import forward_return
@@ -412,45 +453,58 @@ def _forecast(sigs: List[Dict[str, Any]], closes_for: Optional[Callable[[str], D
             rets.append(directional)
             chance.append(base if s['action'] == 'buy' else 1 - base)
             by_market.setdefault(classify(sym, config), []).append(ok)
-        label = f'Signals that moved the right way within {h} trading days'
-        if n < t['min_forecast_watch']:
-            out.append(_m(f'forecast_{h}d', label, None, f"too early ({n} with a known outcome)", EARLY,
-                          'above the chance rate',
-                          f"Judged from {int(t['min_forecast_watch'])} signals whose {h}-day outcome is known; "
-                          f"{n} so far. A signal's outcome is known {h} trading days after it."))
-            continue
-        rate = hits / n
-        base = mean(chance)
-        lo, hi = wilson(hits, n)
-        if n < t['min_forecast_signals']:
-            status, note = WATCH, (f"{n} signals; a verdict needs {int(t['min_forecast_signals'])}. "
-                                   f"Chance rate for the same symbols and days: {base:.0%}.")
-        elif lo > base:
-            status, note = PASS, f"Beyond doubt better than the {base:.0%} that chance (the market's own drift) gives."
-        elif hi < base:
-            status, note = FAIL, f"Worse than the {base:.0%} that chance gives."
-        else:
-            status, note = WATCH, f"The range includes the {base:.0%} that chance gives: no proven skill yet."
-        out.append(_m(f'forecast_{h}d', label, round(rate, 3), f"{rate:.0%} of {n} ({lo:.0%} to {hi:.0%})", status,
-                      f"above {base:.0%} (chance)", note + f" Average move in the signal's direction: {mean(rets) * 100:+.2f}%.",
-                      detail={m: {'n': len(v), 'hit_rate': round(sum(v) / len(v), 3)} for m, v in by_market.items()}))
+        out.append(_forecast_metric(h, n, hits, rets, chance, by_market, t))
     return out
 
 
 # ----------------------------------------------------------------- learning
 
+def _skill(ledger: Optional[List[Dict[str, Any]]], config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Which strategies' signals beat chance, in which market, over the whole
+    ledger (every version of the agent, since a strategy's raw signal has not
+    changed with the fixes around it)."""
+    from src.agent import signal_ledger as sl
+    from src.agent.guardrails import signal_tilt
+    rule = sl.settings(config)
+    label = 'Signal skill by strategy and market'
+    target = f"a strategy needs {int(rule['min_signals'])} signals with a known outcome in a market"
+    if ledger is None:
+        return _m('strategy_skill', label, None, 'not recorded yet', EARLY, target,
+                  'The signal ledger fills once the updated agent has run; it refreshes every '
+                  f"{rule['refresh_hours']} hours.")
+    table = [r for r in sl.skill(ledger, rule['horizon'], rule['min_signals']) if r['source'] != sl.ENSEMBLE]
+    if not table:
+        return _m('strategy_skill', label, None, 'no outcomes yet', EARLY, target,
+                  f"A signal's {rule['horizon']}-day outcome is known {rule['horizon']} trading days after it.")
+    for r in table:
+        r['tilt'] = round(signal_tilt(r['n'], r['z'], rule['min_signals']), 2)
+    judged = [r for r in table if r['n'] >= int(rule['min_signals'])]
+    mode = ('Tilt is ON: each strategy\'s vote in that market is scaled 0.5x to 1.5x by this result.'
+            if rule['enabled'] else
+            'Measuring only: no weight is changed. Switch on learning.signal_skill_tilt once a pair shows a clear result.')
+    if not judged:
+        return _m('strategy_skill', label, len(judged), f"0 of {len(table)} pairs have enough signals", EARLY, target,
+                  f"{max(r['n'] for r in table)} is the most so far. " + mode, detail=table)
+    best = max(judged, key=lambda r: r['z'])
+    worst = min(judged, key=lambda r: r['z'])
+    return _m('strategy_skill', label, len(judged), f"{len(judged)} of {len(table)} pairs judged", INFO, target,
+              f"Best: {best['source']} in {best['market']} ({best['hit_rate']:.0%} against {best['chance']:.0%} chance, "
+              f"z {best['z']:+.1f}). Worst: {worst['source']} in {worst['market']} (z {worst['z']:+.1f}). " + mode,
+              detail=table)
+
+
 def _learning(tuner: Optional[Dict[str, Any]], trips: int, attribution: Dict[str, Dict[str, Any]], days: float,
-              now: datetime, config: Optional[Dict[str, Any]], t: Dict[str, Any]) -> List[Dict[str, Any]]:
+              now: datetime, config: Optional[Dict[str, Any]], t: Dict[str, Any],
+              ledger: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     enabled = ((config or {}).get('strategy_tuning') or {}).get('enabled', True)
-    out = []
+    out = [_skill(ledger, config)]
     gate = int(t['evidence_gate_trades'])
     ready = sum(1 for v in (attribution or {}).values() if v.get('closed_trades', 0) >= gate)
     out.append(_m('learning_gate', 'Learning from its own results', ready, f"{ready} strategies ready",
                   PASS if ready else EARLY if days < 30 else WATCH, f"a strategy needs {gate} closed trades",
                   ('Results are re-weighting the strategies that have enough trades.' if ready else
                    f"No strategy has {gate} closed trades, so nothing can be learned from results yet "
-                   f"({trips} trades closed in all). Learning from every signal's later price move, not only "
-                   f"closed trades, would remove this wait."),))
+                   f"({trips} trades closed in all). The signal skill measure above does not need closed trades."),))
     if not enabled:
         out.append(_m('tuner', 'Weekly settings review', None, 'switched off', INFO, 'weekly'))
         return out
@@ -534,8 +588,10 @@ def build(inputs: Dict[str, Any], config: Optional[Dict[str, Any]] = None,
         'evidence': _evidence(trips, attribution, days, t),
         'edge': _edge(trips, t),
         'returns': _returns(inputs.get('equity') or [], inputs.get('spy'), t),
-        'forecast': _forecast(sigs, inputs.get('closes_for'), config, t),
-        'learning': _learning(inputs.get('tuner'), len(trips), attribution, days, now, config, t),
+        'forecast': (_forecast_from_ledger(inputs['ledger'], start.date().isoformat(), t)
+                     if inputs.get('ledger') is not None else _forecast(sigs, inputs.get('closes_for'), config, t)),
+        'learning': _learning(inputs.get('tuner'), len(trips), attribution, days, now, config, t,
+                              inputs.get('ledger')),
     }
     sections = [{'id': i, 'title': title, 'question': q, 'metrics': body[i]} for i, title, q in SECTIONS]
     counts = {s: sum(1 for sec in sections for m in sec['metrics'] if m['status'] == s)
@@ -630,9 +686,12 @@ def read_inputs(data_dir: str, config: Optional[Dict[str, Any]] = None,
     except (OSError, ValueError):
         pass
     alerts = AlertLog(os.path.join(data_dir, 'alerts.jsonl')).recent(limit=500)
+    from src.agent.signal_ledger import read_ledger
+    ledger_path = os.path.join(data_dir, 'signal_outcomes.db')
+    ledger = read_ledger(ledger_path) if os.path.exists(ledger_path) else None
     for c in (d_conn, o_conn, p_conn):
         if c is not None:
             c.close()
     return {'run_started_at': started, 'planned_days': manifest.get('planned_days'), 'decisions': decisions,
             'fills': fills, 'equity': equity, 'spy': spy, 'closes_for': closes_for, 'healing': healing,
-            'alerter': alerter, 'alerts': alerts, 'tuner': tuner}
+            'alerter': alerter, 'alerts': alerts, 'tuner': tuner, 'ledger': ledger}

@@ -110,6 +110,9 @@ class StrategyManager:
         self.performance_window = config.get('performance_window', 30)  # Days
         self.rebalance_frequency = config.get('rebalance_frequency', 7)  # Days
         self.min_trade_confidence = config.get('min_trade_confidence', 0.50)
+        # (strategy, market) -> weight scale from what its signals did next
+        # (signal_ledger.py). Empty unless learning.signal_skill_tilt is on.
+        self.signal_skill: Dict[tuple, float] = {}
         
         # Performance tracking
         self.strategy_performance = {}
@@ -247,6 +250,17 @@ class StrategyManager:
                 'timestamp': datetime.utcnow().isoformat()
             }
     
+    def set_signal_skill(self, tilts: Dict[tuple, float]) -> None:
+        """Replace the skill-based weight scales ({} switches them off)."""
+        self.signal_skill = dict(tilts or {})
+
+    def signal_tilt_for(self, name: str, symbol: str) -> float:
+        """The scale on strategy `name`'s vote for `symbol`'s market: 1.0 unless
+        its signals in that market have a record (guardrails.signal_tilt)."""
+        if not self.signal_skill:
+            return 1.0
+        return float(self.signal_skill.get((name, classify_market(symbol, self.config)), 1.0))
+
     def in_scope(self, name: str, symbol: str) -> bool:
         """Whether strategy `name` votes on `symbol`'s market.
 
@@ -666,6 +680,7 @@ class StrategyManager:
             # a losing one.
             base_weight *= evidence_tilt(performance.get('closed_trades'),
                                          performance.get('sharpe_ratio'))
+            base_weight *= self.signal_tilt_for(name, symbol)
             base_weight = max(0.01, base_weight)
             
             # Adaptive logic:

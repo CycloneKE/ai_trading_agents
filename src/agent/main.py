@@ -652,6 +652,8 @@ class TradingAgent:
                 self.decision_journal.close()
             if getattr(self, 'paper_equity_log', None):
                 self.paper_equity_log.close()
+            if getattr(self, 'signal_ledger', None):
+                self.signal_ledger.close()
             if 'escalation_manager' in self.components:
                 self.components['escalation_manager'].close()
             if 'nse_order_queue' in self.components:
@@ -780,6 +782,21 @@ class TradingAgent:
         except Exception as e:
             logger.error(f"Strategy tuner init failed: {e}")
             self.strategy_tuner = None
+
+        # Signal learning: what every signal did 5 and 20 trading days later,
+        # by strategy and market, recorded as outcomes become known
+        # (signal_ledger.py). It learns without waiting for a trade to close.
+        # It measures and shows by default; learning.signal_skill_tilt.enabled
+        # also lets it scale each strategy's vote by its record.
+        try:
+            from src.agent.signal_ledger import SignalLedger, SignalLearning
+            self.signal_ledger = SignalLedger()
+            self.signal_learning = SignalLearning(
+                self.config, self.signal_ledger, self.components.get('strategy_manager'))
+        except Exception as e:
+            logger.error(f"Signal learning init failed: {e}")
+            self.signal_ledger = None
+            self.signal_learning = None
 
         # LLM weight allocator: proposes ensemble weight tilts from realized
         # attribution on a slow cadence; hard guardrails clamp every proposal
@@ -954,6 +971,11 @@ class TradingAgent:
                         self.strategy_tuner.maybe_tune()
                     except Exception as e:
                         logger.error(f"Strategy tuner error: {e}")
+                if getattr(self, 'signal_learning', None) and not self.trading_halted:
+                    try:
+                        self.signal_learning.maybe_update()
+                    except Exception as e:
+                        logger.error(f"Signal learning error: {e}")
 
                 # Pull fill results for submitted orders into the journal so
                 # attribution and duplicate-close checks see current state.

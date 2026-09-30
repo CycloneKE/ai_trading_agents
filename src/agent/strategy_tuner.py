@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from src.agent.cost_model import classify
 from src.agent.position_rules import rule
 
 logger = logging.getLogger(__name__)
@@ -244,13 +245,21 @@ class StrategyTuner:
         return report
 
     def tune_one(self, name: str, series: Series) -> Dict[str, Any]:
+        strat_cfg = (self.config.get('strategies') or {}).get(name, {})
+        # A market with settings of its own (forex: market_overrides) is not
+        # traded on the settings being tuned here, so its history is left out:
+        # counting it would judge a candidate on trades the strategy never makes.
+        own = {m for m in (strat_cfg.get('market_overrides') or {}) if not str(m).startswith('_')}
+        left_out = sorted(s for s in series if own and classify(s, self.config) in own)
+        series = {s: v for s, v in series.items() if s not in left_out}
         entry = {'strategy': name, 'at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
                  'symbols': len(series)}
+        if left_out:
+            entry['left_out'] = left_out
         if not series:
             entry['outcome'] = f"no symbol has {self.rule['min_bars']} daily bars yet"
             logger.info(f"Strategy tuning: {name} not tuned: {entry['outcome']}")
             return self._log(entry)
-        strat_cfg = (self.config.get('strategies') or {}).get(name, {})
         now = self.current(name)
         base = self.evaluator(name, strat_cfg, now, series, self.rule['holdout_pct'])
         cands = [(p, self.evaluator(name, strat_cfg, p, series, self.rule['holdout_pct']))

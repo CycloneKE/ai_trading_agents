@@ -35,6 +35,44 @@ const Pill = ({ status }) => {
   );
 };
 
+// Which strategies' signals beat chance, and in which market (strategy_skill).
+// The weight scale is what the strategy's vote would be multiplied by; it
+// only takes effect when learning.signal_skill_tilt is switched on.
+export const SkillTable = ({ rows }) => (
+  <div style={{ overflowX: 'auto', marginTop: '8px' }}>
+    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+      <thead>
+        <tr style={{ textAlign: 'left', color: theme.colors.textMuted, fontSize: '11px', borderBottom: `1px solid ${theme.colors.border}` }}>
+          <th style={{ padding: '6px 8px' }}>STRATEGY</th><th style={{ padding: '6px 8px' }}>MARKET</th>
+          <th style={{ padding: '6px 8px' }}>SIGNALS</th><th style={{ padding: '6px 8px' }}>RIGHT</th>
+          <th style={{ padding: '6px 8px' }}>CHANCE</th><th style={{ padding: '6px 8px' }}>Z</th>
+          <th style={{ padding: '6px 8px' }}>WEIGHT SCALE</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => {
+          const color = !r.enough ? theme.colors.textMuted : r.z >= 2 ? theme.colors.primary : r.z <= -2 ? theme.colors.danger : theme.colors.textSecondary;
+          return (
+            <tr key={`${r.source}-${r.market}`} style={{ borderBottom: `1px solid ${theme.colors.border}`, color }}>
+              <td style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>{String(r.source).replace(/_/g, ' ')}</td>
+              <td style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>{String(r.market).replace(/_/g, ' ')}</td>
+              <td style={{ padding: '6px 8px' }}>{r.n}{r.enough ? '' : ' (few)'}</td>
+              <td style={{ padding: '6px 8px' }}>{Math.round(r.hit_rate * 100)}%</td>
+              <td style={{ padding: '6px 8px' }}>{Math.round(r.chance * 100)}%</td>
+              <td style={{ padding: '6px 8px' }}>{r.z > 0 ? '+' : ''}{r.z}</td>
+              <td style={{ padding: '6px 8px' }}>{r.tilt === 1 ? '1.00 (none)' : Number(r.tilt).toFixed(2)}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+    <div style={{ fontSize: '11px', color: theme.colors.textMuted, marginTop: '6px', lineHeight: 1.5 }}>
+      Z is how many standard errors the hit rate sits above what chance gives; about 2 or more is a real result,
+      and greyed rows have too few signals to say. Measured on each strategy&apos;s raw signal, before costs.
+    </div>
+  </div>
+);
+
 const MetricRow = ({ m, mobile }) => (
   <div style={{ padding: '12px 0', borderBottom: `1px solid ${theme.colors.border}` }}>
     <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', flexDirection: mobile ? 'column' : 'row' }}>
@@ -46,6 +84,7 @@ const MetricRow = ({ m, mobile }) => (
         </div>
         {m.target && <div style={{ fontSize: '11px', color: theme.colors.textMuted, marginTop: '2px' }}>Target: {m.target}</div>}
         {m.note && <div style={{ fontSize: '12px', color: theme.colors.textSecondary, marginTop: '4px', lineHeight: 1.5 }}>{m.note}</div>}
+        {m.id === 'strategy_skill' && Array.isArray(m.detail) && m.detail.length > 0 && <SkillTable rows={m.detail} />}
       </div>
     </div>
   </div>
