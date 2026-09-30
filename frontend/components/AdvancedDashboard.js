@@ -311,7 +311,8 @@ const AdvancedDashboard = ({ onLogout }) => {
       title="Type a ticker and press Enter to open its chart"
       onKeyDown={(e) => {
         if (e.key === 'Enter' && e.target.value.trim()) {
-          setDrilldownSymbol(e.target.value.trim().toUpperCase());
+          // EUR/USD and EURUSD both find the pair the agent calls EUR_USD (the server matches it).
+          setDrilldownSymbol(e.target.value.trim().toUpperCase().replace(/[\/\s]/g, ''));
           e.target.value = '';
           setSearchOpen(false);
         }

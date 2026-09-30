@@ -64,7 +64,7 @@ const SymbolDrilldown = ({ symbol, onClose }) => {
     const load = async () => {
       try {
         const token = localStorage.getItem('trading_token');
-        const res = await fetch(`${getApiBase()}/api/symbol/${symbol}`, {
+        const res = await fetch(`${getApiBase()}/api/symbol/${encodeURIComponent(symbol)}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!res.ok) { setError(res.status === 404 ? 'not_found' : `HTTP ${res.status}`); return; }
@@ -121,7 +121,7 @@ const SymbolDrilldown = ({ symbol, onClose }) => {
         {error && (
           <div style={{ color: theme.colors.danger, padding: '20px', background: 'rgba(244,63,94,0.1)', borderRadius: '8px' }}>
             {error === 'not_found'
-              ? `"${symbol}" isn't a tracked symbol. Check the ticker, for example SCOM or EQTY (NSE), AAPL or NVDA (US).`
+              ? `"${symbol}" isn't a tracked symbol. Check the ticker, for example SCOM or EQTY (NSE), AAPL or NVDA (US), BTC-USD (crypto) or EUR_USD (forex).`
               : `Failed to load: ${error}`}
           </div>
         )}

@@ -457,6 +457,21 @@ class TradingAPI:
             out |= {s.upper() for s in (dm.get('symbols', []) or []) + (dm.get('nse_symbols', []) or [])}
         return out | set(self._nse_trading_list()) | set(self._nse_market_symbols())
 
+    def _canonical_symbol(self, symbol: str) -> str:
+        """The tracked name for what a person typed: EURUSD, EUR/USD and
+        EUR-USD all mean the pair the agent calls EUR_USD. Anything that is
+        already tracked (BTC-USD included) is returned as it is."""
+        sym = (symbol or '').strip().upper()
+        tracked = self._tracked_symbols()
+        if sym in tracked:
+            return sym
+        letters = ''.join(ch for ch in sym if ch.isalpha())
+        if len(letters) == 6:
+            pair = f'{letters[:3]}_{letters[3:]}'
+            if pair in tracked:
+                return pair
+        return sym
+
     def _nse_trading_list(self) -> List[str]:
         """The NSE stocks the agent trades now (its screener's short list)."""
         fn = getattr(self.trading_agent, 'nse_trading_symbols', None)
@@ -662,7 +677,7 @@ class TradingAPI:
         def get_symbol_drilldown(symbol):
             """Per-symbol drill-down: decision tape, per-strategy books,
             execution quality, and alpha-vs-hold (Phase 1 of the drill-down)."""
-            symbol = (symbol or '').upper()
+            symbol = self._canonical_symbol(symbol)
             # Validate against configured symbols to avoid unbounded lookups.
             allowed = self._tracked_symbols()
             if allowed and symbol not in allowed:
@@ -686,6 +701,11 @@ class TradingAPI:
                         nse = connectors.get('nse')
                         q = (nse.get_quote(sym) if nse else None) or {}
                         return float(q['price_kes']) if q.get('price_kes') and q.get('source') in REAL_NSE_SOURCES else None
+                    if classify(sym, getattr(self.trading_agent, 'config', None) or self.config) == 'forex':
+                        # The real-data connector does not quote currency
+                        # pairs; the live price feed (Yahoo) does.
+                        from src.utils.real_price_feed import price_feed
+                        return price_feed.get_price(sym)
                     real = connectors.get('real_data')
                     if real:
                         q = real.get_real_time_data(sym)
@@ -1988,7 +2008,7 @@ class TradingAPI:
             marked on them (chart_data.py)."""
             from src.agent import chart_data
             from src.agent.cost_model import classify
-            symbol = (symbol or '').upper()
+            symbol = self._canonical_symbol(symbol)
             if symbol not in self._tracked_symbols():
                 return jsonify({'error': f'Unknown or untracked symbol: {symbol}'}), 404
             try:
