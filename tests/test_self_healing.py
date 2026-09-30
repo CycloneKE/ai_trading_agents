@@ -430,3 +430,10 @@ def test_the_test_email_command_says_what_is_missing_and_what_the_server_said(tm
     sent = []
     assert cmd.main(env=ENV, transport=lambda s, m: sent.append(m), log_path=tmp_path / 'a.jsonl') == 0
     assert sent[0]['Subject'].endswith('test alert: email is working') and 'b***@example.com' in capsys.readouterr().out
+
+
+def test_the_alert_log_is_read_correctly_even_when_lines_are_out_of_time_order(tmp_path):
+    log = AlertLog(tmp_path / 'a.jsonl')
+    for ts in ('2026-09-30T10:00:00+00:00', '2026-09-01T00:00:00+00:00', '2026-09-30T11:00:00+00:00'):
+        log.add({'ts': ts, 'key': ts, 'severity': 'info'})         # the middle one was written late
+    assert [a['ts'][:13] for a in log.recent(since='2026-09-29T00:00:00+00:00')] == ['2026-09-30T11', '2026-09-30T10']

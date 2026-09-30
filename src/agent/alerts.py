@@ -95,8 +95,10 @@ class AlertLog:
                 entry = json.loads(line)
             except ValueError:
                 continue
+            # Not `break`: a line is written when delivery finishes, under the
+            # time the alert was raised, so the file is not strictly in order.
             if since and str(entry.get('ts', '')) < since:
-                break
+                continue
             out.append(entry)
             if len(out) >= limit:
                 break

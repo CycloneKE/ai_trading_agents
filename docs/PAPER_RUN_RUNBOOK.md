@@ -175,6 +175,24 @@ market rose. Add `--offline` to skip the checks that need the internet.
 The targets are proposals, kept in `config/config.json` under
 `scorecard.targets`. Change them there if you disagree with a number.
 
+## Alerts on the dashboard
+
+Every alert the agent raises appears on the dashboard's Notifications page
+(the bell in the header), whether or not email is set up:
+
+- **What is wrong right now** (a background worker down, the trading loop
+  failing, symbols with no price) sits under "Needs your attention" and clears
+  by itself when the agent has fixed it.
+- **New alerts** (a halt, a restart, a crash) stay there, and on the bell's
+  count, until you press "Mark as read". Which alerts you have read is
+  remembered in your browser only, so another device starts afresh.
+- **Recent agent alerts** lists everything from the last week, with filters
+  for critical, warning and info. The operator sees the detail of each one;
+  a viewer sees the headline only.
+
+Without email you only see these while the dashboard is open, so it is worth
+looking at the bell each morning until email is set up.
+
 ## Email alerts and self-repair
 
 The agent emails you when it needs a person, and repairs what is safe to

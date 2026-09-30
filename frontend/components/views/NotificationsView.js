@@ -1,10 +1,13 @@
 // Notifications: everything the agent wants the operator to know, in one
 // place, split into what needs a decision and what is only for information.
 // Built by the dashboard shell (notificationItems) from the anomaly scan,
-// the approval queue, the halt switch and the dashboard's version check.
+// the approval queue, the halt switch, the dashboard's version check and the
+// agent's own alerts (agentAlerts.js), which are also listed here in full.
+import { useState } from 'react';
 import { Bell, AlertTriangle, Info } from 'lucide-react';
 import { theme } from '../DashboardStyles';
 import { card, SectionHeader, Empty, localTime } from '../ui';
+import { agentAlertItems, unreadAlerts } from '../agentAlerts';
 
 const DOT = { high: theme.colors.danger, medium: theme.colors.warning, low: theme.colors.textMuted, info: theme.colors.accent };
 
@@ -64,7 +67,8 @@ function aiItems(ai) {
 }
 
 // The one list the bell counts and this page shows.
-export function notificationItems({ anomalies = [], pendingApprovals = 0, status = {}, staleDashboard = false, ai = null }) {
+export function notificationItems({ anomalies = [], pendingApprovals = 0, status = {}, staleDashboard = false, ai = null,
+  agentAlerts = null, alertsSeenAt = null }) {
   const items = [];
   if (staleDashboard) {
     items.push({
@@ -87,6 +91,7 @@ export function notificationItems({ anomalies = [], pendingApprovals = 0, status
       hint: 'Open Research to approve or reject.',
     });
   }
+  items.push(...agentAlertItems({ agentAlerts, seenAt: alertsSeenAt, status }));
   items.push(...aiItems(ai));
   items.push(...reviewItems(ai && ai.review));
   anomalies.forEach((a, i) => items.push({
@@ -119,13 +124,74 @@ function Item({ item, onDrill, onGo }) {
   );
 }
 
-export default function NotificationsView({ items, isOperator, mobile, onDrill, onGo }) {
+const LEVELS = [['all', 'All'], ['critical', 'Critical'], ['warning', 'Warning'], ['info', 'Info']];
+const LEVEL_DOT = { critical: theme.colors.danger, warning: theme.colors.warning, info: theme.colors.accent };
+
+const chip = (on) => ({
+  background: on ? `${theme.colors.primary}22` : 'rgba(255,255,255,0.04)',
+  border: `1px solid ${on ? `${theme.colors.primary}80` : theme.colors.border}`,
+  color: on ? '#fff' : theme.colors.textSecondary, borderRadius: '999px',
+  padding: '5px 12px', fontSize: '11px', fontWeight: 800, cursor: 'pointer',
+});
+
+// Everything the agent has raised in the last week, newest first, whether or
+// not email is set up.
+function AgentAlerts({ agentAlerts, seenAt, isOperator, mobile }) {
+  const [level, setLevel] = useState('all');
+  if (!agentAlerts) return null;
+  const alerts = agentAlerts.alerts || [];
+  const unread = new Set(unreadAlerts(alerts, seenAt).map((a) => a.id));
+  const shown = level === 'all' ? alerts : alerts.filter((a) => a.severity === level);
+  const email = agentAlerts.email || {};
+  return (
+    <div style={card(mobile)}>
+      <SectionHeader title="Recent agent alerts" icon={Bell} />
+      <div style={{ fontSize: '12px', color: email.configured ? theme.colors.textMuted : theme.colors.warning, marginBottom: '12px', lineHeight: 1.5 }}>
+        {email.configured
+          ? `Email alerts are on (${(email.recipients || []).join(', ')}); ${email.sent_24h || 0} sent in the last day.`
+          : 'Email alerts are off, so you see these here, and only while this page is open. To also be emailed, set ALERT_EMAIL_TO and the SMTP_ variables in Coolify and redeploy.'}
+      </div>
+      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '10px' }}>
+        {LEVELS.map(([id, label]) => {
+          const n = id === 'all' ? alerts.length : alerts.filter((a) => a.severity === id).length;
+          return <button key={id} onClick={() => setLevel(id)} style={chip(level === id)}>{label} {n}</button>;
+        })}
+      </div>
+      {shown.length === 0 && <Empty>{alerts.length ? 'None at this level.' : 'The agent has raised no alerts in the last week.'}</Empty>}
+      {shown.map((a) => (
+        <div key={a.id} style={{ display: 'flex', gap: '12px', padding: '12px 4px', borderBottom: `1px solid ${theme.colors.border}`, alignItems: 'flex-start' }}>
+          <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: LEVEL_DOT[a.severity] || theme.colors.textMuted, flexShrink: 0, marginTop: '5px' }} />
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontSize: '13px', color: theme.colors.text, fontWeight: unread.has(a.id) ? 800 : 500 }}>
+              {a.subject}{unread.has(a.id) && <span style={{ marginLeft: '8px', fontSize: '10px', color: theme.colors.warning }}>NEW</span>}
+            </div>
+            {isOperator && a.body && (
+              <div style={{ fontSize: '12px', color: theme.colors.textMuted, marginTop: '3px', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{a.body}</div>
+            )}
+            <div style={{ fontSize: '11px', color: theme.colors.textMuted, marginTop: '2px' }}>
+              {localTime(a.ts)}{a.emailed === false ? ' · email could not be sent' : a.emailed === true ? ' · emailed' : ''}
+            </div>
+          </div>
+        </div>
+      ))}
+      {!isOperator && alerts.length > 0 && (
+        <div style={{ fontSize: '11px', color: theme.colors.textMuted, marginTop: '10px' }}>The details of each alert are shown to the operator only.</div>
+      )}
+    </div>
+  );
+}
+
+export default function NotificationsView({ items, isOperator, mobile, onDrill, onGo, agentAlerts = null, alertsSeenAt = null, onMarkRead }) {
   const attention = items.filter((i) => i.attention);
   const info = items.filter((i) => !i.attention);
+  const unreadCount = agentAlerts ? unreadAlerts(agentAlerts.alerts, alertsSeenAt).length : 0;
+  const markRead = unreadCount > 0 && onMarkRead ? (
+    <button onClick={onMarkRead} style={chip(false)}>Mark {unreadCount} alert{unreadCount > 1 ? 's' : ''} as read</button>
+  ) : null;
   return (
     <div style={{ display: 'grid', gap: mobile ? '16px' : '24px' }}>
       <div style={card(mobile)}>
-        <SectionHeader title="Needs your attention" icon={AlertTriangle} />
+        <SectionHeader title="Needs your attention" icon={AlertTriangle} right={markRead} />
         {attention.length
           ? attention.map((i) => <Item key={i.key} item={i} onDrill={onDrill} onGo={onGo} />)
           : <Empty>Nothing needs you right now.</Empty>}
@@ -136,6 +202,7 @@ export default function NotificationsView({ items, isOperator, mobile, onDrill, 
           ? info.map((i) => <Item key={i.key} item={i} onDrill={onDrill} onGo={onGo} />)
           : <Empty>Nothing to report.</Empty>}
       </div>
+      <AgentAlerts agentAlerts={agentAlerts} seenAt={alertsSeenAt} isOperator={isOperator} mobile={mobile} />
       <div style={card(mobile)}>
         <SectionHeader title="How this page works" icon={Bell} />
         <div style={{ fontSize: '12px', color: theme.colors.textSecondary, display: 'grid', gap: '6px' }}>
@@ -148,6 +215,12 @@ export default function NotificationsView({ items, isOperator, mobile, onDrill, 
             <strong>Needs your attention</strong>{' '}means something stopped a trade the agent should have made, or a decision
             is waiting for you. <strong>For your information</strong>{' '}means the agent&apos;s own rules held a signal back on
             purpose, such as not adding to a holding until it has earned it, or never betting on a fall.
+          </div>
+          <div>
+            <strong>Agent alerts</strong>{' '}are what the agent tells you about itself: a halt, a worker restarted, no price for
+            a symbol, a crash. New ones stay under &quot;Needs your attention&quot; until you press &quot;Mark as read&quot;;
+            things that are wrong right now clear by themselves when the agent has fixed them. All of them stay listed in
+            &quot;Recent agent alerts&quot; for a week.
           </div>
           {!isOperator && <div>Signal-level notices are shown to the operator only.</div>}
           <div>The bell in the header counts the items that need your attention.</div>

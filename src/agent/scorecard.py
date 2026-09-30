@@ -188,8 +188,9 @@ def _health(dec: List[Dict[str, Any]], start: datetime, now: datetime, healing: 
                           + (f" Last send error: {alerter['last_error']}" if alerter.get('last_error') else '')))
         else:
             out.append(_m('email', 'Email alerts', False, 'off', WATCH, 'on',
-                          'Nobody is told when the agent halts or breaks. Set ALERT_EMAIL_TO and the SMTP_* '
-                          'variables (see .env.example) and redeploy.'))
+                          "Alerts show on the dashboard's Notifications page, but nobody is emailed while it is "
+                          'closed. To be emailed as well, set ALERT_EMAIL_TO and the SMTP_* variables '
+                          '(see .env.example) and redeploy.'))
     week = (now - timedelta(days=7)).isoformat()
     recent = [a for a in alerts if str(a.get('ts', '')) >= week]
     restarts = sum(1 for a in recent if str(a.get('key', '')).endswith(':restarted'))
