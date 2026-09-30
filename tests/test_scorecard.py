@@ -432,3 +432,18 @@ def test_only_the_rows_the_scorecard_needs_are_loaded(tmp_path):
     dj._conn.commit()
     got = scorecard.read_inputs(str(tmp_path), CONFIG, now=datetime(2026, 9, 30, tzinfo=timezone.utc))['decisions']
     assert [(d['ts'][:10], d['action']) for d in got] == [('2026-09-05', 'buy'), ('2026-09-29', 'hold')]
+
+
+# ------------------------------------------------- the approved targets
+
+def test_the_approved_targets_in_config_json_match_what_the_scorecard_uses():
+    from src.utils.config_validator import load_config, validate_config
+    config = load_config('config/config.json')
+    assert validate_config(config) == []
+    written = {k: v for k, v in config['scorecard']['targets'].items()}
+    unknown = set(written) - set(scorecard.DEFAULT_TARGETS)
+    assert not unknown, f"not a real target: {unknown}"                       # a typo would be silently ignored
+    used = targets(config)
+    assert all(used[k] == v for k, v in written.items())
+    assert used['max_drawdown_pct'] == 100 * config['risk_management']['max_drawdown']
+    assert {**scorecard.DEFAULT_TARGETS, 'max_drawdown_pct': used['max_drawdown_pct']} == used

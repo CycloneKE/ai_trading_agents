@@ -20,6 +20,25 @@
     "loop_error_repeat_every": 30,
     "degraded_symbol_minutes": 30
   },
+  "scorecard": {
+    "_comment": "The bar the ninety-day paper run has to clear (src/agent/scorecard.py). Approved by the operator on 30 September 2026. Change a number here and the dashboard and scripts/agent_scorecard.py follow. max_drawdown_pct is left out on purpose: it follows risk_management.max_drawdown, so the account's own limit is the target; add it here to override that.",
+    "targets": {
+      "planned_days": 90,
+      "coverage_pct": 95,
+      "coverage_fail_pct": 80,
+      "degraded_share_pct": 5,
+      "degraded_fail_pct": 15,
+      "min_closed_trades": 30,
+      "profit_factor": 1.3,
+      "max_concentration_pct": 70,
+      "min_days_for_return": 14,
+      "min_forecast_signals": 100,
+      "min_forecast_watch": 30,
+      "horizons": [5, 20],
+      "tuner_max_age_days": 14,
+      "evidence_gate_trades": 5
+    }
+  },
   "llm_allocator": {
     "_comment": "An AI re-weighting of the strategies, OFF by default: the ensemble already tilts each strategy by its realised results (guardrails.evidence_tilt), and the AI is shown nothing more. To layer an AI on top set enabled to true; it then asks at most once a day, and only after min_new_trades more trades have closed.",
     "enabled": false,
