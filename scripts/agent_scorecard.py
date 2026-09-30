@@ -23,28 +23,24 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.agent import chart_data, scorecard                       # noqa: E402
+from src.agent import scorecard                                   # noqa: E402
 from src.agent.alerts import AlertLog, EmailAlerter               # noqa: E402
+from src.agent.signal_ledger import closes_provider              # noqa: E402
 from src.utils.config_validator import load_config                # noqa: E402
 from src.utils.paths import DATA_DIR                              # noqa: E402
 
 MARK = {'pass': '[PASS] ', 'watch': '[WATCH]', 'fail': '[FAIL] ', 'too_early': '[early]', 'info': '[info] '}
 
 
-def price_history(offline: bool):
-    """(closes_for, spy) from Yahoo Finance, cached per symbol; (None, None) offline."""
+def price_history(offline: bool, config=None):
+    """(closes_for, spy) for the forecast and S&P 500 checks; (None, None) offline.
+    A Kenyan stock is read from the NSE's own price files, never from Yahoo,
+    where its ticker can name a different company."""
     if offline:
         return None, None
-    cache = {}
-
-    def closes_for(symbol):
-        if symbol not in cache:
-            try:
-                cache[symbol] = scorecard.bars_to_closes(chart_data.yfinance_bars(symbol, period='2y'))
-            except Exception:
-                cache[symbol] = {}
-        return cache[symbol]
-
+    import logging
+    logging.getLogger('yfinance').setLevel(logging.CRITICAL)      # a missing symbol is not news here
+    closes_for = closes_provider(config)
     return closes_for, (closes_for('SPY') or None)
 
 
@@ -62,6 +58,11 @@ def render(card):
             lines.append(f"{MARK[m['status']]} {m['label']}: {m['display']}{target}")
             if m['note']:
                 lines.append(f"          {m['note']}")
+            if m['id'] == 'strategy_skill' and isinstance(m.get('detail'), list):
+                for r in m['detail']:
+                    few = '' if r['enough'] else ' (too few signals to say)'
+                    lines.append(f"          {r['source']:<15} {r['market']:<10} {r['hit_rate']:.0%} of {r['n']} right "
+                                 f"(chance {r['chance']:.0%}, z {r['z']:+.1f}, weight x{r['tilt']:.2f}){few}")
     lines += ['', 'Targets are proposals kept in config.json under scorecard.targets. Nothing here predicts the '
               'future: every figure is measured from what the agent did and what the market then did.']
     return '\n'.join(lines)
@@ -77,7 +78,7 @@ def main():
     args = p.parse_args()
 
     config = load_config(args.config) if os.path.exists(args.config) else {}
-    closes_for, spy = price_history(args.offline)
+    closes_for, spy = price_history(args.offline, config)
     alerter = EmailAlerter(config, log=AlertLog(os.path.join(args.data_dir, 'alerts.jsonl'))).status()
     inputs = scorecard.read_inputs(args.data_dir, config, closes_for=closes_for, spy=spy, alerter=alerter)
     card = scorecard.build(inputs, config)

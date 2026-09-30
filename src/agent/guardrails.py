@@ -20,6 +20,7 @@ Where each rule lives:
 | strategy_tuner.py | strategy settings | fixed bounds, one step, held-out evidence, weekly, frozen when halted |
 | strategy_manager rebalance | strategy weights from results | 0.1 floor, 0.3 smoothing, weekly |
 | strategy_manager adaptive_confidence | each vote's weight | evidence_tilt: none under 5 closed trades, then 0.5 to 1.5 by t-statistic, recomputed from the journal |
+| strategy_manager adaptive_confidence (OFF by default) | each vote's weight, per market | signal_tilt: none under 50 signals with a known outcome, then 0.5 to 1.5 by how far the hit rate beats chance, recomputed from the signal ledger |
 | llm_allocator.py (AI, off by default) | strategy weights | relative to neutral, 0.5 to 1.5, step 0.25, new-evidence gate, frozen when halted |
 | adaptive_integration.py | position size, risk tolerance | reduce-only, floors, capped at max_position_size |
 | self_assessment.py (AI) | nothing: advice only | evidence gate, checked suggestions |
@@ -108,6 +109,31 @@ def enough_evidence(closed_trades: int, minimum: int) -> bool:
 
 TILT_LOW, TILT_HIGH = 0.5, 1.5
 MIN_TILT_TRADES = 5
+
+
+MIN_SIGNAL_TILT = 50
+
+
+def signal_tilt(signals: Any, z: Any, min_signals: int = MIN_SIGNAL_TILT) -> float:
+    """How much a strategy's vote in one market is scaled by what its signals
+    did next (signal_ledger.py), as opposed to what its closed trades made.
+
+    `z` is how many standard errors the strategy's hit rate sits above what
+    chance gives for the same symbols and days, so a lucky handful cannot
+    look as convincing as a long record. The tilt is 1.0 (no change) until
+    there are `min_signals` signals with a known outcome, then 1 + z/6, held
+    to 0.5 to 1.5: a z of 3 earns the largest boost, and a strategy whose
+    signals are clearly worse than chance is halved, never switched off.
+    Symmetric, and recomputed from the ledger each time, so it cannot drift
+    on its own.
+    """
+    try:
+        n, z = int(signals or 0), float(z or 0.0)
+    except (TypeError, ValueError):
+        return 1.0
+    if n < int(min_signals) or z != z:
+        return 1.0
+    return max(TILT_LOW, min(TILT_HIGH, 1.0 + z / 6.0))
 
 
 def evidence_tilt(closed_trades: Any, t_stat: Any, min_trades: int = MIN_TILT_TRADES) -> float:

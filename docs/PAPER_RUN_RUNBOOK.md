@@ -175,6 +175,33 @@ market rose. Add `--offline` to skip the checks that need the internet.
 The targets are proposals, kept in `config/config.json` under
 `scorecard.targets`. Change them there if you disagree with a number.
 
+## Learning from every signal, not only closed trades
+
+The agent is long-only and selective, so trades close slowly; early in a run
+there may be none, and until a strategy has closed five trades its weight is
+not adjusted from results. So the agent also learns from every buy or sell
+signal it produces, traded or not, by each strategy on its own:
+
+- It records what the price did 5 and 20 trading days later, in the signal's
+  direction, and how often that symbol simply went up anyway. Outcomes are
+  recorded once known, never change, and are kept in `data/signal_outcomes.db`,
+  so a redeploy cannot lose them. It refreshes every six hours.
+- The scorecard's Learning section shows, for each strategy in each market,
+  how often its signals moved the right way against how often chance would
+  have, and a "z" for how many standard errors that is. About 2 or more is a
+  real result; a row with under 50 signals is greyed as too few to say.
+
+By default it only measures and shows. Nothing about how the agent trades
+changes. Once a strategy shows a clear result in a market, you can let it act
+on it by setting `learning.signal_skill_tilt.enabled` to `true` in
+`config/config.json`. The strategy's vote in that market is then scaled from
+0.5 to 1.5 times, never more, never off, and only after 50 signals with a known
+outcome. Review the table first; the "weight scale" column shows what each
+strategy would get.
+
+This measures direction, before costs, on each strategy's raw signal. It is
+evidence of skill, not of profit.
+
 ## Alerts on the dashboard
 
 Every alert the agent raises appears on the dashboard's Notifications page
