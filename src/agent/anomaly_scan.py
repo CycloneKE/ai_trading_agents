@@ -57,6 +57,8 @@ HELD_BACK = {
     'dissent': "no strategy agreed with the direction",
     'liquidity_cap': "the stock trades too thinly to buy even one share within the volume limit",
     'market_closed': "its market is closed (US stocks or forex); the signal is looked at again when it opens",
+    'reentry_cooldown': "it was sold within the last 24 hours; the agent waits before buying it back, so a stop-out "
+                        "followed by a buy at the same price cannot repeat all day",
 }
 BLOCKED = {
     'insufficient_cash': ("there was not enough paper cash",

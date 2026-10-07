@@ -46,6 +46,7 @@ SKIP_REASONS = {
     'liquidity_cap',      # NSE: too little trading volume for even one share
     'stale_price',        # NSE: the latest real price is too old to act on
     'market_closed',      # US stock or forex signal while its market is shut
+    'reentry_cooldown',   # sold within the last day: not bought back yet
 }
 
 _SCHEMA = """

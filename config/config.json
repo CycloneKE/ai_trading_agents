@@ -18,7 +18,9 @@
     "auto_resume": {"enabled": true, "healthy_seconds": 600, "max_per_day": 3},
     "loop_error_alert_at": [3, 10],
     "loop_error_repeat_every": 30,
-    "degraded_symbol_minutes": 30
+    "degraded_symbol_minutes": 30,
+    "churn_alert_trips": 3,
+    "churn_check_minutes": 10
   },
   "learning": {
     "_comment": "Learning from every signal's later price move, not only from closed trades (src/agent/signal_ledger.py). The agent records what each strategy's signals did 5 and 20 trading days later, per market, and the scorecard shows each strategy's hit rate against chance. With signal_skill_tilt.enabled false (the default) it only measures. Set it to true and, once a strategy has min_signals signals with a known outcome in a market, its vote there is scaled 0.5x to 1.5x by how far it beats chance (guardrails.signal_tilt). Review the scorecard's Learning section before switching it on.",
@@ -336,6 +338,8 @@
   },
   "trading": {
     "initial_capital": 100000,
+    "_reentry_cooldown_hours": "After a strategy or a stop sells a symbol, the agent will not open a new position in it for this many hours (0 turns it off). The strategies work on daily bars, so a buy signal minutes after an exit is the same signal. Without a pause, a stop-out followed by a buy at nearly the same price repeated all day and cost the spread and fees each time.",
+    "reentry_cooldown_hours": 24,
     "commission": 0.001,
     "slippage": 0.0005,
     "risk_per_trade": 0.005,

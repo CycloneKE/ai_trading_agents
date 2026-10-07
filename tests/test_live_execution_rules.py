@@ -105,6 +105,7 @@ def agent_for(tmp_path, monkeypatch):
                                    filled_avg_price=o.fill_price)
             return agent._cycle_decisions[symbol]
         cycle.journal = journal
+        cycle.agent = agent
         return cycle
     return build
 
@@ -153,10 +154,21 @@ def test_unknown_holdings_mean_no_order(agent_for):
     assert broker.orders == []
 
 
-def test_buy_then_exit_then_buy_again(agent_for):
-    """The full round trip the backtest trades."""
+def test_a_symbol_just_sold_is_not_bought_back_for_a_day(agent_for):
+    """A buy signal minutes after an exit is the same signal, not news. Without
+    the pause a stop-out followed by a buy at the same price repeated all day."""
     broker = FillingBroker(price=500.0)
     cycle = agent_for(broker)
+    cycle('buy'); cycle('buy'); cycle('sell'); cycle('sell')
+    assert cycle('buy').get('skip_reason') == 'reentry_cooldown'
+    assert [o.side for o in broker.orders] == ['buy', 'sell']
+
+
+def test_buy_then_exit_then_buy_again_once_the_pause_is_off(agent_for):
+    """The full round trip the backtest trades (the backtest has no pause)."""
+    broker = FillingBroker(price=500.0)
+    cycle = agent_for(broker)
+    cycle.agent.config['trading']['reentry_cooldown_hours'] = 0
     cycle('buy'); cycle('buy'); cycle('sell'); cycle('sell'); cycle('buy')
     assert [o.side for o in broker.orders] == ['buy', 'sell', 'buy']
 

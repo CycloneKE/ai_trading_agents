@@ -175,6 +175,36 @@ market rose. Add `--offline` to skip the checks that need the internet.
 The targets are proposals, kept in `config/config.json` under
 `scorecard.targets`. Change them there if you disagree with a number.
 
+## Is the agent buying and selling the same thing over and over?
+
+A strategy that trades daily bars should hold a position for days. If the same
+symbol is bought and sold again and again within minutes, every pass pays the
+spread and the fees and earns nothing. In the first weeks of the paper run a
+trailing stop closed a crypto position, the strategy still said buy, the agent
+bought it back at nearly the same price, the new position inherited the old
+one's trailing-stop peak, and it was stopped out again within minutes: hundreds
+of round trips, about 15% winners, a loss of 2.7% of the account.
+
+Three things now guard against it:
+
+- a position the agent closes no longer leaves a trailing-stop peak behind;
+- a symbol sold by a strategy or a stop is not bought back for 24 hours
+  (`trading.reentry_cooldown_hours`; the Notifications page shows such a signal
+  as held back, and the kill switch's flatten does not count);
+- the pattern is watched whatever the cause: the scorecard's Health section
+  shows how many positions were sold within an hour of buying, and the agent
+  emails you (critical) when one symbol does it three times in a day.
+
+To look at it yourself:
+
+```bash
+python scripts/churn_report.py
+python scripts/churn_report.py --hours 72 --symbol BTC-USD
+```
+
+It lists, per symbol, how many round trips closed within an hour of opening,
+how long they were held, what they made and what closed them.
+
 ## Learning from every signal, not only closed trades
 
 The agent is long-only and selective, so trades close slowly; early in a run
