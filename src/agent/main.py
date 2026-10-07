@@ -1888,7 +1888,8 @@ class TradingAgent:
         if not store.due(cfg, now):
             return None
         configured = [s.upper() for s in self.config.get('data_manager', {}).get('nse_symbols', [])]
-        ranked = nse_screener.screen(market_symbols(NSE_CSV_DIR, configured), NSE_CSV_DIR, cfg)
+        today = (now or datetime.now(timezone.utc)).date()
+        ranked = nse_screener.screen(market_symbols(NSE_CSV_DIR, configured), NSE_CSV_DIR, cfg, today=today)
         held = TradingAgent._nse_held(self)
         sl = nse_screener.refresh(ranked, held, cfg, configured,
                                   llm or self.components.get('llm_orchestrator'), now)

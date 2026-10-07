@@ -445,6 +445,11 @@ def test_the_scan_endpoint_shows_the_screen_and_the_traded_list(tmp_path, monkey
     monkeypatch.setattr(nse_connector, 'NSE_CSV_DIR', csvs)
     monkeypatch.setattr(api_server, 'DATA_DIR', tmp_path)
     _exchange(csvs)
+    _exchange(csvs)
+    # The route screens against the real date; the fixture's prices end on TODAY,
+    # so pin the screener's clock there or they go stale as the calendar moves on.
+    real_screen = scr.screen
+    monkeypatch.setattr(scr, 'screen', lambda syms, d, cfg, today=None: real_screen(syms, d, cfg, today or TODAY))
     agent = SimpleNamespace(components={}, config={'data_manager': {'nse_symbols': ['SCOM', 'KCB']},
                                                    'nse_screener': {'enabled': True}})
     client = api_server.TradingAPI(agent, {}).app.test_client()
