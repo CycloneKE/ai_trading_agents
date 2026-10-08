@@ -218,6 +218,18 @@ class OrderJournal:
             rows = cur.fetchall()
         return [dict(r) for r in rows]
 
+    def last_exit_at(self, symbol: str) -> Optional[str]:
+        """When `symbol` was last sold by a strategy or a stop (ISO, UTC), or
+        None. The kill switch's flatten and the core funds' rebalance are not
+        exits in this sense: an operator who halts, flattens and resumes expects
+        the agent to trade again."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(created_at) FROM orders WHERE symbol = ? AND side = 'sell'"
+                " AND status IN ('intent', 'submitted', 'partially_filled', 'filled')"
+                " AND COALESCE(strategy, '') NOT IN ('kill_switch', 'core')", (symbol,)).fetchone()
+        return row[0] if row and row[0] else None
+
     def orders_for_symbol(self, symbol: str, limit: int = 100) -> List[Dict[str, Any]]:
         """Every journaled order for a symbol, newest first — the drill-down's
         order/fill history (decision price, fill price, status, strategy)."""

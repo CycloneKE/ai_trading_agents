@@ -134,6 +134,32 @@ class RealTimeRiskManager:
         except Exception as e:
             logger.warning(f"Could not save trailing-stop peaks: {e}")
 
+    def forget_peak(self, symbol: str) -> None:
+        """Discard a symbol's trailing-stop peak because the position is closed.
+
+        A peak is kept across restarts and across a broker's empty answer, and
+        was told apart from a new holding only by its entry price. A stop-out
+        followed by a re-entry at nearly the same price (the strategy still says
+        buy) looked like the same holding: the new position inherited the old
+        peak, was stopped within minutes, and the agent sold, bought back and
+        sold again all day, paying the spread and fees each time. The agent
+        calls this when it closes a position itself, so the next one starts
+        from its own price.
+        """
+        saved = getattr(self, '_saved_peaks', None)
+        if saved is not None:
+            saved.pop(symbol, None)
+        pos = self.positions.get(symbol)
+        if pos is not None:
+            pos['high_watermark'] = 0.0          # re-seeded from the price at the next sync
+        conn = getattr(self, '_risk_db_conn', None)
+        if conn is not None:
+            try:
+                conn.execute("DELETE FROM risk_state WHERE key = ?", (f"peak:{symbol}",))
+                conn.commit()
+            except Exception as e:
+                logger.warning(f"Could not forget the trailing-stop peak for {symbol}: {e}")
+
     def set_persistent_kill_switch(self, active: bool, reason: str = ""):
         """Set kill switch state in memory and persist to DB."""
         self.emergency_stop = active

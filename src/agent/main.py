@@ -430,6 +430,17 @@ class TradingAgent:
         broker = bm.get_broker(FOREX_BOOK) if bm is not None else None
         return broker if broker is not None and getattr(broker, 'is_connected', False) else None
 
+    def _forget_peak(self, symbol: str) -> None:
+        """A position the agent has just closed no longer has a trailing-stop
+        peak: the next one starts from its own price (see
+        RealTimeRiskManager.forget_peak)."""
+        rm = getattr(self, 'risk_manager', None)
+        if rm is not None and hasattr(rm, 'forget_peak'):
+            try:
+                rm.forget_peak(symbol)
+            except Exception as e:
+                logger.debug(f"Could not forget the peak for {symbol}: {e}")
+
     def _books(self):
         """Every connected book the loop trades: the primary broker's, then
         the forex paper book when there is one."""
@@ -467,9 +478,35 @@ class TradingAgent:
             return False, 'order_pending', held, avg_entry
         if action == 'sell' and held <= 0:
             return False, 'no_position', held, avg_entry
+        if action == 'buy' and held <= 0 and TradingAgent._in_reentry_cooldown(self, symbol):
+            return False, 'reentry_cooldown', held, avg_entry
         # A buy on a holding is an add: _execute_trades decides whether the
         # position has earned one (position_rules.plan_add).
         return True, None, held, avg_entry
+
+    def _in_reentry_cooldown(self, symbol: str, now: Optional[datetime] = None) -> bool:
+        """Whether `symbol` was sold by a strategy or a stop too recently to buy again.
+
+        The strategies work on daily bars, so a signal that comes back minutes
+        after an exit is the same signal, not news. Without a pause a stop-out
+        followed by a buy at nearly the same price repeats all day, and each
+        round trip costs the spread and fees. `trading.reentry_cooldown_hours`
+        (24; 0 turns it off) is that pause. Adds to a holding are not affected,
+        only opening a new one.
+        """
+        hours = float((self.config.get('trading') or {}).get('reentry_cooldown_hours', 24) or 0)
+        journal = getattr(self, 'order_journal', None)
+        if hours <= 0 or journal is None or not hasattr(journal, 'last_exit_at'):
+            return False
+        try:
+            last = journal.last_exit_at(symbol)
+            if not last:
+                return False
+            sold = datetime.fromisoformat(str(last)[:26])
+            return ((now or datetime.utcnow()) - sold).total_seconds() < hours * 3600
+        except Exception as e:
+            logger.debug(f"Re-entry cooldown check failed for {symbol}: {e}")
+            return False
 
     def _history_needed(self, symbol: Optional[str] = None, required_only: bool = True) -> int:
         """Daily bars a symbol needs before every strategy can signal.
@@ -1851,7 +1888,8 @@ class TradingAgent:
         if not store.due(cfg, now):
             return None
         configured = [s.upper() for s in self.config.get('data_manager', {}).get('nse_symbols', [])]
-        ranked = nse_screener.screen(market_symbols(NSE_CSV_DIR, configured), NSE_CSV_DIR, cfg)
+        today = (now or datetime.now(timezone.utc)).date()
+        ranked = nse_screener.screen(market_symbols(NSE_CSV_DIR, configured), NSE_CSV_DIR, cfg, today=today)
         held = TradingAgent._nse_held(self)
         sl = nse_screener.refresh(ranked, held, cfg, configured,
                                   llm or self.components.get('llm_orchestrator'), now)
@@ -2457,6 +2495,8 @@ class TradingAgent:
 
                             # PLACE THE REAL ORDER
                             order_result = broker.place_order(order)
+                            if order_result and action == 'sell' and sell_qty >= held_qty * 0.999:
+                                TradingAgent._forget_peak(self, symbol)           # a full exit: the peak goes with it
                             if self.order_journal:
                                 if order_result:
                                     self.order_journal.mark_submitted(
@@ -2575,6 +2615,7 @@ class TradingAgent:
                         self.order_journal.mark_failed(coid, 'flatten order got no response')
                 if resp:
                     result['close_orders'] += 1
+                    TradingAgent._forget_peak(self, p.symbol)
                     logger.warning(f"Kill switch: closing {p.quantity} {p.symbol} ({coid})")
                 else:
                     result['errors'].append(f'close {p.symbol}: no response')
@@ -2770,6 +2811,7 @@ class TradingAgent:
                                 self.order_journal.mark_failed(coid, 'place_order returned no response')
                         if result:
                             logger.info(f"Stop-loss order placed for {position.symbol}: {result.order_id}")
+                            TradingAgent._forget_peak(self, position.symbol)
                             if self.monitoring_service:
                                 self.monitoring_service.record_trade(
                                     action='stop_loss_sell',
@@ -2815,6 +2857,7 @@ class TradingAgent:
                                         self.order_journal.mark_failed(coid, 'place_order returned no response')
                                 if result:
                                     logger.info(f"Trailing stop-loss order placed for {position.symbol}: {result.order_id}")
+                                    TradingAgent._forget_peak(self, position.symbol)
                                     if self.monitoring_service:
                                         self.monitoring_service.record_trade(
                                             action='trailing_stop_sell',

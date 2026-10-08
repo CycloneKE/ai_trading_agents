@@ -28,7 +28,7 @@ def closed_round_trips(fills: List[Dict[str, Any]],
 
     FIFO-matched and long only: a sell closes the oldest held lots of that
     symbol first, and a sell with nothing held closes nothing. Each trip
-    is {'symbol', 'exit', 'ret', 'cost', 'days'}:
+    is {'symbol', 'exit', 'ret', 'cost', 'days', 'closed_at'}:
 
     - `exit` is what closed it: 'stop_loss', 'trailing_stop' or
       'kill_switch' when the journal says a rule forced it, else 'signal';
@@ -36,7 +36,8 @@ def closed_round_trips(fills: List[Dict[str, Any]],
       fill price leaves out (cost_model.fill_gap_pct), as a fraction;
     - `cost` is what the matched shares cost to buy, so `ret * cost` is the
       profit or loss in the account's own currency;
-    - `days` is how long the lot was held, or None when a time is missing.
+    - `days` is how long the lot was held, or None when a time is missing;
+    - `closed_at` is when it was sold (ISO, UTC), or None.
 
     A sell that closes several lots is several trips: the lots were bought
     separately, so each is its own result.
@@ -67,7 +68,8 @@ def closed_round_trips(fills: List[Dict[str, Any]],
             days = ((sold_at - lot[2]).total_seconds() / 86400.0) if lot[2] and sold_at else None
             trips.append({'symbol': sym, 'exit': tag,
                           'ret': ratio - 1.0 - gap * (1.0 + ratio),
-                          'cost': matched * lot[1], 'days': days})
+                          'cost': matched * lot[1], 'days': days,
+                          'closed_at': sold_at.isoformat() if sold_at else None})
             lot[0] -= matched
             remaining -= matched
             if lot[0] <= 1e-9:

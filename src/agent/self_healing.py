@@ -23,6 +23,7 @@ What this adds, and what it will never do:
 | The trading loop raises an error again and again | Emailed at 3 in a row, again at 10 (critical) and every 30 after |
 | A symbol has no real price for `degraded_symbol_minutes` | Emailed, with the symbols |
 | The process was killed rather than stopped cleanly | Emailed on the next start |
+| A symbol is bought and sold again within the hour `churn_alert_trips` times in a day | Emailed, with the symbols (the agent also refuses to buy back a symbol within 24 hours of selling it) |
 
 It only ever un-halts a halt the agent itself caused by freezing, and never
 places or changes an order. Everything it does is recorded in the alert log.
@@ -59,6 +60,8 @@ DEFAULTS: Dict[str, Any] = {
     'loop_error_alert_at': [3, 10],
     'loop_error_repeat_every': 30,
     'degraded_symbol_minutes': 30,
+    'churn_alert_trips': 3,          # sold within an hour of buying, this many times in a day
+    'churn_check_minutes': 10,
 }
 
 
@@ -339,6 +342,7 @@ class SelfHealing:
         self.degradation = DegradationWatch(alerter, self.cfg['degraded_symbol_minutes'], clock)
         self.run_state = run_state or RunState(clock=clock)
         self.resumes: List[Dict[str, Any]] = []
+        self._last_churn_check = 0.0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -373,7 +377,33 @@ class SelfHealing:
     def tick(self) -> None:
         self.supervisor.check_once()
         self._maybe_resume()
+        self._check_churn()
         self.run_state.touch()
+
+    def _check_churn(self) -> None:
+        """Tell the operator when a symbol is being bought and sold again and
+        again within the hour, whatever the cause."""
+        now = self._clock()
+        if now - self._last_churn_check < float(self.cfg['churn_check_minutes']) * 60:
+            return
+        self._last_churn_check = now
+        journal = getattr(self.agent, 'order_journal', None)
+        if journal is None:
+            return
+        from src.agent import churn
+        recent = churn.recent(journal.filled_orders(), getattr(self.agent, 'config', None), hours=24)
+        bad = {s: r for s, r in recent.items() if r['n'] >= int(self.cfg['churn_alert_trips'])}
+        if not bad:
+            return
+        lines = '\n'.join(f"  {s}: {r['n']} times, typically held {r['median_minutes']:.0f} minutes, "
+                          f"average {r['mean_return_pct']:+.2f}% a time, closed by {r['exits']}" for s, r in bad.items())
+        self.alerter.send(
+            'heal:churn', f"{len(bad)} position(s) are being bought and sold again within the hour",
+            f"In the last 24 hours:\n{lines}\n\nA strategy on daily bars should hold for days. Each pass pays the "
+            f"spread and fees for nothing. The agent will not buy a symbol back within "
+            f"{(getattr(self.agent, 'config', None) or {}).get('trading', {}).get('reentry_cooldown_hours', 24)} hours "
+            f"of selling it, so this should stop; if it does not, halt trading and look at the stops.",
+            'critical', cooldown_s=6 * 3600)
 
     def _maybe_resume(self) -> None:
         agent = self.agent

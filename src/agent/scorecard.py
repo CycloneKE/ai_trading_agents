@@ -115,8 +115,32 @@ def targets(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
 # ------------------------------------------------------------------- health
 
+def _churn(trips: List[Dict[str, Any]], now: datetime) -> Dict[str, Any]:
+    """Positions sold within an hour of being bought, over the last week. A
+    daily-bar strategy should hold for days; repeating this is paying the
+    spread and fees for nothing (src/agent/churn.py)."""
+    from src.agent import churn
+    label = 'Positions sold within an hour of buying, last 7 days'
+    week = now - timedelta(days=7)
+    closed = [x for x in trips if (c := _ts(x.get('closed_at'))) and c >= week]
+    quick = churn.quick_trips(closed)
+    if not closed:
+        return _m('churn', label, 0, 'none closed', INFO, 'none, or very few', 'No trades have closed this week.')
+    share = len(quick) / len(closed)
+    worst = churn.by_symbol(quick)
+    status = FAIL if (len(quick) >= 5 and share >= 0.3) else WATCH if len(quick) >= 3 else PASS
+    top = ', '.join(f"{s} {r['n']}" for s, r in list(worst.items())[:4])
+    note = ('No position was sold within the hour.' if not quick else
+            f"{len(quick)} of {len(closed)} closed trades ({share:.0%}): {top}. " +
+            ('The agent is buying and selling the same position over and over, paying the spread and fees each '
+             'time. Look for a stop that fires straight after a purchase.' if status != PASS else ''))
+    return _m('churn', label, len(quick), f"{len(quick)} of {len(closed)}", status, 'none, or very few', note.strip(),
+              detail=worst)
+
+
 def _health(dec: List[Dict[str, Any]], start: datetime, now: datetime, healing: Optional[Dict[str, Any]],
-            alerts: List[Dict[str, Any]], alerter: Optional[Dict[str, Any]], t: Dict[str, Any]) -> List[Dict[str, Any]]:
+            alerts: List[Dict[str, Any]], alerter: Optional[Dict[str, Any]], t: Dict[str, Any],
+            trips: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     window_start = max(start, now - timedelta(days=7))
     hours = int((now - window_start).total_seconds() // 3600)
@@ -154,6 +178,8 @@ def _health(dec: List[Dict[str, Any]], start: datetime, now: datetime, healing: 
                        f"{len(bad)} of {len(rows)}: " + ', '.join(f"{r} {n}" for r, n in worst) +
                        f". Most affected: {top}."),
                       detail={'by_reason': dict(worst), 'by_symbol': syms}))
+    if trips is not None:
+        out.append(_churn(trips, now))
     if healing is None:
         out.append(_m('halted', 'Trading halted right now', None, 'not known', INFO, 'not halted',
                       'Only the running agent knows this; the dashboard shows it.'))
@@ -584,7 +610,7 @@ def build(inputs: Dict[str, Any], config: Optional[Dict[str, Any]] = None,
 
     body = {
         'health': _health(dec, start, now, inputs.get('healing'), inputs.get('alerts') or [],
-                          inputs.get('alerter'), t),
+                          inputs.get('alerter'), t, trips),
         'evidence': _evidence(trips, attribution, days, t),
         'edge': _edge(trips, t),
         'returns': _returns(inputs.get('equity') or [], inputs.get('spy'), t),
