@@ -343,6 +343,10 @@ class SelfHealing:
         self.run_state = run_state or RunState(clock=clock)
         self.resumes: List[Dict[str, Any]] = []
         self._last_churn_check = 0.0
+        # Only churn since this process started counts for the alert: what an
+        # earlier version did is history, and raising a critical alert about it
+        # for a day after the fix would hide whether the fix works.
+        self._started_at = datetime.fromtimestamp(clock(), tz=timezone.utc)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -391,7 +395,8 @@ class SelfHealing:
         if journal is None:
             return
         from src.agent import churn
-        recent = churn.recent(journal.filled_orders(), getattr(self.agent, 'config', None), hours=24)
+        recent = churn.recent(journal.filled_orders(), getattr(self.agent, 'config', None), hours=24,
+                              since=self._started_at)
         bad = {s: r for s, r in recent.items() if r['n'] >= int(self.cfg['churn_alert_trips'])}
         if not bad:
             return
@@ -399,7 +404,7 @@ class SelfHealing:
                           f"average {r['mean_return_pct']:+.2f}% a time, closed by {r['exits']}" for s, r in bad.items())
         self.alerter.send(
             'heal:churn', f"{len(bad)} position(s) are being bought and sold again within the hour",
-            f"In the last 24 hours:\n{lines}\n\nA strategy on daily bars should hold for days. Each pass pays the "
+            f"Since the agent last started (within the last 24 hours):\n{lines}\n\nA strategy on daily bars should hold for days. Each pass pays the "
             f"spread and fees for nothing. The agent will not buy a symbol back within "
             f"{(getattr(self.agent, 'config', None) or {}).get('trading', {}).get('reentry_cooldown_hours', 24)} hours "
             f"of selling it, so this should stop; if it does not, halt trading and look at the stops.",

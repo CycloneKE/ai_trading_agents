@@ -83,7 +83,7 @@ export function agentAlertItems({ agentAlerts, seenAt, status = {}, now = Date.n
       const severity = SEVERITY[a.severity] || 'medium';
       items.push({
         key: `alert-${a.id}`, severity, attention: a.severity !== 'info',
-        message: sentence(a.subject), hint: a.body ? String(a.body).slice(0, 400) : undefined,
+        message: sentence(a.subject), hint: a.body ? String(a.body).slice(0, 1500) : undefined,
         lastAt: a.ts, lastLabel: 'Raised',
       });
     });

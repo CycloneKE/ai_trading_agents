@@ -57,8 +57,13 @@ def by_symbol(quick: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
 
 
 def recent(fills: List[Dict[str, Any]], config: Optional[Dict[str, Any]], hours: float = 24.0,
-           now: Optional[datetime] = None, quick_hours: float = QUICK_HOURS) -> Dict[str, Dict[str, Any]]:
-    """Quick round trips by symbol over the last `hours`, from filled orders."""
+           now: Optional[datetime] = None, quick_hours: float = QUICK_HOURS,
+           since: Optional[datetime] = None) -> Dict[str, Dict[str, Any]]:
+    """Quick round trips by symbol over the last `hours`, from filled orders,
+    and no earlier than `since` when given."""
     from src.agent.round_trips import closed_round_trips
     now = now or datetime.now(timezone.utc)
-    return by_symbol(quick_trips(closed_round_trips(fills, config), now - timedelta(hours=hours), quick_hours))
+    start = now - timedelta(hours=hours)
+    if since is not None and since > start:
+        start = since
+    return by_symbol(quick_trips(closed_round_trips(fills, config), start, quick_hours))

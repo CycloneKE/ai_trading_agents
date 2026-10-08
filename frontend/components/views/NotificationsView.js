@@ -112,7 +112,7 @@ function Item({ item, onDrill, onGo }) {
                      flexShrink: 0, marginTop: '5px' }} />
       <div style={{ minWidth: 0, flex: 1 }}>
         <div style={{ fontSize: '13px', color: theme.colors.text }}>{item.message}</div>
-        {item.hint && <div style={{ fontSize: '12px', color: theme.colors.textMuted, marginTop: '3px' }}>{item.hint}</div>}
+        {item.hint && <div style={{ fontSize: '12px', color: theme.colors.textMuted, marginTop: '3px', whiteSpace: 'pre-line' }}>{item.hint}</div>}
         {item.lastAt && <div style={{ fontSize: '11px', color: theme.colors.textMuted, marginTop: '2px' }}>{item.lastLabel || 'Last seen'} {localTime(item.lastAt)}</div>}
       </div>
       {act && (

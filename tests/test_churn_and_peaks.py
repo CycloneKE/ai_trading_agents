@@ -301,3 +301,26 @@ def test_a_couple_of_quick_trades_or_none_is_not_an_alarm_and_the_check_is_rate_
     clock['t'] += 11 * 60
     sh._check_churn()
     assert len(calls) == 1
+
+
+def test_churn_from_before_the_agent_started_is_history_not_an_alarm(tmp_path):
+    # The old version churned for a week; the fixed one has just been deployed.
+    sh, sent, clock = healing_with(tmp_path, fills(6))
+    sh._started_at = datetime.now(timezone.utc) + timedelta(minutes=1)
+    sh._check_churn()
+    assert sent == []
+
+
+def test_churn_after_the_agent_started_still_raises_the_alarm_so_a_failed_fix_is_seen(tmp_path):
+    sh, sent, clock = healing_with(tmp_path, fills(6))
+    sh._started_at = datetime.now(timezone.utc) - timedelta(hours=3)
+    sh._check_churn()
+    assert len(sent) == 1 and 'BTC-USD: 6 times' in sent[0].get_content()
+    assert 'Since the agent last started' in sent[0].get_content()
+
+
+def test_recent_can_be_limited_to_trips_closed_after_a_given_time():
+    f = fills(6)
+    now = datetime.now(timezone.utc)
+    assert churn.recent(f, CONFIG, since=now - timedelta(hours=2))['BTC-USD']['n'] == 6
+    assert churn.recent(f, CONFIG, since=now + timedelta(minutes=1)) == {}
