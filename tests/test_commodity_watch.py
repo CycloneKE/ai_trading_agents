@@ -227,9 +227,9 @@ def test_the_watch_updates_in_the_background_when_due_and_can_be_switched_off(tm
     assert w.maybe_update() is False                                   # not due again for hours
     t['now'] += 13 * 3600
     assert w.due()
-    off = cw.CommodityWatch({'watch_only': {'commodities': {'enabled': False}}}, data_dir=str(tmp_path / 'off'),
-                            closes_for=lambda s: {})
-    assert off.maybe_update() is False
+    off = cw.CommodityWatch({'watch_only': {'commodities': {'enabled': False}, 'equity_markets': {'enabled': False}}},
+                            data_dir=str(tmp_path / 'off'), closes_for=lambda s: {})
+    assert off.maybe_update() is False and off.items == []
 
 
 # ------------------------------------------------------------------ safety
@@ -249,8 +249,9 @@ def test_the_shipped_watch_list_is_sound():
     items = cw.instruments(json.load(open('config/config.json', encoding='utf-8')))
     symbols = [i['symbol'] for i in items]
     assert len(symbols) == len(set(symbols)) >= 20
-    assert {i['group'] for i in items} == {'metals', 'energy', 'agriculture'}
-    assert {i['kind'] for i in items} == {'futures', 'fund'}
+    assert {i['group'] for i in items} == {'metals', 'energy', 'agriculture', 'uk_equities', 'japan_equities',
+                                           'france_equities', 'south_africa_equities'}
+    assert {i['kind'] for i in items} == {'futures', 'fund', 'stock', 'index'}
 
 
 # --------------------------------------------------------------------- API
@@ -275,3 +276,131 @@ def test_the_dashboard_can_read_the_watch_report(tmp_path, monkeypatch):
     assert r.status_code == 200 and data['enabled'] is True and data['horizon'] == 20
     assert data['backfill']['signals'] > 0 and data['instruments'][0]['symbol'] == 'GC=F'
     assert client.get('/api/watch/commodities').status_code in (401, 403)
+
+
+# ------------------------------------------------------------ stock markets
+
+def test_the_four_stock_markets_each_have_an_index_a_fund_and_several_companies_with_a_unit():
+    items = cw.instruments({})
+    for group, suffix in (('uk_equities', '.L'), ('japan_equities', '.T'), ('france_equities', '.PA'),
+                          ('south_africa_equities', '.JO')):
+        mine = [i for i in items if i['group'] == group]
+        assert {'index', 'fund', 'stock'} <= {i['kind'] for i in mine} and len(mine) >= 9
+        assert all(i['quote'] for i in mine)
+        assert all(i['symbol'].endswith(suffix) or i['kind'] == 'index' for i in mine)
+    assert {i['quote'] for i in items if i['group'] == 'uk_equities'} == {'points', 'pence'}
+    assert {i['quote'] for i in items if i['group'] == 'south_africa_equities'} == {'points', 'cents'}
+
+
+def test_either_family_can_be_switched_off_on_its_own():
+    only_stocks = cw.instruments({'watch_only': {'commodities': {'enabled': False}}})
+    assert only_stocks and all(cw.family(i['group']) == 'equities' for i in only_stocks)
+    only_commodities = cw.instruments({'watch_only': {'equity_markets': {'enabled': False}}})
+    assert only_commodities and all(cw.family(i['group']) == 'commodities' for i in only_commodities)
+    assert cw.settings({'watch_only': {'commodities': {'enabled': False}}})['enabled'] is True
+    both_off = {'watch_only': {'commodities': {'enabled': False}, 'equity_markets': {'enabled': False}}}
+    assert cw.settings(both_off)['enabled'] is False
+
+
+def test_a_listed_market_can_be_replaced_from_the_config():
+    cfg = {'watch_only': {'equity_markets': {'instruments': [
+        {'symbol': 'XYZ.L', 'name': 'X', 'group': 'uk_equities', 'kind': 'stock', 'quote': 'pence'}]}}}
+    uk = [i for i in cw.instruments(cfg) if cw.family(i['group']) == 'equities']
+    assert [i['symbol'] for i in uk] == ['XYZ.L']
+
+
+def test_a_hundredfold_unit_change_in_the_price_is_undone_and_real_moves_are_left_alone():
+    # London pence that Yahoo briefly serves as pounds: 100 -> 1 -> 100 over a stretch.
+    v = [100.0, 101.0, 1.02, 1.03, 1.01, 102.0, 103.0]
+    fixed, steps = cw.fix_unit_steps(v)
+    assert steps == 2
+    assert fixed[-2:] == [102.0, 103.0]                                    # the latest segment is untouched
+    assert all(98 < x < 106 for x in fixed)                                # the dip segment matches its neighbours
+    # a genuine 30% fall and 40% rise are not unit changes
+    real = [100.0, 70.0, 98.0, 97.0]
+    assert cw.fix_unit_steps(real) == (real, 0)
+    # a series that moves permanently from pounds to pence is joined up
+    joined, n = cw.fix_unit_steps([2.0, 2.1, 2.05, 205.0, 207.0])
+    assert n == 1 and joined == pytest.approx([200.0, 210.0, 205.0, 205.0, 207.0])
+
+
+def test_a_unit_glitch_cannot_fake_a_hundredfold_return_in_the_scoring():
+    days = weekdays(date(2015, 1, 5), 252 * 8)
+    clean = walk(days, drift=0.0, vol=0.01, seed=21, start=1000.0)
+    glitched = dict(clean)
+    for d in days[900:930]:
+        glitched[d] = clean[d] / 100                                       # a month served in pounds, not pence
+    fixed, n = cw.clean_closes(glitched)
+    assert n == 2
+    assert all(fixed[d] == pytest.approx(clean[d], rel=1e-9) for d in days)
+    result = cw.run_study({'ULVR.L': glitched}, {'ULVR.L': {'group': 'uk_equities'}}, min_signals=5)
+    assert result['unit_fixes'] == {'ULVR.L': 2}
+    assert max(abs(r['avg_move_pct']) for r in result['table']) < 20        # not the 9,900% a raw glitch would give
+
+
+def test_stock_markets_are_pooled_apart_from_commodities_and_costed_per_market():
+    uk = {f'U{i}': regime_walk(DAYS, seed=i) for i in range(4)}
+    gold = {f'G{i}': regime_walk(DAYS, seed=10 + i) for i in range(4)}
+    meta = {**{s: {'group': 'uk_equities'} for s in uk}, **{s: {'group': 'metals'} for s in gold}}
+    result = cw.run_study({**uk, **gold}, meta, min_signals=5, cost_pct=0.1, group_costs={'uk_equities': 0.7})
+    markets = {r['market'] for r in result['table']}
+    assert {'uk_equities', 'metals', 'all_equities', 'all_commodities'} <= markets
+    by = {(r['source'], r['market']): r for r in result['table']}
+    uk_row, metal_row = by[('momentum_12m', 'uk_equities')], by[('momentum_12m', 'metals')]
+    assert uk_row['assumed_cost_pct'] == 0.7 and metal_row['assumed_cost_pct'] == 0.1
+    assert uk_row['net_move_pct'] == pytest.approx(uk_row['avg_move_pct'] - 0.7, abs=0.01)
+    pooled_eq = by[('momentum_12m', 'all_equities')]
+    assert pooled_eq['n'] == uk_row['n'] and pooled_eq['assumed_cost_pct'] == 0.7
+
+
+def test_each_stock_market_gets_its_own_live_start_day(tmp_path):
+    days = weekdays(date(2015, 1, 5), 252 * 8)
+    closes = {'GC=F': walk(days, seed=3), 'HSBA.L': walk(days, seed=4), 'MC.PA': walk(days, seed=5)}
+    cfg = {'watch_only': {'commodities': {'instruments': [
+               {'symbol': 'GC=F', 'name': 'g', 'group': 'metals', 'kind': 'futures'}]},
+           'equity_markets': {'instruments': [
+               {'symbol': 'HSBA.L', 'name': 'h', 'group': 'uk_equities', 'kind': 'stock', 'quote': 'pence'},
+               {'symbol': 'MC.PA', 'name': 'm', 'group': 'france_equities', 'kind': 'stock', 'quote': 'euro'}]}}}
+    day1 = datetime(2024, 3, 1, tzinfo=timezone.utc).timestamp()
+    w = cw.CommodityWatch(cfg, data_dir=str(tmp_path), closes_for=lambda s: closes.get(s, {}), clock=lambda: day1)
+    assert w.started == date(2024, 3, 1) and w.group_started == {}
+    w.run()
+    assert w.group_started == {'uk_equities': date(2024, 3, 1), 'france_equities': date(2024, 3, 1)}
+    # France is dropped, then comes back later: its start must not move earlier, and a market that
+    # never returned prices has no start at all.
+    day2 = datetime(2024, 9, 1, tzinfo=timezone.utc).timestamp()
+    cfg2 = {**cfg, 'watch_only': {**cfg['watch_only'], 'equity_markets': {'instruments': cfg['watch_only']['equity_markets']['instruments'] + [
+        {'symbol': '7203.T', 'name': 't', 'group': 'japan_equities', 'kind': 'stock', 'quote': 'yen'}]}}}
+    again = cw.CommodityWatch(cfg2, data_dir=str(tmp_path), closes_for=lambda s: closes.get(s, {}), clock=lambda: day2)
+    again.run()
+    assert again.group_started == {'uk_equities': date(2024, 3, 1), 'france_equities': date(2024, 3, 1)}
+    closes['7203.T'] = walk(days, seed=6)
+    again.run()
+    assert again.group_started['japan_equities'] == date(2024, 9, 1)
+    rep = cw.report(str(tmp_path), cfg2)
+    assert rep['started_by_group']['japan_equities'] == '2024-09-01' and rep['costs_pct']['uk_equities'] == 0.7
+    rows = again.ledger.rows()
+    jp = [r for r in rows if r['symbol'] == '7203.T']
+    assert jp and all((r['day'] < '2024-09-01') == (r['version'] == 'backfill') for r in jp)
+    uk = [r for r in rows if r['symbol'] == 'HSBA.L']
+    assert all((r['day'] < '2024-03-01') == (r['version'] == 'backfill') for r in uk)
+
+
+def test_the_snapshot_carries_each_markets_unit_and_the_cleaning_it_needed(tmp_path):
+    days = weekdays(date(2015, 1, 5), 252 * 3)
+    base = walk(days, seed=8, start=2000.0)
+    glitched = {d: (c / 100 if i in (400, 401) else c) for i, (d, c) in enumerate(base.items())}
+    cfg = {'watch_only': {'commodities': {'enabled': False}, 'equity_markets': {'instruments': [
+        {'symbol': 'ULVR.L', 'name': 'Unilever', 'group': 'uk_equities', 'kind': 'stock', 'quote': 'pence'}]}}}
+    w = cw.CommodityWatch(cfg, data_dir=str(tmp_path), closes_for=lambda s: glitched)
+    w.run()
+    snap = cw.report(str(tmp_path), cfg)['instruments'][0]
+    assert snap['quote'] == 'pence' and snap['group'] == 'uk_equities' and snap['kind'] == 'stock'
+    assert snap['unit_fixes'] == 2
+
+
+def test_no_stock_market_instrument_is_traded_by_the_agent():
+    config = json.load(open('config/config.json', encoding='utf-8'))
+    traded = set(config['data_manager']['symbols']) | set(config['data_manager'].get('nse_symbols', []))
+    watched = {i['symbol'] for i in cw.instruments(config)}
+    assert not watched & traded

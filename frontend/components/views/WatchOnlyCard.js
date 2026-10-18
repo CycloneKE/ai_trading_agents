@@ -1,6 +1,6 @@
-// Watch-only commodities (/api/watch/commodities, src/agent/commodity_watch.py):
-// metals, oil and farm produce followed with no orders, and three patterns scored
-// against what prices then did. Backfill is replayed history (a candidate, not
+// Watch-only markets (/api/watch/commodities, src/agent/commodity_watch.py):
+// commodities and the UK, Japanese, French and South African stock markets,
+// followed with no orders, and three patterns scored against what prices then did. Backfill is replayed history (a candidate, not
 // proof); live is what has happened since the watch began (the real test).
 import { useEffect, useState } from 'react';
 import { Eye } from 'lucide-react';
@@ -20,10 +20,22 @@ const VERDICT = {
   too_few: { label: 'too few signals', color: () => theme.colors.textMuted },
 };
 
+const KIND = { futures: 'futures', fund: 'fund', stock: 'stock', index: 'index' };
 const cell = { padding: '6px 8px' };
 const head = { ...cell, textAlign: 'left' };
 const signed = (v, digits = 1) => (v == null ? 'n/a' : `${v > 0 ? '+' : ''}${Number(v).toFixed(digits)}`);
 const label = (s) => String(s).replace(/_/g, ' ');
+// A stock market added later has its own start day; say so when they differ.
+const costsText = (data) => {
+  const c = data.costs_pct || {};
+  const parts = Object.keys(c).map((k) => `${label(k)} ${c[k]}%`);
+  return `commodities ${data.assumed_cost_pct}%${parts.length ? `, ${parts.join(', ')}` : ''}`;
+};
+const startedBy = (data) => {
+  const g = data.started_by_group || {};
+  const parts = Object.keys(g).filter((k) => g[k] !== data.started).map((k) => `${label(k)} from ${g[k]}`);
+  return parts.length ? ` (${parts.join(', ')})` : '';
+};
 
 const Table = ({ children }) => (
   <div style={{ overflowX: 'auto', marginTop: '8px' }}>
@@ -75,13 +87,20 @@ const Reading = ({ s }) => {
 
 export const Instruments = ({ items }) => (
   <Table>
-    <Head cols={['COMMODITY', 'KIND', 'LAST PRICE', 'TREND', '12-MONTH MOVE', 'THIS MONTH, EARLIER YEARS']} />
+    <Head cols={['INSTRUMENT', 'MARKET', 'KIND', 'LAST PRICE', 'TREND', '12-MONTH MOVE', 'THIS MONTH, EARLIER YEARS']} />
     <tbody>
       {items.map((s) => (
         <tr key={s.symbol} style={{ borderBottom: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary }}>
           <td style={{ ...cell, whiteSpace: 'nowrap' }}>{s.name} <span style={{ color: theme.colors.textMuted }}>({s.symbol})</span></td>
-          <td style={cell}>{s.kind === 'fund' ? 'fund' : 'futures'}</td>
-          <td style={cell}>{s.last_close ?? 'n/a'}</td>
+          <td style={{ ...cell, whiteSpace: 'nowrap' }}>{label(s.group || '')}</td>
+          <td style={cell}>{KIND[s.kind] || s.kind}</td>
+          <td style={{ ...cell, whiteSpace: 'nowrap' }}>
+            {s.last_close ?? 'n/a'}{s.quote && s.last_close != null ? ` ${s.quote}` : ''}
+            {s.unit_fixes > 0 && (
+              <span title={`The price source switched units ${s.unit_fixes} time(s) in this history (for example pounds and pence); it was corrected before scoring.`}
+                style={{ color: theme.colors.warning }}> ⚠</span>
+            )}
+          </td>
           <td style={cell}><Reading s={s} /></td>
           <td style={cell}>{s.momentum_12m_pct == null ? 'n/a' : `${signed(s.momentum_12m_pct)}%`}</td>
           <td style={cell}>
@@ -116,16 +135,16 @@ export default function WatchOnlyCard({ mobile }) {
   if (!data) {
     return (
       <div style={card(mobile)}>
-        <SectionHeader title="Watch only: commodities" icon={Eye} />
-        {error ? <Empty>The commodity watch could not load ({error}).</Empty> : <Empty>Loading the commodity watch…</Empty>}
+        <SectionHeader title="Watch only: commodities and stock markets" icon={Eye} />
+        {error ? <Empty>The market watch could not load ({error}).</Empty> : <Empty>Loading the market watch…</Empty>}
       </div>
     );
   }
   if (!data.enabled) {
     return (
       <div style={card(mobile)}>
-        <SectionHeader title="Watch only: commodities" icon={Eye} />
-        <Empty>The commodity watch is switched off (watch_only.commodities.enabled in config.json).</Empty>
+        <SectionHeader title="Watch only: commodities and stock markets" icon={Eye} />
+        <Empty>The market watch is switched off (watch_only in config.json).</Empty>
       </div>
     );
   }
@@ -136,15 +155,17 @@ export default function WatchOnlyCard({ mobile }) {
   return (
     <div style={{ display: 'grid', gap: mobile ? '16px' : '24px' }}>
       <div style={card(mobile)}>
-        <SectionHeader title="Watch only: commodities (no orders are placed)" icon={Eye} />
+        <SectionHeader title="Watch only: commodities and stock markets (no orders are placed)" icon={Eye} />
         <Note tone={theme.colors.accent}>
-          The agent follows metals, oil and farm produce and records what three well-known patterns
-          would have said, then what each commodity actually did {data.horizon} trading days later, against how
-          often it simply rose anyway. Nothing here trades. Watching began {started}.
+          The agent follows commodities and the UK, Japanese, French and South African stock markets and records
+          what three well-known patterns would have said, then what each actually did {data.horizon} trading days
+          later, against how often it simply rose anyway. Nothing here trades: no broker reaches these markets.
+          Watching began {started}{startedBy(data)}.
         </Note>
         <div style={{ fontSize: '11px', color: theme.colors.textMuted, marginTop: '10px', lineHeight: 1.5 }}>
           &quot;Candidate&quot; means the pattern beat chance by two standard errors in all the history and in both
-          halves of it. It earns a place on the watch, nothing more: only the live record below confirms it.
+          halves of it. It earns a place on the watch, nothing more: only the live record below confirms it. Many
+          rows are tested at once, so expect a few to look good by luck.
         </div>
       </div>
 
@@ -163,9 +184,12 @@ export default function WatchOnlyCard({ mobile }) {
           : <>
               <PatternTable rows={back.table} />
               <div style={{ fontSize: '11px', color: theme.colors.textMuted, marginTop: '8px', lineHeight: 1.5 }}>
-                {back.signals} signals replayed. The commodities move together, so the true count is lower than it looks.
-                Net move takes off an assumed {data.assumed_cost_pct}% cost per signal. Futures prices jump when a contract
-                rolls over, and oil and gas funds lose value from rolling, so judge a fund by its own price.
+                {back.signals} signals replayed. Markets move together, so the true count is lower than it looks.
+                Net move takes off each market&apos;s assumed cost per signal ({costsText(data)}); the stock-market costs
+                are unverified assumptions. Futures prices jump when a contract rolls over, and oil and gas funds lose
+                value from rolling, so judge a fund by its own price. The companies listed are today&apos;s large ones,
+                which flatters their history (survivorship): the index and index-fund rows are the fairer test. Results are
+                in each market&apos;s own currency, before the exchange rate a dollar-based investor would also bear.
               </div>
             </>}
       </div>

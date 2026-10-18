@@ -30,6 +30,16 @@
       "history_period": "max",
       "min_signals": 30,
       "assumed_cost_pct": 0.1
+    },
+    "equity_markets": {
+      "_comment": "The UK, Japanese, French and South African stock markets, watched the same way as the commodities and never traded (no broker reaches them). Each market has an index, an index fund and several large companies, priced in its own currency. costs_pct is the assumed round-trip cost per market in percent: the market's tax on purchases plus an allowance for spread and commission (UK stamp duty about 0.5%, France's transaction tax about 0.3%, South Africa's securities transfer tax about 0.25%, Japan none). THESE ARE ASSUMPTIONS FROM MEMORY AND NOT VERIFIED: confirm each rate against the exchange and your broker before relying on any net figure. Set enabled to false to stop watching these markets.",
+      "enabled": true,
+      "costs_pct": {
+        "uk_equities": 0.7,
+        "japan_equities": 0.3,
+        "france_equities": 0.5,
+        "south_africa_equities": 0.7
+      }
     }
   },
   "learning": {
