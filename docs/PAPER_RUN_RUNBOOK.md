@@ -312,6 +312,39 @@ The report refuses to give a verdict below twenty, and says so. Win rate and
 profit factor only start separating skill from luck once there are enough
 trades for luck to average out.
 
+## What the agent does with each uploaded document
+
+The Research page reads a PDF in this order, and the upload result says which it
+found:
+
+1. **AIB-AXYS Market Pulse**: read by rules; prices, earnings, dividends, rates
+   and announcements are stored and used (the dividend sleeve, the price history,
+   the AI's trade review).
+2. **Bond auction note**: read by rules and kept for you; the agent trades no bonds.
+3. **Analyst note with ratings**: an AI finds each buy, sell or hold; stocks the
+   agent trades are followed or queued for your approval.
+4. **Anything else** (an IPO briefing, a results announcement, a central bank or
+   tax notice, a sector or commodity report): kept in the **Research Library**.
+
+For the library, an AI writes a digest: the kind of document, its date, a short
+summary, the stocks and markets it concerns, the figures and dates that matter,
+and the risks it names. Every figure and date has to come with the exact words it
+was taken from. Rules then check that those words are really in the document
+and that the figure is really in them; anything that fails is dropped and listed
+as "Not used", so a wrong or invented figure cannot reach the agent.
+
+How it is used later: for about 90 days (longer if the document names a later key
+date, until 14 days after it), the AI sees a short line from each document that
+names a stock when it reviews a trade in that stock, or one document about the
+stock's whole market if none names it. It is background only: the AI can confirm,
+weaken or veto a signal, never create one, and a document never places a trade
+or changes a setting. You can remove a document from the library at any time,
+and it stops being shown.
+
+If the upload says "no AI is switched on", add `GROQ_API_KEY` or `GEMINI_API_KEY`
+(both free) in Coolify and upload the document again; without an AI only the
+text is kept. Documents that are pictures are read only if they are rating sheets.
+
 ## Watch-only commodities
 
 The agent watches metals, oil and farm produce and learns their patterns without

@@ -5,6 +5,7 @@ Extracts research signals from text using LLM orchestration and evaluates them f
 import logging
 import json
 import os
+import re
 from typing import Dict, Any, List, Optional, Tuple
 from src.utils import pdf_parser
 from src.agent.escalation_manager import EscalationManager
@@ -22,7 +23,7 @@ CRITICAL INSTRUCTIONS FOR RATIONALE & CONTEXT PRESERVATION:
 - In "risk_factors", extract an array of specific risk factors and headwinds mentioned in the analysis.
 - In "document_links", extract any embedded URLs or document links (e.g. audited financials, AGM results, public announcements) associated with this company.
 
-Your output must be a single valid JSON list of objects, where each object matches this schema:
+Your output must be a single JSON object with one key, "recommendations", holding a list of objects, where each object matches this schema:
 {
   "symbol": "TICKER_SYMBOL",
   "market": "kenyan" or "international",
@@ -37,8 +38,42 @@ Your output must be a single valid JSON list of objects, where each object match
   "confidence": float_value_between_0_and_1
 }
 
+If the text contains no buy, sell or hold recommendation, return {"recommendations": []}.
 Ensure the output is strictly valid raw JSON without markdown formatting or trailing text.
 """
+
+
+# A document with none of these words has no rating in it, and asking an AI to
+# find one invites it to invent one (the Market Pulse once came back with a
+# "HOLD" for every company it named).
+_RATING_WORDS = re.compile(r"target|recommend|rating|accumulate|overweight|underweight|outperform|underperform"
+                           r"|top pick|\brec\b", re.IGNORECASE)
+
+
+def has_rating_words(text: str) -> bool:
+    return bool(_RATING_WORDS.search(text or ""))
+
+
+def items_from(proposal: Any) -> List[Dict[str, Any]]:
+    """The recommendation rows in an AI answer, whatever it called the list.
+
+    The AI service can only answer with a JSON object, so a list is wrapped
+    under some key: "recommendations" when asked, but "ratings", "results",
+    "assets" or "data" in practice. Anything that is a list of rows with a
+    symbol is accepted; the code used to look under one name only and read
+    every other as "no recommendations", so a note full of ratings came back
+    with zero."""
+    if isinstance(proposal, list):
+        return [r for r in proposal if isinstance(r, dict)]
+    if not isinstance(proposal, dict):
+        return []
+    if isinstance(proposal.get("recommendations"), list):
+        return [r for r in proposal["recommendations"] if isinstance(r, dict)]
+    for value in proposal.values():
+        if isinstance(value, list) and value and all(isinstance(r, dict) for r in value) \
+                and any(r.get("symbol") for r in value):
+            return value
+    return [proposal] if proposal.get("symbol") else []
 
 
 class BrokerResearchIngest:
@@ -119,8 +154,16 @@ class BrokerResearchIngest:
                 raise ValueError("No text could be extracted from the PDF.")
                 
             # 2. Extract signals via LLM across all page chunks
-            signals = self._extract_signals_via_llm(extracted)
+            signals = self._extract_signals_via_llm(extracted) if has_rating_words(text) else []
             logger.info(f"Extracted {len(signals)} total signals from research PDF across all pages.")
+            if not signals:
+                # No ratings: an IPO briefing, a results announcement, a policy
+                # notice, a sector report. Keep what it says (research_notes.py)
+                # instead of discarding it.
+                from src.agent import research_notes
+                kept = research_notes.ingest(file_path, extracted, self.llm, self.config)
+                self.escalation_manager.update_upload_status(upload_id, "completed", 0)
+                return self._summarised(upload_id, kept)
             return self._summarised(upload_id, {"document_type": "analyst_note",
                                                 **self._handle_signals(upload_id, signals)})
 
@@ -389,14 +432,8 @@ class BrokerResearchIngest:
                 chunk_text = "\n\n".join([p["combined"] for p in chunk_pages])
                 
                 proposal = self.llm.propose_json(_EXTRACTION_SYSTEM_PROMPT, chunk_text, model_override=pdf_extractor_model)
-                results = []
-                if isinstance(proposal, list):
-                    results = proposal
-                elif isinstance(proposal, dict) and "recommendations" in proposal:
-                    results = proposal["recommendations"]
-                elif isinstance(proposal, dict):
-                    results = [proposal]
-                
+                results = items_from(proposal)
+
                 for item in results:
                     sym = item.get("symbol", "").upper()
                     if sym and sym not in seen_symbols:
@@ -405,12 +442,7 @@ class BrokerResearchIngest:
         else:
             text = input_data.get("text", "") if isinstance(input_data, dict) else str(input_data)
             proposal = self.llm.propose_json(_EXTRACTION_SYSTEM_PROMPT, text, model_override=pdf_extractor_model)
-            if isinstance(proposal, list):
-                all_signals = proposal
-            elif isinstance(proposal, dict) and "recommendations" in proposal:
-                all_signals = proposal["recommendations"]
-            elif isinstance(proposal, dict):
-                all_signals = [proposal]
+            all_signals = items_from(proposal)
 
         if not all_signals:
             logger.warning("LLM returned no recommendation items. Triggering enhanced fallback.")
@@ -527,6 +559,9 @@ def describe(result: Dict[str, Any]) -> List[str]:
                             f"trade them yet or the rating needs a look: {', '.join(queued)}.")
     if kind == "bond_auction":
         return _describe_bond_auction(result.get("note") or {})
+    if kind == "research_document":
+        from src.agent import research_notes
+        return research_notes.describe(result)
     if kind == "market_pulse":
         lines = [f"Read as the AIB-AXYS Market Pulse of {result.get('as_of')}."]
         lines.append(f"Stored price, earnings, dividend, P/E and yield for {result.get('stocks_mapped', 0)} of "

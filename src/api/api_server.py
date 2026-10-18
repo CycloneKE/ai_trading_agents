@@ -1943,6 +1943,31 @@ class TradingAPI:
                 logger.error(f"Error reading bond auctions: {e}")
                 return jsonify({'error': 'Failed to read the bond auctions'}), 500
 
+        @self.app.route('/api/research/library', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_research_library():
+            """The documents kept by the research library (research_notes.py):
+            IPO briefings, results, policy and sector notes, newest first, each
+            with its checked figures and whether the AI still sees it."""
+            try:
+                from src.agent import research_notes
+                return jsonify({'notes': research_notes.notes()}), 200
+            except Exception as e:
+                logger.error(f"Error reading the research library: {e}")
+                return jsonify({'error': 'Failed to read the research library'}), 500
+
+        @self.app.route('/api/operator/research-library/<note_id>', methods=['DELETE'])
+        @require_rate_limit
+        @token_required
+        @role_required('operator')
+        def delete_research_note(note_id):
+            """Remove a document from the library, so the AI no longer sees it."""
+            from src.agent import research_notes
+            if not research_notes.remove(note_id):
+                return jsonify({'error': 'No such document in the library'}), 404
+            return jsonify({'success': True}), 200
+
         @self.app.route('/api/research/market-pulse', methods=['GET'])
         @require_rate_limit
         @token_required

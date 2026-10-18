@@ -5,12 +5,14 @@ import { Upload, Clock, AlertTriangle, Layers, FileText, CheckCircle, XCircle } 
 import { theme } from '../DashboardStyles';
 import { getApiBase } from '../../utils/apiBase';
 import { card, SectionHeader, localTime } from '../ui';
+import ResearchLibrary from './ResearchLibrary';
 
 const DOC_LABEL = {
   market_pulse: 'Market Pulse',
   recommendation_sheet: 'Rating sheet',
   analyst_note: 'Analyst note',
   bond_auction: 'Bond auction',
+  research_document: 'Research document',
 };
 
 // Prices on a rating sheet are in shillings for a Nairobi stock and dollars for a US one.
@@ -27,6 +29,7 @@ const ResearchView = ({ active, onChanged, onDrill, mobile }) => {
   const [pulse, setPulse] = useState(null);
   const [ratings, setRatings] = useState([]);
   const [bonds, setBonds] = useState([]);
+  const [library, setLibrary] = useState([]);
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('trading_token') : null;
 
@@ -58,6 +61,9 @@ const ResearchView = ({ active, onChanged, onDrill, mobile }) => {
 
       const bdRes = await fetch(`${getApiBase()}/api/research/bond-auctions`, { headers: { Authorization: `Bearer ${token}` } });
       if (bdRes.ok) setBonds((await bdRes.json()).auctions || []);
+
+      const lbRes = await fetch(`${getApiBase()}/api/research/library`, { headers: { Authorization: `Bearer ${token}` } });
+      if (lbRes.ok) setLibrary((await lbRes.json()).notes || []);
     } catch (e) {
       console.error("Failed to fetch research data", e);
     }
@@ -321,6 +327,8 @@ const ResearchView = ({ active, onChanged, onDrill, mobile }) => {
           </div>
         </div>
       )}
+
+      <ResearchLibrary notes={library} mobile={mobile} token={token} onChanged={loadResearchData} />
 
       {bonds.length > 0 && (
         <div style={card(mobile)}>

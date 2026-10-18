@@ -1290,6 +1290,16 @@ class TradingAgent:
                                                 research_context = item
                                                 break
                                     
+                                    # Uploaded documents that bear on this symbol
+                                    # (research_notes.py): background, not a signal.
+                                    try:
+                                        from src.agent import research_notes
+                                        docs = research_notes.context_for(symbol, self.config)
+                                        if docs:
+                                            research_context = {**(research_context or {}), 'documents': docs}
+                                    except Exception as e:
+                                        logger.debug(f"Research documents unavailable for {symbol}: {e}")
+
                                     # Retrieve sector outlook from SwarmStateStore
                                     sector_outlook = None
                                     ss = self.components.get('sector_specialist')
@@ -1808,7 +1818,15 @@ class TradingAgent:
         except Exception as e:
             logger.debug(f"Market Pulse context unavailable for {symbol}: {e}")
             pulse = None
+        try:
+            from src.agent import research_notes
+            docs = research_notes.context_for(symbol, self.config)
+        except Exception as e:
+            logger.debug(f"Research documents unavailable for {symbol}: {e}")
+            docs = None
         if not rated:
+            if docs:
+                return {**(pulse or {}), 'documents': docs}
             return pulse
         ctx = {'recommendation': rated.get('recommendation'), 'target_price': rated.get('target_price'),
                'rationale': rated.get('rationale') or ''}
@@ -1818,6 +1836,8 @@ class TradingAgent:
             # watchlist's, which is only as new as the note that added it.
             if pulse.get('recommendation'):
                 ctx['recommendation'], ctx['target_price'] = pulse['recommendation'], pulse['target_price']
+        if docs:
+            ctx['documents'] = docs
         return ctx
 
     @staticmethod
