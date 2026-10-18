@@ -341,6 +341,20 @@ weaken or veto a signal, never create one, and a document never places a trade
 or changes a setting. You can remove a document from the library at any time,
 and it stops being shown.
 
+**Links inside a document.** Most documents point to fuller evidence (audited
+accounts, AGM results, announcements). The library lists every link a document
+carries, and nothing is downloaded until you press **Fetch** on one. Only links
+the document itself contains can be fetched. The server checks each address
+before and after every redirect: https only, standard port, and never a private
+or internal address; at most 3 MB and 15 seconds; web pages, plain text and
+PDFs only. The page is then read and checked exactly like the document: a
+figure is kept only with a quote that is really on the page and a number that
+is really in the quote, and it is stored with its source address and shown to
+the AI together with the document. One gap remains: the address is checked just
+before the request and looked up again by it, so a hostile name server could in
+theory answer differently the second time; that is why fetching is one link at a
+time on your click, and everything that comes back is treated as untrusted text.
+
 If the upload says "no AI is switched on", add `GROQ_API_KEY` or `GEMINI_API_KEY`
 (both free) in Coolify and upload the document again; without an AI only the
 text is kept. Documents that are pictures are read only if they are rating sheets.

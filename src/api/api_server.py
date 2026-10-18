@@ -1957,6 +1957,27 @@ class TradingAPI:
                 logger.error(f"Error reading the research library: {e}")
                 return jsonify({'error': 'Failed to read the research library'}), 500
 
+        @self.app.route('/api/operator/research-library/<note_id>/fetch', methods=['POST'])
+        @require_rate_limit
+        @token_required
+        @role_required('operator')
+        def fetch_research_link(note_id):
+            """Follow one link a library document contains and keep what the
+            page says as checked evidence (research_notes.fetch_link). Only a
+            link the document itself carries is followed, and only on this
+            operator request."""
+            from src.agent import research_notes
+            url = str((request.get_json(silent=True) or {}).get('url') or '').strip()
+            if not url:
+                return jsonify({'error': 'No link given'}), 400
+            agent = self.trading_agent
+            result = research_notes.fetch_link(
+                note_id, url, (getattr(agent, 'components', None) or {}).get('llm_orchestrator'),
+                getattr(agent, 'config', None) or self.config or {})
+            if not result.get('ok'):
+                return jsonify({'error': result.get('error')}), int(result.get('status') or 400)
+            return jsonify(result), 200
+
         @self.app.route('/api/operator/research-library/<note_id>', methods=['DELETE'])
         @require_rate_limit
         @token_required

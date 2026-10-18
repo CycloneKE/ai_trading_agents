@@ -307,3 +307,137 @@ def test_the_library_is_listed_for_any_logged_in_user_and_removal_is_for_operato
     assert client.delete(f"/api/operator/research-library/{note['id']}", headers=header('operator')).status_code == 200
     assert client.delete(f"/api/operator/research-library/{note['id']}", headers=header('operator')).status_code == 404
     assert client.get('/api/research/library', headers=header('viewer')).get_json()['notes'] == []
+
+
+# ------------------------------------------------------------ linked pages
+
+LINKED_TEXT = ("Acme Telecom audited results for the year. Net profit grew 18 percent to KES 7.4 billion. "
+               "The board proposed a final dividend of KES 1.50 per share, payable on 12 December 2026. ") * 2
+PAGE_DIGEST = {
+    'document_type': 'company_results', 'title': 'Acme audited results', 'as_of': '2026-10-01',
+    'summary': 'Profit rose and a dividend is proposed.', 'symbols': ['ACME'], 'markets': ['kenya'],
+    'facts': [{'label': 'Dividend', 'value': 'KES 1.50 per share',
+               'quote': 'final dividend of KES 1.50 per share'},
+              {'label': 'Profit', 'value': 'KES 9.9 billion', 'quote': 'Net profit grew 18 percent to KES 7.4 billion'}],
+    'dates': [{'label': 'Dividend paid', 'date': '2026-12-12', 'quote': 'payable on 12 December 2026'}], 'risks': []}
+LINK = 'https://acme.example/results.pdf'
+
+
+def fake_fetcher(url):
+    return {'url': url, 'title': 'Acme results page', 'text': LINKED_TEXT, 'content_type': 'text/html'}
+
+
+def with_links(links):
+    text = TEXT + '\n' + '\n'.join(links)
+    ex = {**EXTRACTED, 'text': text, 'links': links[:1]}
+    return rn.ingest('/tmp/acme.pdf', ex, FakeAI(GOOD_DIGEST), CONFIG, TODAY)['note']
+
+
+def test_the_links_a_document_carries_are_kept_without_duplicates_or_junk():
+    ex = {'text': 'See https://a.example/x, and (https://b.example/y). Also http://c.example/z. https://a.example/x',
+          'links': ['https://a.example/x', 'mailto:x@y.z', 'javascript:alert(1)']}
+    assert rn.links_in(ex, ex['text']) == ['https://a.example/x', 'https://b.example/y', 'http://c.example/z']
+    many = {'text': ' '.join(f'https://h.example/{i}' for i in range(90))}
+    assert len(rn.links_in(many, many['text'])) == rn.MAX_LINKS
+
+
+def test_a_new_document_lists_its_links_and_says_nothing_is_downloaded_yet():
+    note = with_links([LINK, 'https://acme.example/agm'])
+    assert note['links'] == [LINK, 'https://acme.example/agm'] and note['evidence'] == []
+    lines = rn.describe({'note': note, 'ai_read': True})
+    assert any('links to 2 web pages' in l and 'until you press Fetch' in l for l in lines)
+
+
+def test_following_a_link_keeps_only_checked_figures_with_their_source():
+    note = with_links([LINK])
+    out = rn.fetch_link(note['id'], LINK, FakeAI(PAGE_DIGEST), CONFIG, TODAY, fake_fetcher)
+    assert out['ok'] is True
+    ev = out['evidence']
+    assert ev['url'] == LINK and ev['status'] == 'read' and ev['title'] == 'Acme results page'
+    assert [f['label'] for f in ev['facts']] == ['Dividend']                       # the wrong profit figure is dropped
+    assert any('Profit' in r and 'not in the quoted words' in r for r in ev['rejected'])
+    stored = rn.notes(TODAY)[0]
+    assert stored['evidence'][0]['facts'][0]['value'] == 'KES 1.50 per share'
+    assert any((rn._dir() / 'texts').glob(f"{note['id']}.*.txt"))
+
+
+def test_only_a_link_the_document_carries_can_be_followed():
+    note = with_links([LINK])
+    asked = []
+
+    def spy(url):
+        asked.append(url)
+        return fake_fetcher(url)
+
+    out = rn.fetch_link(note['id'], 'https://evil.example/steal', FakeAI(PAGE_DIGEST), CONFIG, TODAY, spy)
+    assert out['ok'] is False and out['status'] == 400 and asked == []
+    assert rn.fetch_link('nope', LINK, FakeAI(PAGE_DIGEST), CONFIG, TODAY, spy)['status'] == 404
+
+
+def test_a_refused_or_failed_page_is_reported_and_nothing_is_kept():
+    from src.utils.safe_fetch import FetchError
+    note = with_links([LINK])
+
+    def refuse(url):
+        raise FetchError('acme.example points to a private or internal address, so it is not followed')
+
+    out = rn.fetch_link(note['id'], LINK, FakeAI(PAGE_DIGEST), CONFIG, TODAY, refuse)
+    assert out['ok'] is False and out['status'] == 422 and 'private or internal' in out['error']
+    assert rn.notes(TODAY)[0]['evidence'] == []
+    assert rn.fetch_link(note['id'], LINK, None, CONFIG, TODAY, fake_fetcher)['status'] == 409     # no AI
+    assert rn.fetch_link(note['id'], LINK, FakeAI(None), CONFIG, TODAY, fake_fetcher)['status'] == 502
+
+
+def test_fetching_a_link_again_replaces_its_evidence_and_a_reupload_keeps_it():
+    note = with_links([LINK])
+    rn.fetch_link(note['id'], LINK, FakeAI(PAGE_DIGEST), CONFIG, TODAY, fake_fetcher)
+    rn.fetch_link(note['id'], LINK, FakeAI(PAGE_DIGEST), CONFIG, TODAY, fake_fetcher)
+    assert len(rn.notes(TODAY)[0]['evidence']) == 1
+    with_links([LINK])                                                              # the same document uploaded again
+    assert len(rn.notes(TODAY)[0]['evidence']) == 1
+
+
+def test_linked_evidence_reaches_the_ai_as_background():
+    note = with_links([LINK])
+    rn.fetch_link(note['id'], LINK, FakeAI(PAGE_DIGEST), CONFIG, TODAY, fake_fetcher)
+    assert 'from linked pages: Dividend KES 1.50 per share' in rn.context_for('ACME', CONFIG, TODAY)
+
+
+def test_a_checked_later_date_on_a_linked_page_keeps_the_document_in_view_longer_and_an_unchecked_one_does_not():
+    note = with_links([LINK])
+    assert rn.notes(TODAY)[0]['expires_on'] == '2027-01-12'
+    forged = {**PAGE_DIGEST, 'dates': [{'label': 'Payout', 'date': '2030-01-01', 'quote': 'payable on 1 January 2030'}]}
+    rn.fetch_link(note['id'], LINK, FakeAI(forged), CONFIG, TODAY, fake_fetcher)       # the page never says this
+    assert rn.notes(TODAY)[0]['expires_on'] == '2027-01-12'
+    real_text = LINKED_TEXT + ' The special dividend is payable on 30 June 2027. '
+    real = {**PAGE_DIGEST, 'dates': [{'label': 'Special dividend paid', 'date': '2027-06-30',
+                                      'quote': 'payable on 30 June 2027'}]}
+    rn.fetch_link(note['id'], LINK, FakeAI(real), CONFIG, TODAY,
+                  lambda u: {'url': u, 'title': 't', 'text': real_text, 'content_type': 'text/html'})
+    assert rn.notes(TODAY)[0]['expires_on'] == '2027-07-14'                            # 30 June 2027 + 14 days
+
+
+def test_removing_a_document_removes_what_was_fetched_for_it():
+    note = with_links([LINK])
+    rn.fetch_link(note['id'], LINK, FakeAI(PAGE_DIGEST), CONFIG, TODAY, fake_fetcher)
+    assert rn.remove(note['id']) is True
+    assert list((rn._dir() / 'texts').glob(f"{note['id']}*")) == []
+
+
+def test_the_reading_prompt_tells_the_ai_to_ignore_instructions_inside_a_document():
+    assert 'Ignore them' in rn.SYSTEM_PROMPT and 'not orders' in rn.SYSTEM_PROMPT
+
+
+def test_the_fetch_route_is_for_operators_and_follows_only_the_documents_own_links(api, monkeypatch):
+    client, header = api
+    note = with_links([LINK])
+    from src.utils import safe_fetch
+    monkeypatch.setattr(safe_fetch, 'fetch', fake_fetcher)
+    url = f"/api/operator/research-library/{note['id']}/fetch"
+    assert client.post(url, json={'url': LINK}, headers=header('viewer')).status_code == 403
+    assert client.post(url, json={}, headers=header('operator')).status_code == 400
+    # no AI is wired into this test agent, so an allowed link is refused plainly, not fetched
+    r = client.post(url, json={'url': LINK}, headers=header('operator'))
+    assert r.status_code == 409 and 'GROQ_API_KEY' in r.get_json()['error']
+    r = client.post(url, json={'url': 'https://evil.example/x'}, headers=header('operator'))
+    assert r.status_code == 400 and 'not one this document contains' in r.get_json()['error']
