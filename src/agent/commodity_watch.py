@@ -49,6 +49,7 @@ from src.utils.paths import DATA_DIR
 logger = logging.getLogger(__name__)
 
 HORIZON = 20                      # the pattern signals are monthly; judged a month on
+HORIZONS = (20, 60, 120)          # also judged a quarter and half a year on (about 1, 3 and 6 months)
 SOURCES = ('trend_200d', 'momentum_12m', 'seasonal')
 BACKFILL, LIVE = 'backfill', 'live'
 TREND_DAYS = 200
@@ -361,17 +362,46 @@ def _verdict(n: int, z: float, early_lift: Optional[float], late_lift: Optional[
     return 'no_clear_edge'
 
 
+def _as_day(value: Any) -> date:
+    return value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
+
+
+def thin(rows: Iterable[Dict[str, Any]], horizon: int) -> List[Dict[str, Any]]:
+    """Keep, for each instrument and pattern, only signals whose outcome window
+    does not overlap an earlier kept one.
+
+    The patterns signal about once a month. Judged 60 or 120 trading days on,
+    each outcome window covers the next two to five signals, so counting every
+    signal would count the same stretch of price several times and make a
+    little luck look like skill (z inflated by roughly the square root of the
+    overlap). A signal is set aside if the previous kept one, for the same
+    instrument and pattern, is closer than the horizon (taken as 7 calendar days
+    per 5 trading days). A trend signal that whipsaws, or a monthly one after a
+    longer horizon's first, is counted once."""
+    gap = -(-int(horizon) * 7 // 5)
+    last: Dict[Tuple[str, str], date] = {}
+    out = []
+    for r in sorted(rows, key=lambda r: str(r['day'])):
+        key, day = (r['symbol'], r['source']), _as_day(r['day'])
+        if key in last and (day - last[key]).days < gap:
+            continue
+        last[key] = day
+        out.append(r)
+    return out
+
+
 def study(rows: Iterable[Dict[str, Any]], horizon: int = HORIZON, min_signals: int = 30,
           cost_pct: float = 0.1, group_costs: Optional[Dict[str, float]] = None) -> List[Dict[str, Any]]:
     """The skill of each pattern in each group, and across all commodities and
     all stock markets, with a verdict. A pattern is a 'candidate' only when it
     beats chance by two standard errors AND beats it in both the earlier and the
     later half of the history, which weeds out a pattern that worked in one
-    decade only. `group_costs` gives each group's assumed round-trip cost in
+    decade only. Signals whose outcome window overlaps an earlier one are counted
+    once (see `thin`). `group_costs` gives each group's assumed round-trip cost in
     percent; a group without one uses `cost_pct`."""
     from src.agent.signal_ledger import skill
     group_costs = group_costs or {}
-    rows = [r for r in rows if int(r['horizon']) == int(horizon)]
+    rows = thin([r for r in rows if int(r['horizon']) == int(horizon)], horizon)
     pooled = [{**r, 'market': f"all_{family(r.get('market') or '')}"} for r in rows]
     table = skill(rows, horizon, min_signals) + skill(pooled, horizon, min_signals)
     days = sorted(str(r['day']) for r in rows)
@@ -399,9 +429,13 @@ def study(rows: Iterable[Dict[str, Any]], horizon: int = HORIZON, min_signals: i
 
 def run_study(closes_by_symbol: Dict[str, Dict[date, float]], meta: Dict[str, Dict[str, str]],
               horizon: int = HORIZON, min_signals: int = 30, cost_pct: float = 0.1,
-              group_costs: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
-    """Replay the patterns over history and score them, from daily closes."""
+              group_costs: Optional[Dict[str, float]] = None,
+              horizons: Optional[Iterable[int]] = None) -> Dict[str, Any]:
+    """Replay the patterns over history and score them, from daily closes, at
+    `horizon` (the headline, in `table`) and at every one of `horizons`
+    (`tables`, keyed by horizon)."""
     from src.agent.signal_ledger import outcomes_for
+    wanted = list(dict.fromkeys([int(horizon)] + [int(h) for h in (horizons or ())]))
     cleaned, fixes = {}, {}
     for sym, closes in closes_by_symbol.items():
         cleaned[sym], n = clean_closes(closes)
@@ -410,9 +444,11 @@ def run_study(closes_by_symbol: Dict[str, Dict[date, float]], meta: Dict[str, Di
     sigs = []
     for sym, closes in cleaned.items():
         sigs += signals_for(sym, (meta.get(sym) or {}).get('group', 'other'), closes, BACKFILL)
-    rows = outcomes_for(sigs, lambda s: cleaned.get(s, {}), (horizon,))
-    return {'signals': len(sigs), 'scored': len(rows), 'instruments': len(closes_by_symbol),
-            'unit_fixes': fixes, 'table': study(rows, horizon, min_signals, cost_pct, group_costs)}
+    rows = outcomes_for(sigs, lambda s: cleaned.get(s, {}), wanted)
+    tables = {h: study(rows, h, min_signals, cost_pct, group_costs) for h in wanted}
+    return {'signals': len(sigs), 'scored': len([r for r in rows if int(r['horizon']) == int(horizon)]),
+            'instruments': len(closes_by_symbol), 'unit_fixes': fixes, 'table': tables[int(horizon)],
+            'tables': tables}
 
 
 # ----------------------------------------------------------------- the job
@@ -526,7 +562,7 @@ class CommodityWatch:
                 for s in signals_for(sym, meta[sym]['group'], closes):
                     s['version'] = BACKFILL if s['day'] < start else LIVE
                     sigs.append(s)
-            rows = outcomes_for(sigs, lambda s: closes_by.get(s, {}), (5, HORIZON))
+            rows = outcomes_for(sigs, lambda s: closes_by.get(s, {}), (5,) + tuple(HORIZONS))
             result = {'instruments': len(closes_by), 'new_outcomes': self.ledger.record(rows)}
             with open(self.snapshot_path, 'w', encoding='utf-8') as f:
                 json.dump({'updated_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
@@ -559,12 +595,14 @@ def report(data_dir: Optional[str] = None, config: Optional[Dict[str, Any]] = No
     except (OSError, ValueError):
         snap = {}
     out = {'enabled': bool(rule['enabled']), 'started': snap.get('started'), 'updated_at': snap.get('updated_at'),
-           'started_by_group': snap.get('started_by_group') or {}, 'horizon': HORIZON,
+           'started_by_group': snap.get('started_by_group') or {}, 'horizon': HORIZON, 'horizons': list(HORIZONS),
            'instruments': snap.get('instruments') or [], 'assumed_cost_pct': rule['assumed_cost_pct'],
            'costs_pct': costs(config)}
     for label in (BACKFILL, LIVE):
         part = [r for r in rows if r.get('version') == label]
         out[label] = {'signals': len({(r['symbol'], r['day'], r['source'], r['action']) for r in part}),
                       'table': study(part, HORIZON, int(rule['min_signals']), float(rule['assumed_cost_pct']),
-                                     costs(config))}
+                                     costs(config)),
+                      'tables': {str(h): study(part, h, int(rule['min_signals']), float(rule['assumed_cost_pct']),
+                                               costs(config)) for h in HORIZONS}}
     return out

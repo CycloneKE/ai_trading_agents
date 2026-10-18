@@ -409,6 +409,19 @@ keep in mind when reading the results:
 - A ticker that returns no prices is skipped; the dashboard shows which
   instruments loaded. Not every ticker has been confirmed against the live feed.
 
+**Longer horizons.** Each signal is judged 20, 60 and 120 trading days later (about
+one, three and six months); the dashboard has a selector and the study script
+prints all three (`--horizons 20,60,120,250` to choose others). The patterns
+signal about once a month, so a 60 or 120 day outcome window overlaps the next
+two to five signals. Counting each as independent would count the same stretch of
+price several times and make luck look like skill, so for each instrument and
+pattern a signal whose window overlaps an earlier counted one is set aside. That is
+why the counts fall as the horizon grows, and it applies to the 20 day figures too
+(a trend signal that whipsaws is counted once a window). Trying three horizons gives
+three chances for luck: a pattern that is a candidate at one horizon only deserves
+doubt; one that holds at neighbouring horizons deserves a closer look. The seasonal
+pattern is a one-month pattern, so longer horizons dilute it by design.
+
 To replay the history now, from the backend container's Terminal:
 
     python scripts/commodity_study.py
