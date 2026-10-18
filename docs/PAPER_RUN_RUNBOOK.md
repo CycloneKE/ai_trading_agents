@@ -312,6 +312,74 @@ The report refuses to give a verdict below twenty, and says so. Win rate and
 profit factor only start separating skill from luck once there are enough
 trades for luck to average out.
 
+## What the agent does with each uploaded document
+
+The Research page reads a PDF in this order, and the upload result says which it
+found:
+
+1. **AIB-AXYS Market Pulse**: read by rules; prices, earnings, dividends, rates
+   and announcements are stored and used (the dividend sleeve, the price history,
+   the AI's trade review).
+2. **Bond auction note**: read by rules and kept for you; the agent trades no bonds.
+3. **Analyst note with ratings**: an AI finds each buy, sell or hold; stocks the
+   agent trades are followed or queued for your approval.
+4. **Anything else** (an IPO briefing, a results announcement, a central bank or
+   tax notice, a sector or commodity report): kept in the **Research Library**.
+
+For the library, an AI writes a digest: the kind of document, its date, a short
+summary, the stocks and markets it concerns, the figures and dates that matter,
+and the risks it names. Every figure and date has to come with the exact words it
+was taken from. Rules then check that those words are really in the document
+and that the figure is really in them; anything that fails is dropped and listed
+as "Not used", so a wrong or invented figure cannot reach the agent.
+
+How it is used later: for about 90 days (longer if the document names a later key
+date, until 14 days after it), the AI sees a short line from each document that
+names a stock when it reviews a trade in that stock, or one document about the
+stock's whole market if none names it. It is background only: the AI can confirm,
+weaken or veto a signal, never create one, and a document never places a trade
+or changes a setting. You can remove a document from the library at any time,
+and it stops being shown.
+
+If the upload says "no AI is switched on", add `GROQ_API_KEY` or `GEMINI_API_KEY`
+(both free) in Coolify and upload the document again; without an AI only the
+text is kept. Documents that are pictures are read only if they are rating sheets.
+
+## Watch-only commodities
+
+The agent watches metals, oil and farm produce and learns their patterns without
+trading them (`src/agent/commodity_watch.py`; settings under `watch_only` in
+`config/config.json`). It has no broker connection and places no orders, and the
+commodities are deliberately not in `data_manager.symbols`.
+
+Three patterns are scored: price crossing its 200-day average (`trend_200d`), the
+past 12 months' direction on the first trading day of a month (`momentum_12m`),
+and the same calendar month's record over at least five earlier years
+(`seasonal`). Each signal is scored against the price 20 trading days later and
+against how often that commodity simply rose anyway.
+
+Two kinds of evidence are kept apart:
+
+- **Backfill** is the history replayed over years of prices. It is quick, but a
+  pattern found by trying several ideas can look good by luck, and the
+  commodities move together, so the count of independent signals is lower than it
+  looks. A pattern is called a CANDIDATE only when it beats chance by two standard
+  errors in all the history and in both its earlier and later half.
+- **Live** is every signal dated after the watch began (the date is kept in
+  `data/watch_state.json`). Only this confirms a pattern, and it arrives slowly:
+  a signal's outcome is known 20 trading days later.
+
+To replay the history now, from the backend container's Terminal:
+
+    python scripts/commodity_study.py
+    python scripts/commodity_study.py --only metals --kind futures
+
+The dashboard's Scorecard page shows both records and what each pattern says
+today. Two cautions: Yahoo's futures series jump when a contract rolls over, and
+the oil and gas funds (USO, UNG) lose value from rolling contracts, so judge a
+fund by its own price. Switching a pattern into real trading is a separate
+decision, and not one this watch makes.
+
 ## If the run goes quiet
 
 Run the report first. It will tell you which of these it is:

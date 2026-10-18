@@ -1037,6 +1037,25 @@ class TradingAPI:
                 logger.error(f"Error reading agent alerts: {e}")
                 return jsonify({'alerts': [], 'live': {}, 'email': {'configured': False}})
 
+        @self.app.route('/api/watch/commodities', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_commodity_watch():
+            """What the watch-only commodity study has found so far
+            (src/agent/commodity_watch.py), read from its own files; it
+            places no orders. Cached for five minutes."""
+            def produce():
+                from src.agent import commodity_watch
+                from src.utils.paths import DATA_DIR
+                cfg = getattr(self.trading_agent, 'config', None) or self.config or {}
+                return commodity_watch.report(str(DATA_DIR), cfg)
+
+            try:
+                return jsonify(self._cached('commodity_watch', 300, produce))
+            except Exception as e:
+                logger.error(f"Error building the commodity watch report: {e}")
+                return jsonify({'error': 'Failed to build the commodity watch report'}), 500
+
         @self.app.route('/api/scorecard', methods=['GET'])
         @require_rate_limit
         @token_required
@@ -1923,6 +1942,31 @@ class TradingAPI:
             except Exception as e:
                 logger.error(f"Error reading bond auctions: {e}")
                 return jsonify({'error': 'Failed to read the bond auctions'}), 500
+
+        @self.app.route('/api/research/library', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_research_library():
+            """The documents kept by the research library (research_notes.py):
+            IPO briefings, results, policy and sector notes, newest first, each
+            with its checked figures and whether the AI still sees it."""
+            try:
+                from src.agent import research_notes
+                return jsonify({'notes': research_notes.notes()}), 200
+            except Exception as e:
+                logger.error(f"Error reading the research library: {e}")
+                return jsonify({'error': 'Failed to read the research library'}), 500
+
+        @self.app.route('/api/operator/research-library/<note_id>', methods=['DELETE'])
+        @require_rate_limit
+        @token_required
+        @role_required('operator')
+        def delete_research_note(note_id):
+            """Remove a document from the library, so the AI no longer sees it."""
+            from src.agent import research_notes
+            if not research_notes.remove(note_id):
+                return jsonify({'error': 'No such document in the library'}), 404
+            return jsonify({'success': True}), 200
 
         @self.app.route('/api/research/market-pulse', methods=['GET'])
         @require_rate_limit

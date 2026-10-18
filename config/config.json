@@ -22,6 +22,16 @@
     "churn_alert_trips": 3,
     "churn_check_minutes": 10
   },
+  "watch_only": {
+    "_comment": "Markets the agent watches and learns from without trading them (src/agent/commodity_watch.py). Nothing here places an order, and these symbols are deliberately not in data_manager.symbols. Each day-pattern (trend_200d, momentum_12m, seasonal) is scored against the price 20 trading days later and against how often the commodity simply rose anyway. Signals dated before the watch began are 'backfill' (replayed history, a candidate only); signals after are 'live' (the real test). Set enabled to false to stop. To change the list, add an `instruments` list of {symbol, name, group, kind}; leave it out to use the built-in list of metals, energy and farm produce.",
+    "commodities": {
+      "enabled": true,
+      "refresh_hours": 12,
+      "history_period": "max",
+      "min_signals": 30,
+      "assumed_cost_pct": 0.1
+    }
+  },
   "learning": {
     "_comment": "Learning from every signal's later price move, not only from closed trades (src/agent/signal_ledger.py). The agent records what each strategy's signals did 5 and 20 trading days later, per market, and the scorecard shows each strategy's hit rate against chance. With signal_skill_tilt.enabled false (the default) it only measures. Set it to true and, once a strategy has min_signals signals with a known outcome in a market, its vote there is scaled 0.5x to 1.5x by how far it beats chance (guardrails.signal_tilt). Review the scorecard's Learning section before switching it on.",
     "signal_skill_tilt": {

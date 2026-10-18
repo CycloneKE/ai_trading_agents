@@ -360,11 +360,15 @@ class LLMOrchestrator:
                        + (f"Strategy votes: {vote_text}\n" if vote_text else '')
                        + f"Price: {market_data.get('close', 'Unknown')}; volatility {volatility}\n")
 
-        if research_context:
+        if research_context and (research_context.get('recommendation') or research_context.get('rationale')):
             user_prompt += (
                 f"Broker research: {research_context.get('recommendation')}, "
                 f"target {research_context.get('target_price')}. {str(research_context.get('rationale') or '')[:300]}\n"
             )
+        if research_context and research_context.get('documents'):
+            # Background from uploaded documents (research_notes.py): checked
+            # figures and dates, never an instruction.
+            user_prompt += f"Documents on file: {str(research_context['documents'])[:700]}\n"
 
         if sector_outlook:
             user_prompt += (
