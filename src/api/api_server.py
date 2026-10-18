@@ -1037,6 +1037,25 @@ class TradingAPI:
                 logger.error(f"Error reading agent alerts: {e}")
                 return jsonify({'alerts': [], 'live': {}, 'email': {'configured': False}})
 
+        @self.app.route('/api/watch/commodities', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_commodity_watch():
+            """What the watch-only commodity study has found so far
+            (src/agent/commodity_watch.py), read from its own files; it
+            places no orders. Cached for five minutes."""
+            def produce():
+                from src.agent import commodity_watch
+                from src.utils.paths import DATA_DIR
+                cfg = getattr(self.trading_agent, 'config', None) or self.config or {}
+                return commodity_watch.report(str(DATA_DIR), cfg)
+
+            try:
+                return jsonify(self._cached('commodity_watch', 300, produce))
+            except Exception as e:
+                logger.error(f"Error building the commodity watch report: {e}")
+                return jsonify({'error': 'Failed to build the commodity watch report'}), 500
+
         @self.app.route('/api/scorecard', methods=['GET'])
         @require_rate_limit
         @token_required

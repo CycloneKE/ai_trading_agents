@@ -312,6 +312,41 @@ The report refuses to give a verdict below twenty, and says so. Win rate and
 profit factor only start separating skill from luck once there are enough
 trades for luck to average out.
 
+## Watch-only commodities
+
+The agent watches metals, oil and farm produce and learns their patterns without
+trading them (`src/agent/commodity_watch.py`; settings under `watch_only` in
+`config/config.json`). It has no broker connection and places no orders, and the
+commodities are deliberately not in `data_manager.symbols`.
+
+Three patterns are scored: price crossing its 200-day average (`trend_200d`), the
+past 12 months' direction on the first trading day of a month (`momentum_12m`),
+and the same calendar month's record over at least five earlier years
+(`seasonal`). Each signal is scored against the price 20 trading days later and
+against how often that commodity simply rose anyway.
+
+Two kinds of evidence are kept apart:
+
+- **Backfill** is the history replayed over years of prices. It is quick, but a
+  pattern found by trying several ideas can look good by luck, and the
+  commodities move together, so the count of independent signals is lower than it
+  looks. A pattern is called a CANDIDATE only when it beats chance by two standard
+  errors in all the history and in both its earlier and later half.
+- **Live** is every signal dated after the watch began (the date is kept in
+  `data/watch_state.json`). Only this confirms a pattern, and it arrives slowly:
+  a signal's outcome is known 20 trading days later.
+
+To replay the history now, from the backend container's Terminal:
+
+    python scripts/commodity_study.py
+    python scripts/commodity_study.py --only metals --kind futures
+
+The dashboard's Scorecard page shows both records and what each pattern says
+today. Two cautions: Yahoo's futures series jump when a contract rolls over, and
+the oil and gas funds (USO, UNG) lose value from rolling contracts, so judge a
+fund by its own price. Switching a pattern into real trading is a separate
+decision, and not one this watch makes.
+
 ## If the run goes quiet
 
 Run the report first. It will tell you which of these it is:

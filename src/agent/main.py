@@ -691,6 +691,8 @@ class TradingAgent:
                 self.paper_equity_log.close()
             if getattr(self, 'signal_ledger', None):
                 self.signal_ledger.close()
+            if getattr(self, 'commodity_watch', None):
+                self.commodity_watch.close()
             if 'escalation_manager' in self.components:
                 self.components['escalation_manager'].close()
             if 'nse_order_queue' in self.components:
@@ -834,6 +836,16 @@ class TradingAgent:
             logger.error(f"Signal learning init failed: {e}")
             self.signal_ledger = None
             self.signal_learning = None
+
+        # Watch-only commodities: metals, oil and farm produce are followed and
+        # their patterns scored against what prices then did, with no orders
+        # and no broker (commodity_watch.py). Separate files, separate book.
+        try:
+            from src.agent.commodity_watch import CommodityWatch
+            self.commodity_watch = CommodityWatch(self.config)
+        except Exception as e:
+            logger.error(f"Commodity watch init failed: {e}")
+            self.commodity_watch = None
 
         # LLM weight allocator: proposes ensemble weight tilts from realized
         # attribution on a slow cadence; hard guardrails clamp every proposal
@@ -1013,6 +1025,11 @@ class TradingAgent:
                         self.signal_learning.maybe_update()
                     except Exception as e:
                         logger.error(f"Signal learning error: {e}")
+                if getattr(self, 'commodity_watch', None):      # watch only: safe while halted
+                    try:
+                        self.commodity_watch.maybe_update()
+                    except Exception as e:
+                        logger.error(f"Commodity watch error: {e}")
 
                 # Pull fill results for submitted orders into the journal so
                 # attribution and duplicate-close checks see current state.
