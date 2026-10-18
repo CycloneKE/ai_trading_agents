@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Do the commodity patterns work? Replay them over years of price history.
+"""Do the patterns work? Replay them over years of price history.
 
 Takes the three watch-only patterns (trend_200d, momentum_12m, seasonal) and
-replays each over the whole price history Yahoo Finance holds for metals, oil
-and farm produce, then scores every signal against what the price did a month
-later and against how often it simply went up anyway. Nothing is traded; this
-only reads prices (it needs the internet).
+replays each over the whole price history Yahoo Finance holds for metals, oil,
+farm produce and the UK, Japanese, French and South African stock markets, then
+scores every signal against what the price did a month later and against how
+often it simply went up anyway. Nothing is traded; this only reads prices (it
+needs the internet).
 
 A pattern is marked CANDIDATE only when it beats chance by two standard errors
 in all the history AND in both the earlier and the later half of it. That is a
@@ -16,6 +17,7 @@ Usage:
     python scripts/commodity_study.py
     python scripts/commodity_study.py --period 10y
     python scripts/commodity_study.py --only metals
+    python scripts/commodity_study.py --only uk_equities --kind index
     python scripts/commodity_study.py --json
     python scripts/commodity_study.py --out reports/commodity_study.md
 """
@@ -35,12 +37,15 @@ VERDICT = {'candidate': 'CANDIDATE', 'no_clear_edge': 'no clear edge', 'wrong_wa
 
 
 def render(result, cost_pct):
-    lines = ['# Commodity pattern study', '',
+    lines = ['# Pattern study: commodities and stock markets', '',
              f"{result['instruments']} commodities, {result['signals']} signals, {result['scored']} scored "
              f"at {cw.HORIZON} trading days. Nothing here was traded.", '',
              'Each row: how often the signal moved the right way, against how often a random day would have. '
-             f'"Net" is the average move after an assumed cost of {cost_pct}% per signal.', '']
-    for market in ('all_commodities', 'metals', 'energy', 'agriculture'):
+             '"Net" is the average move after each market\'s assumed cost, shown beside it; the stock-market costs are '
+             'unverified assumptions.', '']
+    order = ['all_commodities', 'metals', 'energy', 'agriculture', 'all_equities', 'uk_equities', 'japan_equities',
+             'france_equities', 'south_africa_equities']
+    for market in order + sorted({r['market'] for r in result['table']} - set(order)):
         rows = [r for r in result['table'] if r['market'] == market]
         if not rows:
             continue
@@ -50,10 +55,15 @@ def render(result, cost_pct):
             late = 'n/a' if r['late_lift'] is None else f"{r['late_lift']:+.1%}"
             lines.append(f"{r['source']:<13} {r['hit_rate']:.0%} right of {r['n']} (chance {r['chance']:.0%}, "
                          f"z {r['z']:+.1f}); earlier half {early}, later half {late}; "
-                         f"net move {r['net_move_pct']:+.2f}%  ->  {VERDICT[r['verdict']]}")
+                         f"net move {r['net_move_pct']:+.2f}% (cost {r['assumed_cost_pct']}%)  ->  {VERDICT[r['verdict']]}")
         lines.append('')
-    lines += ['Read with care: the commodities move together, so the signals are not fully independent and the '
+    if result.get('unit_fixes'):
+        lines += ['Prices that switched between pounds and pence (or rand and cents) were corrected: ' +
+                  ', '.join(f"{k} ({v})" for k, v in sorted(result['unit_fixes'].items())) + '.', '']
+    lines += ['Read with care: markets move together, so the signals are not fully independent and the '
               'true count is lower than it looks. Yahoo\'s futures series jump when a contract rolls over. '
+              'The listed companies are today\'s large ones, which flatters their history (survivorship); the index '
+              'and index-fund rows are the fairer test. Results are in each market\'s own currency. '
               'Testing many patterns will throw up some that look good by luck. A CANDIDATE earns a place on the '
               'live watch, nothing more.']
     return '\n'.join(lines)
@@ -63,8 +73,10 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--config', default='config/config.json')
     p.add_argument('--period', default=None, help='how much history to replay (default: the config, "max")')
-    p.add_argument('--only', choices=['metals', 'energy', 'agriculture'])
-    p.add_argument('--kind', choices=['futures', 'fund'], help='only futures series, or only funds')
+    p.add_argument('--only', choices=['metals', 'energy', 'agriculture', 'uk_equities', 'japan_equities',
+                                       'france_equities', 'south_africa_equities'])
+    p.add_argument('--kind', choices=['futures', 'fund', 'index', 'stock'],
+                   help='only futures series, funds, indexes or single stocks')
     p.add_argument('--json', action='store_true')
     p.add_argument('--out', help='also write the report to this file')
     args = p.parse_args()
@@ -85,7 +97,8 @@ def main():
     if not closes:
         print('No price history could be fetched. This needs the internet.', file=sys.stderr)
         return 1
-    result = cw.run_study(closes, meta, cw.HORIZON, int(rule['min_signals']), float(rule['assumed_cost_pct']))
+    result = cw.run_study(closes, meta, cw.HORIZON, int(rule['min_signals']), float(rule['assumed_cost_pct']),
+                          cw.costs(config))
     text = json.dumps(result, indent=2, default=str) if args.json else render(result, rule['assumed_cost_pct'])
     print(text)
     if args.out:

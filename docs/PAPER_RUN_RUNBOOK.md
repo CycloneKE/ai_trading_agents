@@ -359,7 +359,7 @@ If the upload says "no AI is switched on", add `GROQ_API_KEY` or `GEMINI_API_KEY
 (both free) in Coolify and upload the document again; without an AI only the
 text is kept. Documents that are pictures are read only if they are rating sheets.
 
-## Watch-only commodities
+## Watch-only markets: commodities and four stock markets
 
 The agent watches metals, oil and farm produce and learns their patterns without
 trading them (`src/agent/commodity_watch.py`; settings under `watch_only` in
@@ -383,6 +383,32 @@ Two kinds of evidence are kept apart:
   `data/watch_state.json`). Only this confirms a pattern, and it arrives slowly:
   a signal's outcome is known 20 trading days later.
 
+**Stock markets.** The same three patterns are scored on the UK (FTSE 100), Japan
+(Nikkei 225 and TOPIX), France (CAC 40) and South Africa (FTSE/JSE) markets: for
+each, the index, an index fund and several of the largest companies, from Yahoo
+Finance. No broker reaches these markets, so nothing is ever traded. Points to
+keep in mind when reading the results:
+
+- Each market keeps its own live start day (in `data/watch_state.json`), set the
+  first time it returns prices, so a market added later is never credited with
+  "live" days before it was watched.
+- Prices are in each market's own currency and unit: London quotes in pence and
+  Johannesburg in cents. Yahoo sometimes serves such a price in pounds or rand for
+  a stretch; a jump of about 100 times between neighbouring days is undone before
+  scoring, and the dashboard marks any instrument where that happened.
+- Results are the move in local currency, before the exchange rate a
+  dollar-based investor would also bear.
+- The companies listed are today's large ones, which flatters their history
+  (survivorship). The index and index-fund rows are the fairer test.
+- Each market has an assumed round-trip cost (`watch_only.equity_markets.costs_pct`):
+  the market's tax on purchases (UK stamp duty about 0.5%, France's transaction
+  tax about 0.3%, South Africa's securities transfer tax about 0.25%, none in
+  Japan) plus an allowance for spread and commission. **These are assumptions
+  from memory, not verified rates.** Confirm each with the exchange and your
+  broker before relying on a net figure.
+- A ticker that returns no prices is skipped; the dashboard shows which
+  instruments loaded. Not every ticker has been confirmed against the live feed.
+
 To replay the history now, from the backend container's Terminal:
 
     python scripts/commodity_study.py
@@ -393,6 +419,30 @@ today. Two cautions: Yahoo's futures series jump when a contract rolls over, and
 the oil and gas funds (USO, UNG) lose value from rolling contracts, so judge a
 fund by its own price. Switching a pattern into real trading is a separate
 decision, and not one this watch makes.
+
+## Kenyan commodity markets
+
+Reviewed on 18 October 2026 from public sources; confirm before relying on it.
+
+- **No tradable price feed exists for it that I could find.** The Nairobi
+  Securities Exchange lists shares, not commodities. The Kenya National
+  Multi-Commodities Exchange (KOMEX), a state corporation, is running an
+  over-the-counter pilot (a food supply delivery pilot in Kakamega) and its 2026
+  budget is about KES 43 million; a 2026 target of 30,000 tonnes traded is on the
+  national budget portal, and I could not verify the actual figure. I found no
+  commodity futures contract in Kenya, and an older profile of the Kenya
+  Agricultural Commodity Exchange says futures were never traded there.
+- **Auction prices do exist for the two big exports.** The Nairobi Coffee Exchange
+  auction (the Kenya National Bureau of Statistics reported July 2026 at an
+  average of USD 7.19 per kg on 2.6 thousand tonnes) and the weekly Mombasa tea
+  auctions run by EATTA (reported in the press as a weekly average in dollars per
+  kg with packages offered and sold).
+- **What that allows.** The agent could record these auction prices, weekly for
+  tea and coffee, as a watch-only series and score the same patterns on them.
+  Two limits: there is no market to trade in, and a weekly series is too short on
+  history and too slow to reach the 30 signals needed for a verdict for a long
+  time. The sources and their format also need confirming before any reader is
+  built. Maize and other staples are not on any exchange feed I found.
 
 ## If the run goes quiet
 
