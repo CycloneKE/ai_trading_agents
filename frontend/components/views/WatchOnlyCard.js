@@ -210,8 +210,10 @@ export default function WatchOnlyCard({ mobile }) {
               <PatternTable rows={back.table} />
               <div style={{ fontSize: '11px', color: theme.colors.textMuted, marginTop: '8px', lineHeight: 1.5 }}>
                 {back.signals} signals replayed. Markets move together, so the true count is lower than it looks.
-                Net move takes off each market&apos;s assumed cost per signal ({costsText(data)}); the stock-market costs
-                are unverified assumptions. Futures prices jump when a contract rolls over, and oil and gas funds lose
+                Net move takes off each market&apos;s assumed cost per signal ({costsText(data)}). The taxes were checked
+                against public sources (UK stamp duty 0.5%, France 0.4% on single stocks, South Africa 0.25%); the
+                allowance for commission and spread is an assumption, not your broker&apos;s schedule, and Japan&apos;s
+                lack of a transaction tax is not confirmed. Futures prices jump when a contract rolls over, and oil and gas funds lose
                 value from rolling, so judge a fund by its own price. The companies listed are today&apos;s large ones,
                 which flatters their history (survivorship): the index and index-fund rows are the fairer test. Results are
                 in each market&apos;s own currency, before the exchange rate a dollar-based investor would also bear.

@@ -564,9 +564,14 @@ def describe(result: Dict[str, Any]) -> List[str]:
         return research_notes.describe(result)
     if kind == "market_pulse":
         lines = [f"Read as the AIB-AXYS Market Pulse of {result.get('as_of')}."]
-        lines.append(f"Stored price, earnings, dividend, P/E and yield for {result.get('stocks_mapped', 0)} of "
-                     f"{result.get('stocks_read', 0)} stocks. The dividend sleeve ranks from these, the "
-                     f"Market Scan shows them and the AI sees them when it reviews a trade.")
+        if result.get('stocks_read', 0):
+            lines.append(f"Stored price, earnings, dividend, P/E and yield for {result.get('stocks_mapped', 0)} of "
+                         f"{result.get('stocks_read', 0)} stocks. The dividend sleeve ranks from these, the "
+                         f"Market Scan shows them and the AI sees them when it reviews a trade.")
+        else:
+            lines.append("This issue has no Market Scorecard table that could be read, so no stock figures were "
+                         "stored from it. What it does carry (rates, exchange rates, announcements) was read "
+                         "exactly, below.")
         added, kept = result.get("price_bars_added", 0), result.get("price_bars_already_recorded", 0)
         lines.append(f"Added {added} closing prices to the price history"
                      + (f"; {kept} days were already recorded from the live feed and were left as they were."

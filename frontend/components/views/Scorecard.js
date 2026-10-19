@@ -5,7 +5,6 @@ import { useEffect, useState } from 'react';
 import { Target } from 'lucide-react';
 import { theme } from '../DashboardStyles';
 import { apiGet, card, SectionHeader, Empty, Note } from '../ui';
-import WatchOnlyCard from './WatchOnlyCard';
 
 const STATUS = {
   pass: { label: 'PASS', color: theme.colors.primary },
@@ -155,7 +154,6 @@ export default function Scorecard({ mobile }) {
           {sec.metrics.map((m) => <MetricRow key={m.id} m={m} mobile={mobile} />)}
         </div>
       ))}
-      <WatchOnlyCard mobile={mobile} />
     </div>
   );
 }

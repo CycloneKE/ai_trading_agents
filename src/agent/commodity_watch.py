@@ -60,11 +60,22 @@ SEASONAL_SHARE = 0.7
 EQUITY_DEFAULTS: Dict[str, Any] = {
     'enabled': True,
     # Assumed cost of one round trip, per market, as a percentage: the market's
-    # stamp or transaction tax on purchases plus an allowance for spread and
-    # commission. These are assumptions from memory, NOT verified rates:
-    # confirm each against the exchange and the broker before relying on a net
-    # figure. config.json can change them.
-    'costs_pct': {'uk_equities': 0.7, 'japan_equities': 0.3, 'france_equities': 0.5,
+    # tax on purchases plus an allowance for spread and commission. Checked
+    # against public sources on 18 October 2026:
+    #   UK            stamp duty reserve tax 0.5% on purchases (HMRC 2026/27 table), plus a
+    #                 PTM levy of GBP 1.50 on trades over GBP 10,000; the tax is to be
+    #                 replaced in 2027 by a securities transfer tax whose rate was not found.
+    #   France        financial transaction tax 0.4% on purchases of shares of French
+    #                 companies worth over EUR 1 billion (raised from 0.3% in 2025). Funds
+    #                 are not subject to it.
+    #   South Africa  securities transfer tax 0.25% (SARS), plus settlement and levy fees of
+    #                 about 0.006% (undated JSE page).
+    #   Japan         no securities transaction tax is believed to exist, but that was NOT
+    #                 confirmed from a source.
+    # The allowance for broker commission and spread (about 0.1% a side, more in
+    # Johannesburg) is an assumption, not any broker's schedule. Replace these with
+    # your own broker's costs; config.json can change them.
+    'costs_pct': {'uk_equities': 0.7, 'japan_equities': 0.3, 'france_equities': 0.6,
                   'south_africa_equities': 0.7},
 }
 

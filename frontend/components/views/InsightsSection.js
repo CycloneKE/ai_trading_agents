@@ -1,10 +1,11 @@
 // Insights: performance analytics, the strategies and what the agent has
 // learned about them, and the market feeds (news and the sector heatmap),
-// as three tabs of one section.
+// as tabs of one section (the last, Watched Markets, follows commodities and four overseas stock markets with no orders placed).
 import { ExternalLink, Globe, Layers } from 'lucide-react';
 import AdvancedAnalytics from '../AdvancedAnalytics';
 import AiScorecard from './AiScorecard';
 import StrategiesLearning from './StrategiesLearning';
+import WatchOnlyCard from './WatchOnlyCard';
 import { theme } from '../DashboardStyles';
 import { card, columns, SectionHeader, SubTabs } from '../ui';
 
@@ -88,7 +89,7 @@ const MarketFeeds = ({ data, mobile, onSector }) => (
 
 export default function InsightsSection({ sub, onSub, data, mobile, onSector }) {
   const tabs = [{ id: 'analytics', label: 'Analytics' }, { id: 'learning', label: 'Strategies & Learning' },
-    { id: 'feeds', label: 'Market Feeds' }];
+    { id: 'feeds', label: 'Market Feeds' }, { id: 'watch', label: 'Watched Markets' }];
   const current = tabs.some((t) => t.id === sub) ? sub : 'analytics';
   return (
     <div>
@@ -96,6 +97,7 @@ export default function InsightsSection({ sub, onSub, data, mobile, onSector }) 
       {current === 'analytics' && <><AiScorecard mobile={mobile} /><AdvancedAnalytics data={data} mobile={mobile} /></>}
       {current === 'learning' && <StrategiesLearning mobile={mobile} />}
       {current === 'feeds' && <MarketFeeds data={data} mobile={mobile} onSector={onSector} />}
+      {current === 'watch' && <WatchOnlyCard mobile={mobile} />}
     </div>
   );
 }

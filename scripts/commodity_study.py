@@ -45,8 +45,10 @@ def render(result, cost_pct):
              f"{', '.join(str(h) for h in horizons)} trading days after each signal (about "
              f"{', '.join(f'{round(h / 21)}' for h in horizons)} months). Nothing here was traded.", '',
              'Each row: how often the signal moved the right way, against how often a random day would have. '
-             '"Net" is the average move after each market\'s assumed cost, shown beside it; the stock-market costs are '
-             'unverified assumptions. The patterns signal about once a month, so over longer horizons a signal whose '
+             '"Net" is the average move after each market\'s assumed cost, shown beside it. The stock-market taxes were '
+             'checked against public sources (UK stamp duty 0.5%, France 0.4% on single stocks, South Africa 0.25%); '
+             'the allowance for commission and spread is an assumption, and Japan\'s lack of a transaction tax is not '
+             'confirmed. The patterns signal about once a month, so over longer horizons a signal whose '
              'outcome window overlaps an earlier one is counted once: otherwise the same stretch of price would be '
              'counted several times and luck would look like skill. That is why the counts fall as the horizon grows.', '']
     order = ['all_commodities', 'metals', 'energy', 'agriculture', 'all_equities', 'uk_equities', 'japan_equities',
