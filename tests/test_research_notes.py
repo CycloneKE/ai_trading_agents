@@ -441,3 +441,75 @@ def test_the_fetch_route_is_for_operators_and_follows_only_the_documents_own_lin
     assert r.status_code == 409 and 'GROQ_API_KEY' in r.get_json()['error']
     r = client.post(url, json={'url': 'https://evil.example/x'}, headers=header('operator'))
     assert r.status_code == 400 and 'not one this document contains' in r.get_json()['error']
+
+
+# ------------------------------------------- an issue the exact reader missed
+
+PULSE_FIRST = "AXYS Market Pulse – 16th Oct 2026\nEquity markets rose. NASI up 0.6% to 240.50.\n"
+PULSE_RATES = ("Fixed income\n91-day rate 8.76%\n182-day rate 8.87%\n364-day rate 9.04%\nInterbank Rate 8.75%\n"
+               "US Dollar 129.10 129.40\nEuro 150.20 150.90\n")
+
+
+def test_a_market_pulse_without_the_usual_scorecard_is_still_recognised_by_its_title_and_rates():
+    from src.agent import market_pulse as mp
+    classic = [PULSE_FIRST, "MARKET SCORECARD\nrows"]
+    assert mp.is_market_pulse(classic)
+    odd = [PULSE_FIRST, PULSE_RATES]                                  # no 'Market Scorecard' anywhere
+    assert mp.is_market_pulse(odd)
+    assert mp.is_market_pulse([PULSE_FIRST.replace('Market Pulse', 'MARKET  PULSE'), PULSE_RATES])
+
+
+def test_other_documents_are_still_not_taken_for_a_market_pulse():
+    from src.agent import market_pulse as mp
+    assert not mp.is_market_pulse([PULSE_FIRST])                                       # title but no rate lines
+    assert not mp.is_market_pulse(["Acme IPO briefing\n", "A note that mentions the Market Pulse and 91-day rate 8.76%"])
+    assert not mp.is_market_pulse([TEXT])
+    assert not mp.is_market_pulse([])
+    assert not mp.is_market_pulse(["Weekly note\n", "AXYS Market Pulse – 16th Oct 2026\n" + PULSE_RATES])   # title not on page 1
+
+
+def test_a_pulse_with_no_scorecard_stores_its_rates_exchange_rates_and_says_so(tmp_path, monkeypatch):
+    from src.agent import market_pulse as mp
+    monkeypatch.setattr(mp, '_dir', lambda: tmp_path / 'market_pulse')
+    out = mp.ingest('pulse.pdf', [PULSE_FIRST, PULSE_RATES])
+    assert out['document_type'] == 'market_pulse' and out['stocks_read'] == 0 and out['stocks_mapped'] == 0
+    assert out['rates']['tbill_91'] == pytest.approx(0.0876) and out['rates']['interbank'] == pytest.approx(0.0875)
+    text = '\n'.join(describe({**out, 'status': 'completed'}))        # the upload route adds the status
+    assert 'no Market Scorecard table that could be read' in text and 'Stored price, earnings' not in text
+    assert '91-day T-bill rate 8.76%' in text
+
+
+def test_the_upload_route_gives_such_an_issue_to_the_exact_reader_not_the_library(pipeline, monkeypatch, tmp_path):
+    from src.agent import market_pulse
+    import src.agent.broker_research_ingest as bri
+    monkeypatch.setattr(market_pulse, '_dir', lambda: tmp_path / 'market_pulse')
+    monkeypatch.setattr(market_pulse, 'page_texts', lambda path: [PULSE_FIRST, PULSE_RATES])
+    ai = FakeAI(GOOD_DIGEST)
+    out = BrokerResearchIngest(ai, pipeline, CONFIG).process_pdf('/tmp/pulse.pdf')
+    assert out['document_type'] == 'market_pulse' and ai.calls == [] and rn.notes(TODAY) == []
+
+
+# ------------------------------------------------ figures rounded by the reader
+
+def test_a_figure_rounded_from_the_quoted_one_is_the_same_figure_but_a_different_one_is_not():
+    t = rn._norm("The 91-day rate was 8.7557% and the interbank rate 8.75%, KCB rose 89.50 points")
+    ok = lambda value, quote: rn.check_fact({'label': 'x', 'value': value, 'quote': quote}, t)[0] is not None
+    assert ok('8.76%', '91-day rate was 8.7557%')                  # rounded to two places
+    assert ok('8.8%', '91-day rate was 8.7557%')                   # and to one
+    assert ok('89.5', 'KCB rose 89.50 points')                     # a trailing zero
+    assert not ok('8.9%', '91-day rate was 8.7557%')               # a different figure
+    assert not ok('8.7558%', '91-day rate was 8.7557%')            # more places than were quoted, and wrong
+    assert not ok('8.7557', 'interbank rate 8.75%')                # cannot invent precision the quote lacks
+
+
+# ------------------------------------------------------------ the market costs
+
+def test_the_market_costs_follow_the_sources_checked_and_the_config_agrees():
+    from src.agent import commodity_watch as cw
+    config = json.load(open('config/config.json', encoding='utf-8'))
+    assert cw.costs({}) == {'uk_equities': 0.7, 'japan_equities': 0.3, 'france_equities': 0.6,
+                            'south_africa_equities': 0.7}
+    assert cw.costs(config) == cw.costs({})                                   # config.json and the defaults match
+    note = config['watch_only']['equity_markets']['_comment']
+    for needle in ('0.4%', 'GBP 1.50', '0.25%', 'NOT confirmed', 'assumption'):
+        assert needle in note, needle

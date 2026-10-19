@@ -133,8 +133,19 @@ def _clean(line: str) -> str:
 
 
 def is_market_pulse(texts: List[str]) -> bool:
+    """The broker's Market Pulse: the usual issue, which carries a Market
+    Scorecard table, or an issue laid out or titled differently (for example one
+    with no scorecard) that still has the report's own title on its first page and
+    the broker's T-bill or interbank rate lines. The second test stops such an
+    issue being filed as a general commentary and read only by an AI; its rates,
+    exchange rates and announcements are read exactly."""
     joined = '\n'.join(texts)
-    return 'MARKET SCORECARD' in joined.upper() and 'PULSE' in joined.upper()
+    up = re.sub(r'\s+', ' ', joined.upper())
+    if 'MARKET SCORECARD' in up and 'PULSE' in up:
+        return True
+    first = re.sub(r'\s+', ' ', (texts[0] if texts else '').upper())
+    return bool(re.search(r'MARKET PULSE', first)) and \
+        bool(re.search(r'(91|182|364)-DAY RATE|INTERBANK RATE', up))
 
 
 _MONTHS = {m: i + 1 for i, m in enumerate(

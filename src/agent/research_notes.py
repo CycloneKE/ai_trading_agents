@@ -121,15 +121,24 @@ def _norm(s: Any) -> str:
     return re.sub(r'\s+', ' ', str(s or '')).strip().lower()
 
 
-def _numbers(s: Any) -> List[float]:
-    """The numbers in a piece of text, as numbers: 1,250.00 and 1250 are the same figure."""
+def _numbers(s: Any) -> List[Tuple[float, int]]:
+    """The numbers in a piece of text as (number, decimal places): 1,250.00 and 1250
+    are the same figure."""
     out = []
     for n in re.findall(r'\d[\d,]*(?:\.\d+)?', str(s or '')):
+        clean = n.replace(',', '')
         try:
-            out.append(float(n.replace(',', '')))
+            out.append((float(clean), len(clean.split('.')[1]) if '.' in clean else 0))
         except ValueError:
             continue
     return out
+
+
+def _in_quote(value: float, places: int, quoted: List[Tuple[float, int]]) -> bool:
+    """Is `value` a figure the quote states, exactly or rounded to `places`? A
+    reading of 8.76 for a quoted 8.7557 is the same figure, rounded; 8.9 is not."""
+    return any(abs(q - value) < 1e-9 or (places < qp and abs(round(q, places) - value) < 1e-9)
+               for q, qp in quoted)
 
 
 def _parse_day(value: Any) -> Optional[date]:
@@ -152,8 +161,8 @@ def check_fact(item: Any, text_norm: str) -> Tuple[Optional[Dict[str, str]], Opt
         return None, f'{name}: no quote from the document to back it'
     if _norm(quote) not in text_norm:
         return None, f'{name}: the quote is not in the document'
-    in_quote = set(_numbers(quote))
-    missing = [n for n in _numbers(value) if n not in in_quote]
+    quoted = _numbers(quote)
+    missing = [v for v, places in _numbers(value) if not _in_quote(v, places, quoted)]
     if missing:
         return None, f'{name}: {", ".join(f"{m:g}" for m in missing)} is not in the quoted words'
     return {'label': label[:80], 'value': value[:80], 'quote': quote[:240]}, None

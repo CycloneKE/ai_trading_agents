@@ -400,12 +400,30 @@ keep in mind when reading the results:
   dollar-based investor would also bear.
 - The companies listed are today's large ones, which flatters their history
   (survivorship). The index and index-fund rows are the fairer test.
-- Each market has an assumed round-trip cost (`watch_only.equity_markets.costs_pct`):
-  the market's tax on purchases (UK stamp duty about 0.5%, France's transaction
-  tax about 0.3%, South Africa's securities transfer tax about 0.25%, none in
-  Japan) plus an allowance for spread and commission. **These are assumptions
-  from memory, not verified rates.** Confirm each with the exchange and your
-  broker before relying on a net figure.
+- Each market has an assumed round-trip cost (`watch_only.equity_markets.costs_pct`),
+  the market's tax on purchases plus an allowance for spread and commission.
+  Checked against public sources on 18 October 2026:
+  - **UK 0.7%**: stamp duty reserve tax is 0.5% on purchases (HMRC 2026/27 table),
+    plus a PTM levy of GBP 1.50 on trades over GBP 10,000. The tax is due to be
+    replaced in 2027 by a securities transfer tax; draft legislation was published
+    in July 2026 and I did not find its rate.
+  - **France 0.6%**: the financial transaction tax is **0.4%** (raised from 0.3% in
+    2025) on purchases of shares of French companies worth over EUR 1 billion
+    (about 121 companies on the 2026 list). Index funds are not subject to it, so
+    the fund row's cost is slightly overstated.
+  - **South Africa 0.7%**: securities transfer tax 0.25% (SARS, unchanged for
+    2026), plus settlement and levy fees of about 0.006% (an undated JSE page).
+    Brokerage carries VAT; I found no current schedule.
+  - **Japan 0.3%**: I believe there is no securities transaction tax, and that
+    non-residents without a permanent establishment are generally not taxed on
+    ordinary share sales, but I could not confirm either from a source. Some
+    online brokers charge no commission on certain venues (Japannext X-Market for
+    retail brokers).
+  - **The allowance for commission and spread (about 0.1% a side, more in
+    Johannesburg) is an assumption, not any broker's schedule.** Interactive
+    Brokers' published European tiers run from 0.05% of trade value down to
+    0.015% with a EUR 1.25 minimum, but I could not confirm its rates for each of
+    these four exchanges. Replace the figures with your own broker's.
 - A ticker that returns no prices is skipped; the dashboard shows which
   instruments loaded. Not every ticker has been confirmed against the live feed.
 
@@ -427,8 +445,9 @@ To replay the history now, from the backend container's Terminal:
     python scripts/commodity_study.py
     python scripts/commodity_study.py --only metals --kind futures
 
-The dashboard's Scorecard page shows both records and what each pattern says
-today. Two cautions: Yahoo's futures series jump when a contract rolls over, and
+The dashboard's **Insights, Watched Markets** tab shows both records and what each
+pattern says today (it is separate from the Scorecard, so it appears even while the
+scorecard is slow to load). Two cautions: Yahoo's futures series jump when a contract rolls over, and
 the oil and gas funds (USO, UNG) lose value from rolling contracts, so judge a
 fund by its own price. Switching a pattern into real trading is a separate
 decision, and not one this watch makes.
