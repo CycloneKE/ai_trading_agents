@@ -85,6 +85,19 @@ const Reading = ({ s }) => {
   );
 };
 
+export const HorizonPicker = ({ horizons, value, onChange }) => (
+  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center', marginTop: '12px' }}>
+    <span style={{ fontSize: '11px', fontWeight: 800, color: theme.colors.textMuted, letterSpacing: '0.4px' }}>JUDGED</span>
+    {horizons.map((h) => (
+      <button key={h} onClick={() => onChange(h)} aria-pressed={h === value}
+        style={{ background: h === value ? `${theme.colors.primary}22` : 'transparent', color: h === value ? theme.colors.primary : theme.colors.textSecondary,
+                 border: `1px solid ${h === value ? theme.colors.primary : theme.colors.border}`, borderRadius: '999px', padding: '3px 12px', fontSize: '12px', cursor: 'pointer' }}>
+        {h} days
+      </button>
+    ))}
+  </div>
+);
+
 export const Instruments = ({ items }) => (
   <Table>
     <Head cols={['INSTRUMENT', 'MARKET', 'KIND', 'LAST PRICE', 'TREND', '12-MONTH MOVE', 'THIS MONTH, EARLIER YEARS']} />
@@ -117,6 +130,7 @@ export const Instruments = ({ items }) => (
 export default function WatchOnlyCard({ mobile }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [horizon, setHorizon] = useState(20);
 
   useEffect(() => {
     let alive = true;
@@ -149,8 +163,10 @@ export default function WatchOnlyCard({ mobile }) {
     );
   }
 
-  const live = data.live || { signals: 0, table: [] };
-  const back = data.backfill || { signals: 0, table: [] };
+  const horizons = data.horizons && data.horizons.length ? data.horizons : [data.horizon];
+  const pick = (part) => ((part && part.tables && part.tables[String(horizon)]) || (horizon === data.horizon && part && part.table) || []);
+  const live = { ...(data.live || { signals: 0 }), table: pick(data.live) };
+  const back = { ...(data.backfill || { signals: 0 }), table: pick(data.backfill) };
   const started = data.started || 'today';
   return (
     <div style={{ display: 'grid', gap: mobile ? '16px' : '24px' }}>
@@ -158,10 +174,19 @@ export default function WatchOnlyCard({ mobile }) {
         <SectionHeader title="Watch only: commodities and stock markets (no orders are placed)" icon={Eye} />
         <Note tone={theme.colors.accent}>
           The agent follows commodities and the UK, Japanese, French and South African stock markets and records
-          what three well-known patterns would have said, then what each actually did {data.horizon} trading days
+          what three well-known patterns would have said, then what each actually did some trading days
           later, against how often it simply rose anyway. Nothing here trades: no broker reaches these markets.
           Watching began {started}{startedBy(data)}.
         </Note>
+        <HorizonPicker horizons={horizons} value={horizon} onChange={setHorizon} />
+        <div style={{ fontSize: '11px', color: theme.colors.textMuted, marginTop: '10px', lineHeight: 1.5 }}>
+          Judged {horizon} trading days (about {Math.round(horizon / 21)} month{Math.round(horizon / 21) === 1 ? '' : 's'}) after
+          each signal. The patterns signal about once a month, so over longer horizons a signal whose outcome window overlaps an
+          earlier one is counted once (otherwise the same stretch of price is counted several times and luck looks like skill);
+          that is why the counts fall as the horizon grows. The seasonal pattern is a one-month pattern, so longer horizons dilute
+          it by design. Trying several horizons gives several chances for luck: a pattern that is a candidate at one horizon only
+          deserves doubt; one that holds at neighbouring horizons deserves a closer look.
+        </div>
         <div style={{ fontSize: '11px', color: theme.colors.textMuted, marginTop: '10px', lineHeight: 1.5 }}>
           &quot;Candidate&quot; means the pattern beat chance by two standard errors in all the history and in both
           halves of it. It earns a place on the watch, nothing more: only the live record below confirms it. Many
@@ -172,8 +197,8 @@ export default function WatchOnlyCard({ mobile }) {
       <div style={card(mobile)}>
         <SectionHeader title={`Live record since ${started} (the real test)`} icon={Eye} />
         {live.table.length === 0
-          ? <Empty>No signal has a known outcome yet. Each outcome arrives {data.horizon} trading days after its signal,
-              and the patterns signal about once a month per commodity, so expect weeks before anything shows here.</Empty>
+          ? <Empty>No signal has a known outcome yet. Each outcome arrives {horizon} trading days after its signal,
+              and the patterns signal about once a month per commodity, so expect weeks, and longer at longer horizons, before anything shows here.</Empty>
           : <PatternTable rows={live.table} />}
       </div>
 

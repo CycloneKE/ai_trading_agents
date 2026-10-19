@@ -404,3 +404,96 @@ def test_no_stock_market_instrument_is_traded_by_the_agent():
     traded = set(config['data_manager']['symbols']) | set(config['data_manager'].get('nse_symbols', []))
     watched = {i['symbol'] for i in cw.instruments(config)}
     assert not watched & traded
+
+
+# ---------------------------------------------------------- longer horizons
+
+def sig_rows(days, symbol='GC=F', source='momentum_12m', horizon=60, market='metals', ret=0.01, chance=0.5):
+    return [{'symbol': symbol, 'day': d.isoformat(), 'source': source, 'action': 'buy', 'horizon': horizon,
+             'market': market, 'ret': ret, 'chance': chance, 'version': 'backfill'} for d in days]
+
+
+def test_signals_whose_outcome_windows_overlap_are_counted_once():
+    monthly = [date(2020, 1, 2) + timedelta(days=30 * i) for i in range(24)]            # 24 monthly signals
+    rows = sig_rows(monthly, horizon=20)
+    assert len(cw.thin(rows, 20)) == 24                                                  # a month apart: none overlap
+    assert len(cw.thin(rows, 60)) == 8                                                   # one in every three months
+    assert len(cw.thin(rows, 120)) == 4                                                  # one in every six
+    daily = [date(2020, 1, 1) + timedelta(days=i) for i in range(60)]
+    assert len(cw.thin(sig_rows(daily, horizon=20), 20)) == 3                            # a daily signal is counted once a window
+
+
+def test_thinning_is_per_instrument_and_per_pattern():
+    d = [date(2020, 1, 1), date(2020, 1, 3)]
+    rows = (sig_rows(d, 'GC=F', 'momentum_12m') + sig_rows(d, 'SI=F', 'momentum_12m') + sig_rows(d, 'GC=F', 'seasonal'))
+    assert len(cw.thin(rows, 60)) == 3                                                   # one each, the second of each pair dropped
+
+
+def test_overlap_would_have_inflated_luck_into_skill_without_the_correction():
+    # Pure noise judged 120 trading days on. Counting every monthly signal as independent
+    # inflates z by about the square root of the overlap (about 6); thinned, it stays near 1.
+    days = weekdays(date(2000, 1, 3), 252 * 26)
+    noise = {f'N{i}': walk(days, drift=0.0, vol=0.012, seed=900 + i) for i in range(10)}
+    result = cw.run_study(noise, {s: {'group': 'metals'} for s in noise}, min_signals=5, horizons=(120,))
+    thinned_z = [abs(r['z']) for r in result['tables'][120] if r['market'] == 'all_commodities']
+    assert max(thinned_z) < 3
+    # the same rows, counted the old way: the signals are all there but overlap
+    from src.agent.signal_ledger import skill, outcomes_for
+    sigs = []
+    for sym, closes in noise.items():
+        sigs += cw.signals_for(sym, 'metals', closes, 'backfill')
+    rows = outcomes_for(sigs, lambda s: noise[s], (120,))
+    raw_n = len([r for r in rows if r['source'] == 'momentum_12m'])
+    thin_n = len(cw.thin([r for r in rows if r['source'] == 'momentum_12m'], 120))
+    assert raw_n > 4 * thin_n
+
+
+def test_the_study_judges_at_every_horizon_asked_and_the_counts_fall_as_the_horizon_grows():
+    trending = {f'T{i}': regime_walk(DAYS, seed=i) for i in range(6)}
+    result = cw.run_study(trending, {s: {'group': 'metals'} for s in trending}, min_signals=5,
+                          horizons=cw.HORIZONS)
+    assert sorted(result['tables']) == [20, 60, 120] and result['table'] == result['tables'][20]
+    n = {h: next(r['n'] for r in result['tables'][h] if r['source'] == 'momentum_12m' and r['market'] == 'all_commodities')
+         for h in (20, 60, 120)}
+    assert n[20] > n[60] > n[120] > 20
+    # a persistent trend that lasts about two years is followed at all three horizons
+    for h in (20, 60, 120):
+        row = next(r for r in result['tables'][h] if r['source'] == 'momentum_12m' and r['market'] == 'all_commodities')
+        assert row['hit_rate'] > row['chance']
+
+
+def test_the_job_records_the_longer_horizons_and_the_report_has_a_table_for_each(tmp_path):
+    closes = {'GC=F': regime_walk(DAYS, seed=2)}
+    w = watcher(tmp_path, closes)
+    w.run()
+    horizons = {r['horizon'] for r in w.ledger.rows()}
+    assert {20, 60, 120} <= horizons
+    rep = cw.report(str(tmp_path), {})
+    assert rep['horizons'] == [20, 60, 120] and rep['horizon'] == 20
+    for label in ('backfill', 'live'):
+        assert sorted(rep[label]['tables']) == ['120', '20', '60'] and rep[label]['table'] == rep[label]['tables']['20']
+    assert any(r['n'] > 0 for r in rep['backfill']['tables']['60'])
+
+
+def load_cli():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('commodity_study_cli', 'scripts/commodity_study.py')
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_study_script_prints_every_horizon_and_a_summary_that_warns_about_chance():
+    cli = load_cli()
+    trending = {f'T{i}': regime_walk(DAYS, seed=i) for i in range(6)}
+    result = cw.run_study(trending, {s: {'group': 'uk_equities'} for s in trending}, min_signals=5,
+                          horizons=cw.HORIZONS)
+    text = cli.render(result, 0.1)
+    for needle in ('Judged 20 trading days on', 'Judged 60 trading days on', 'Judged 120 trading days on',
+                   'uk equities (60 days)', 'all equities (120 days)', 'Summary of the pooled rows',
+                   'counts fall as the horizon grows', 'one-month pattern'):
+        assert needle in text, needle
+    if 'CANDIDATE at' in text:
+        assert 'chances for luck' in text
+    else:
+        assert 'None of the 18 pooled rows is a candidate.' in text
