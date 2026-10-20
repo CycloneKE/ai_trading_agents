@@ -196,8 +196,9 @@ class LLMOrchestrator:
                       f"Current Asset Volatility: {volatility}\n"
         
         if research_context:
+            source_label = research_context.get('source') or 'Institutional Research'
             user_prompt += (
-                f"Broker Research Context (AIB AXYS): "
+                f"Broker Research Context ({source_label}): "
                 f"Recommendation={research_context.get('recommendation')}, "
                 f"Target Price={research_context.get('target_price')}, "
                 f"Rationale: {research_context.get('rationale')}\n"

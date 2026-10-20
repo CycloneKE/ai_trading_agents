@@ -1229,7 +1229,8 @@ class TradingAPI:
                 if not ingest:
                     return jsonify({'error': 'Research ingest component is not initialized'}), 500
                     
-                result = ingest.process_pdf(file_path, source='aib_axys')
+                source = request.form.get('source', 'auto')
+                result = ingest.process_pdf(file_path, source=source)
                 return jsonify(result), 200
             else:
                 return jsonify({'error': 'Only PDF files are supported'}), 400

@@ -71,6 +71,7 @@ const ResearchView = ({ activeTab, fetchData, onDrill }) => {
   const [watchlist, setWatchlist] = useState([]);
   const [uploads, setUploads] = useState([]);
   const [filterTab, setFilterTab] = useState('all');
+  const [selectedSource, setSelectedSource] = useState('auto');
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('trading_token') : null;
 
@@ -135,6 +136,7 @@ const ResearchView = ({ activeTab, fetchData, onDrill }) => {
     
     const formData = new FormData();
     formData.append('file', selectedFile);
+    formData.append('source', selectedSource);
     
     try {
       const res = await fetch(`${getApiBase()}/api/operator/upload-research`, {
@@ -194,7 +196,47 @@ const ResearchView = ({ activeTab, fetchData, onDrill }) => {
     <div style={{ display: 'flex', flexDirection: 'column', gap: '30px' }}>
       <div style={{ display: 'flex', gap: '30px', flexWrap: 'wrap' }}>
         <div style={{ ...glassCard, flex: 1, minWidth: '400px' }}>
-          <SectionHeader title="Research PDF Ingestion" icon={Upload} />
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
+            <SectionHeader title="Universal Research Ingestion" icon={Upload} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontSize: '11px', color: theme.colors.textMuted, fontWeight: 700, textTransform: 'uppercase' }}>SOURCE:</span>
+              <select
+                value={selectedSource}
+                onChange={(e) => setSelectedSource(e.target.value)}
+                style={{
+                  backgroundColor: 'rgba(15,23,42,0.85)',
+                  color: theme.colors.text,
+                  border: `1px solid ${theme.colors.border}`,
+                  borderRadius: '6px',
+                  padding: '4px 8px',
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  outline: 'none',
+                  cursor: 'pointer'
+                }}
+              >
+                <option value="auto">✨ Auto-Detect Publisher</option>
+                <optgroup label="East Africa / NSE">
+                  <option value="aib_axys">AIB AXYS Africa</option>
+                  <option value="genghis">Genghis Capital</option>
+                  <option value="faida">Faida Investment Bank</option>
+                  <option value="sib">Standard Investment Bank</option>
+                  <option value="dyer_blair">Dyer & Blair</option>
+                  <option value="ncba">NCBA Investment Bank</option>
+                  <option value="kcb">KCB Capital</option>
+                </optgroup>
+                <optgroup label="International / US">
+                  <option value="goldman">Goldman Sachs</option>
+                  <option value="morgan_stanley">Morgan Stanley</option>
+                  <option value="jpmorgan">J.P. Morgan</option>
+                  <option value="bofa">Bank of America</option>
+                  <option value="citi">Citigroup</option>
+                  <option value="morningstar">Morningstar</option>
+                  <option value="generic">Institutional Research (Generic)</option>
+                </optgroup>
+              </select>
+            </div>
+          </div>
           <div style={{ border: `2px dashed ${theme.colors.border}`, borderRadius: '12px', padding: '30px', textAlign: 'center', backgroundColor: 'rgba(255,255,255,0.01)', position: 'relative' }}>
             {!selectedFile && (
               <input type="file" onChange={handleFileChange} accept=".pdf" style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', opacity: 0, cursor: 'pointer' }} />
@@ -214,8 +256,8 @@ const ResearchView = ({ activeTab, fetchData, onDrill }) => {
               </div>
             ) : (
               <div>
-                <p style={{ margin: 0, fontSize: '13px', color: theme.colors.textSecondary }}>Drag & drop or click to select AIB AXYS broker report (PDF)</p>
-                <p style={{ margin: '5px 0 0 0', fontSize: '11px', color: theme.colors.textMuted }}>Directly extracts symbols, recommendations & investment rationales via LLM</p>
+                <p style={{ margin: 0, fontSize: '13px', color: theme.colors.textSecondary }}>Drag & drop or click to select institutional broker report (PDF)</p>
+                <p style={{ margin: '5px 0 0 0', fontSize: '11px', color: theme.colors.textMuted }}>Extracts symbols, ratings & investment rationales across East African (NSE) and US equities via LLM</p>
               </div>
             )}
           </div>
@@ -228,7 +270,7 @@ const ResearchView = ({ activeTab, fetchData, onDrill }) => {
               </div>
               {uploadResult.status === 'completed' ? (
                 <div style={{ fontSize: '12px', marginTop: '5px', color: theme.colors.textSecondary }}>
-                  <p style={{ margin: '3px 0' }}>Successfully processed <strong>{uploadResult.signals_processed}</strong> recommendations.</p>
+                  <p style={{ margin: '3px 0' }}>Successfully processed <strong>{uploadResult.signals_processed}</strong> recommendations{uploadResult.source ? <span> from <strong style={{ color: theme.colors.primary }}>{uploadResult.source}</strong></span> : ''}.</p>
                   {uploadResult.auto_followed?.length > 0 && <p style={{ margin: '3px 0' }}>Auto-followed watchlist: <span style={{ color: theme.colors.primary }}>{uploadResult.auto_followed.join(', ')}</span></p>}
                   {uploadResult.escalated?.length > 0 && <p style={{ margin: '3px 0' }}>Escalated to Operator queue: <span style={{ color: theme.colors.warning }}>{uploadResult.escalated.map(x => x[0]).join(', ')}</span></p>}
                 </div>
@@ -246,6 +288,7 @@ const ResearchView = ({ activeTab, fetchData, onDrill }) => {
               <thead>
                 <tr style={{ borderBottom: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, textAlign: 'left' }}>
                   <th style={{ padding: '8px 0' }}>FILENAME</th>
+                  <th style={{ padding: '8px 0' }}>PUBLISHER</th>
                   <th style={{ padding: '8px 0' }}>DATE</th>
                   <th style={{ padding: '8px 0' }}>EXTRACTS</th>
                   <th style={{ padding: '8px 0' }}>STATUS</th>
@@ -256,6 +299,7 @@ const ResearchView = ({ activeTab, fetchData, onDrill }) => {
                   uploads.map(u => (
                     <tr key={u.id} style={{ borderBottom: `1px solid ${theme.colors.border}20` }}>
                       <td style={{ padding: '10px 0', fontWeight: 'bold' }}>{u.filename}</td>
+                      <td style={{ padding: '10px 0', color: theme.colors.accent, fontWeight: 600 }}>{u.source || 'Institutional'}</td>
                       <td style={{ padding: '10px 0', color: theme.colors.textMuted }}>{new Date(u.uploaded_at).toLocaleString()}</td>
                       <td style={{ padding: '10px 0' }}>{u.signals_count} positions</td>
                       <td style={{ padding: '10px 0', color: u.status === 'completed' ? theme.colors.primary : theme.colors.danger }}>{u.status.toUpperCase()}</td>

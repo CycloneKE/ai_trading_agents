@@ -41,6 +41,65 @@ Ensure the output is strictly valid raw JSON without markdown formatting or trai
 """
 
 
+KNOWN_PUBLISHERS = [
+    # East Africa / NSE
+    (r"\baib[- ]?axys\b|\baxys\b", "AIB AXYS Africa"),
+    (r"\bgenghis(\s+capital)?\b", "Genghis Capital"),
+    (r"\bfaida(\s+investment\s+bank)?\b|\bfib\b", "Faida Investment Bank"),
+    (r"\bstandard\s+investment\s+bank\b|\bsib\b", "Standard Investment Bank"),
+    (r"\bdyer\s*(&|and)\s*blair\b", "Dyer & Blair"),
+    (r"\bkcb\s+capital\b", "KCB Capital"),
+    (r"\bncba(\s+investment\s+bank)?\b", "NCBA Investment Bank"),
+    (r"\bsterling(\s+capital)?\b", "Sterling Capital"),
+    (r"\bold\s+mutual(\s+securities)?\b", "Old Mutual Securities"),
+    (r"\brencap\b|\brenaissance\s+capital\b", "Renaissance Capital"),
+    # International / US
+    (r"\bgoldman(\s+sachs)?\b|\bgs\s+research\b", "Goldman Sachs"),
+    (r"\bmorgan\s+stanley\b|\bms\s+research\b", "Morgan Stanley"),
+    (r"\bj\.?p\.?\s*morgan\b|\bjpmorgan\b", "J.P. Morgan"),
+    (r"\bbank\s+of\s+america\b|\bbofa\b|\bmerrill\s+lynch\b", "Bank of America"),
+    (r"\bciti(group)?(\s+research)?\b", "Citigroup"),
+    (r"\bbarclays(\s+capital)?\b", "Barclays"),
+    (r"\bubs(\s+investment\s+bank)?\b", "UBS"),
+    (r"\bjefferies\b", "Jefferies"),
+    (r"\bmorningstar\b", "Morningstar"),
+    (r"\bzacks(\s+investment\s+research)?\b", "Zacks"),
+    (r"\bcfra(\s+research)?\b", "CFRA"),
+]
+
+SOURCE_ALIAS_MAP = {
+    "auto": None,
+    "aib_axys": "AIB AXYS Africa",
+    "genghis": "Genghis Capital",
+    "faida": "Faida Investment Bank",
+    "sib": "Standard Investment Bank",
+    "dyer_blair": "Dyer & Blair",
+    "ncba": "NCBA Investment Bank",
+    "kcb": "KCB Capital",
+    "goldman": "Goldman Sachs",
+    "morgan_stanley": "Morgan Stanley",
+    "jpmorgan": "J.P. Morgan",
+    "bofa": "Bank of America",
+    "citi": "Citigroup",
+    "morningstar": "Morningstar",
+    "generic": "Institutional Research",
+}
+
+
+def detect_research_source(text: str, filename: str = "", preferred_source: str = "auto") -> str:
+    """Resolve or auto-detect research publisher name from text and filename."""
+    import re
+    if preferred_source and preferred_source.lower() not in ("auto", ""):
+        return SOURCE_ALIAS_MAP.get(preferred_source.lower(), preferred_source)
+    
+    sample = f"{filename} {text[:3500]}".lower()
+    for pattern, canonical_name in KNOWN_PUBLISHERS:
+        if re.search(pattern, sample, re.IGNORECASE):
+            return canonical_name
+            
+    return "Institutional Research"
+
+
 class BrokerResearchIngest:
     def __init__(self, llm_orchestrator, escalation_manager: EscalationManager, config: Dict[str, Any]):
         self.llm = llm_orchestrator
@@ -56,16 +115,16 @@ class BrokerResearchIngest:
 
         # Get list of configured active symbols
         dm_cfg = config.get("data_manager", {})
-        self.configured_symbols = set([s.upper() for s in dm_cfg.get("symbols", []) + dm_cfg.get("nse_symbols", [])])
+        self.us_symbols = set([s.upper() for s in dm_cfg.get("symbols", [])])
+        self.nse_symbols = set([s.upper() for s in dm_cfg.get("nse_symbols", [])])
+        self.configured_symbols = self.us_symbols | self.nse_symbols
 
-    def process_pdf(self, file_path: str, source: str = 'aib_axys') -> Dict[str, Any]:
+    def process_pdf(self, file_path: str, source: str = 'auto') -> Dict[str, Any]:
         """
         Ingest a PDF research paper, extract signals, and apply follow/escalation logic.
+        Supports both automatic publisher detection and explicit source overrides.
         """
-        logger.info(f"Starting ingest of research PDF: {file_path}")
-        
-        # Record upload in DB
-        upload_id = self.escalation_manager.record_upload(os.path.basename(file_path), source)
+        logger.info(f"Starting ingest of research PDF: {file_path} (source: {source})")
         
         try:
             # 1. Parse PDF with full table & page structure
@@ -74,6 +133,12 @@ class BrokerResearchIngest:
             
             if not text:
                 raise ValueError("No text could be extracted from the PDF.")
+                
+            resolved_source = detect_research_source(text, os.path.basename(file_path), source)
+            logger.info(f"Research publisher resolved: {resolved_source}")
+            
+            # Record upload in DB with resolved source
+            upload_id = self.escalation_manager.record_upload(os.path.basename(file_path), resolved_source)
                 
             # 2. Extract signals via LLM across all page chunks
             signals = self._extract_signals_via_llm(extracted)
@@ -98,10 +163,11 @@ class BrokerResearchIngest:
                 
                 if action == "auto_follow":
                     # Add to watchlist database directly
+                    market = signal.get("market") or ("international" if symbol in self.us_symbols else "kenyan")
                     self.escalation_manager.add_to_watchlist(
                         symbol=symbol,
-                        market=signal.get("market", "kenyan"),
-                        source=f"upload_{upload_id}",
+                        market=market,
+                        source=resolved_source,
                         recommendation=signal.get("recommendation", "HOLD"),
                         target_price=signal.get("target_price", 0.0),
                         rationale=signal.get("rationale", "")
@@ -127,6 +193,7 @@ class BrokerResearchIngest:
             
             return {
                 "upload_id": upload_id,
+                "source": resolved_source,
                 "status": "completed",
                 "signals_processed": processed_count,
                 "auto_followed": auto_followed,
@@ -143,8 +210,33 @@ class BrokerResearchIngest:
             }
 
     def _extract_signals_fallback(self, text: str) -> List[Dict[str, Any]]:
-        """Fallback heuristic matcher to extract signals across all known company names and symbols."""
-        logger.info("Running enhanced heuristic signal extractor across all NSE company profiles...")
+        """Fallback heuristic matcher to extract signals across NSE and US company profiles."""
+        logger.info("Running enhanced heuristic signal extractor across all known NSE & US company profiles...")
+        
+        US_COMPANY_MAP = {
+            "AAPL": ["AAPL", "APPLE", "APPLE INC"],
+            "MSFT": ["MSFT", "MICROSOFT"],
+            "NVDA": ["NVDA", "NVIDIA"],
+            "TSLA": ["TSLA", "TESLA"],
+            "AMZN": ["AMZN", "AMAZON"],
+            "GOOGL": ["GOOGL", "GOOG", "ALPHABET", "GOOGLE"],
+            "META": ["META", "FACEBOOK"],
+            "AMD": ["AMD", "ADVANCED MICRO DEVICES"],
+            "SPY": ["SPY", "S&P 500", "SPDR S&P 500"],
+            "QQQ": ["QQQ", "INVESCO QQQ", "NASDAQ 100"],
+            "SMH": ["SMH", "VANECK SEMICONDUCTOR"],
+            "IWM": ["IWM", "RUSSELL 2000"],
+            "NFLX": ["NFLX", "NETFLIX"],
+            "AVGO": ["AVGO", "BROADCOM"],
+            "COST": ["COST", "COSTCO"],
+            "INTC": ["INTC", "INTEL"],
+            "JPM": ["JPM", "JPMORGAN", "JP MORGAN"],
+            "V": ["VISA"],
+            "MA": ["MASTERCARD"],
+            "UNH": ["UNH", "UNITEDHEALTH"],
+            "LLY": ["LLY", "ELI LILLY"],
+            "WMT": ["WMT", "WALMART"],
+        }
         
         COMPANY_MAP = {
             "ABSA": ["ABSA", "ABSA BANK"],
@@ -176,7 +268,8 @@ class BrokerResearchIngest:
         import re
         seen_symbols = set()
 
-        for canonical_sym, aliases in COMPANY_MAP.items():
+        COMBINED_MAP = {**COMPANY_MAP, **US_COMPANY_MAP}
+        for canonical_sym, aliases in COMBINED_MAP.items():
             for alias in aliases:
                 matches = list(re.finditer(rf"\b{re.escape(alias)}\b", text, re.IGNORECASE))
                 if not matches or canonical_sym in seen_symbols:
@@ -236,9 +329,10 @@ class BrokerResearchIngest:
                     # Clean rationale text
                     clean_rationale = re.sub(r"https?://[^\s\)\>]+", "", context).strip()
 
+                    is_us = canonical_sym in US_COMPANY_MAP or canonical_sym in getattr(self, 'us_symbols', set())
                     extracted.append({
                         "symbol": canonical_sym,
-                        "market": "kenyan",
+                        "market": "international" if is_us else "kenyan",
                         "current_price": current_price,
                         "target_price": target_price,
                         "upside_pct": round(((target_price - current_price) / current_price * 100), 2) if (target_price and current_price and current_price > 0) else None,
