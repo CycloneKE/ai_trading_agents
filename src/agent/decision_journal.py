@@ -25,6 +25,7 @@ SKIP_REASONS = {
     'below_confidence',   # under the execution confidence floor
     'bias_downgrade',     # buy waits: its market already had several new buys today
     'llm_veto',           # LLM validation changed action to hold
+    'consensus_disagreement', # secondary LLM cross-validation veto
     'fallback_price',     # price was synthetic fallback, not tradeable
     'halted',             # kill switch engaged
     'pdt_guard',          # pattern-day-trader block

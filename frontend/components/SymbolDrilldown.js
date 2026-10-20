@@ -10,6 +10,7 @@ const REASON_LABEL = {
   below_confidence: 'Below confidence floor',
   bias_downgrade: 'Waiting: enough new buys in this market today',
   llm_veto: 'LLM vetoed the trade',
+  consensus_disagreement: 'Dual-model consensus disagreement',
   fallback_price: 'Price was synthetic fallback',
   stale_price: 'Latest price is too old (stock suspended or not trading)',
   market_closed: 'Market closed (US stocks: weekdays 9:30 to 16:00 New York; forex: Sunday evening to Friday evening); looked at again when it opens',
@@ -40,7 +41,7 @@ const MARKET_LABEL = { nse: 'NSE KENYA', us_equity: 'US STOCK', crypto: 'CRYPTO'
 const reasonColor = (r) => {
   if (!r) return theme.colors.primary;
   if (['halted', 'risk_limits', 'pdt_guard'].includes(r)) return theme.colors.danger;
-  if (['llm_veto', 'bias_downgrade'].includes(r)) return theme.colors.accent;
+  if (['llm_veto', 'bias_downgrade', 'consensus_disagreement'].includes(r)) return theme.colors.accent;
   if (r === 'hold') return theme.colors.textMuted;
   return theme.colors.warning;
 };
@@ -173,20 +174,55 @@ const SymbolDrilldown = ({ symbol, onClose }) => {
                     <div style={{ color: theme.colors.textMuted, fontSize: '13px' }}>Decision internals are visible to operators only.</div>
                   )}
                   {!data.decisions_restricted && decisions.length === 0 && <div style={{ color: theme.colors.textMuted, fontSize: '13px' }}>No decisions recorded yet.</div>}
-                  {decisions.map((d, i) => (
-                    <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: `1px solid ${theme.colors.border}30`, fontSize: '12px' }}>
-                      <div>
-                        <span style={{ color: reasonColor(d.skip_reason), fontWeight: 700 }}>
-                          {d.executed ? `EXECUTED ${d.action?.toUpperCase()}` : (REASON_LABEL[d.skip_reason] || d.skip_reason || 'hold')}
-                        </span>
+                  {decisions.map((d, i) => {
+                    const verdict = d.llm_verdict;
+                    const hasConsensus = verdict && verdict.consensus_verified !== undefined;
+                    const isDualVerified = verdict && verdict.consensus_verified === true;
+                    const sec = verdict && verdict.secondary_verdict;
+
+                    return (
+                      <div key={i} style={{ padding: '8px 0', borderBottom: `1px solid ${theme.colors.border}30`, fontSize: '12px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '3px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                            <span style={{ color: reasonColor(d.skip_reason), fontWeight: 700 }}>
+                              {d.executed ? `EXECUTED ${d.action?.toUpperCase()}` : (REASON_LABEL[d.skip_reason] || d.skip_reason || 'hold')}
+                            </span>
+                            {hasConsensus && (
+                              <span style={{
+                                fontSize: '10px',
+                                padding: '1px 5px',
+                                borderRadius: '4px',
+                                fontWeight: 800,
+                                backgroundColor: isDualVerified ? 'rgba(16,185,129,0.15)' : 'rgba(244,63,94,0.15)',
+                                color: isDualVerified ? theme.colors.primary : theme.colors.danger,
+                                border: `1px solid ${isDualVerified ? theme.colors.primary : theme.colors.danger}40`
+                              }}>
+                                {isDualVerified ? '✓ DUAL CONSENSUS' : '✗ CONSENSUS DISAGREEMENT'}
+                              </span>
+                            )}
+                          </div>
+                          <span style={{ color: theme.colors.textMuted, fontSize: '10px' }}>{d.ts ? new Date(d.ts).toLocaleTimeString() : ''}</span>
+                        </div>
                         <div style={{ color: theme.colors.textMuted, fontSize: '10px' }}>
                           conf {(d.ensemble_confidence || 0).toFixed(2)}
-                          {d.llm_verdict?.reasoning ? ` · LLM: ${String(d.llm_verdict.reasoning).slice(0, 45)}` : ''}
+                          {verdict?.reasoning ? ` · LLM: ${String(verdict.reasoning).slice(0, 60)}` : ''}
                         </div>
+                        {sec && (
+                          <div style={{
+                            marginTop: '4px',
+                            padding: '3px 6px',
+                            borderRadius: '4px',
+                            backgroundColor: 'rgba(139,92,246,0.08)',
+                            border: '1px solid rgba(139,92,246,0.2)',
+                            fontSize: '10px',
+                            color: '#c084fc'
+                          }}>
+                            <strong>Secondary [{sec.model || 'Reviewer'}]:</strong> {sec.action?.toUpperCase()} ({sec.confidence?.toFixed(2)}) — {sec.reasoning}
+                          </div>
+                        )}
                       </div>
-                      <span style={{ color: theme.colors.textMuted, fontSize: '10px' }}>{d.ts ? new Date(d.ts).toLocaleTimeString() : ''}</span>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
 

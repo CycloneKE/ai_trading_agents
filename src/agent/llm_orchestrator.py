@@ -310,7 +310,7 @@ class LLMOrchestrator:
             return {'calls_today': 0, 'tokens_today': 0}
         return {'calls_today': used['calls'], 'tokens_today': used['tokens']}
 
-    def validate_trade(self, symbol: str, strategy_signal: Dict[str, Any], market_data: Dict[str, Any], news_data: list = None, research_context: Dict[str, Any] = None, sector_outlook: Dict[str, Any] = None, track_record: str = None) -> Dict[str, Any]:
+    def validate_trade(self, symbol: str, strategy_signal: Dict[str, Any], market_data: Dict[str, Any], news_data: list = None, research_context: Dict[str, Any] = None, sector_outlook: Dict[str, Any] = None, track_record: str = None, episodic_memory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Takes the base strategy signal and validates it against current market context using an LLM.
         """
@@ -361,9 +361,10 @@ class LLMOrchestrator:
                        + f"Price: {market_data.get('close', 'Unknown')}; volatility {volatility}\n")
 
         if research_context and (research_context.get('recommendation') or research_context.get('rationale')):
+            source = research_context.get('source') or 'Institutional Research'
             user_prompt += (
-                f"Broker research: {research_context.get('recommendation')}, "
-                f"target {research_context.get('target_price')}. {str(research_context.get('rationale') or '')[:300]}\n"
+                f"Broker Research Context ({source}): recommendation {research_context.get('recommendation')}, "
+                f"Target Price={research_context.get('target_price')}. {str(research_context.get('rationale') or '')[:300]}\n"
             )
         if research_context and research_context.get('documents'):
             # Background from uploaded documents (research_notes.py): checked
@@ -385,6 +386,26 @@ class LLMOrchestrator:
         if track_record:
             user_prompt += f"Agent track record: {track_record}\n"
 
+        if episodic_memory:
+            user_prompt += f"\n--- Episodic Memory and Historical Performance for {symbol} ---\n"
+            if isinstance(episodic_memory, dict):
+                if episodic_memory.get("recent_decisions"):
+                    user_prompt += "Recent Decisions on this asset:\n"
+                    for d in episodic_memory["recent_decisions"]:
+                        user_prompt += f"  * {d}\n"
+                if episodic_memory.get("recent_fills"):
+                    user_prompt += "Recent Fills / Execution PnL:\n"
+                    for f in episodic_memory["recent_fills"]:
+                        user_prompt += f"  * {f}\n"
+                if episodic_memory.get("veto_accuracy"):
+                    user_prompt += f"Historical LLM Veto Accuracy: {episodic_memory['veto_accuracy']}\n"
+                if episodic_memory.get("loss_warning"):
+                    user_prompt += f"Risk Warning: {episodic_memory['loss_warning']}\n"
+                if episodic_memory.get("summary"):
+                    user_prompt += f"Summary Memory: {episodic_memory['summary']}\n"
+            elif isinstance(episodic_memory, str):
+                user_prompt += f"{episodic_memory}\n"
+
         # Resolve dynamic model config
         model = self.config.get("swarm", {}).get("agents", {}).get("synthesizer", "meta-llama/llama-3.1-8b-instruct")
         
@@ -401,11 +422,61 @@ class LLMOrchestrator:
             # (guardrails.bound_verdict).
             return bound_verdict(strategy_signal, verdict)
 
-        # All-providers-down returns the base signal: a trade is never
-        # force-held by an LLM outage.
-        return _remember(self._complete(system_prompt, user_prompt,
-                                        strategy_signal, model_override=model,
-                                        purpose='review'))
+        # Execute primary model review
+        raw_verdict = self._complete(system_prompt, user_prompt,
+                                     strategy_signal, model_override=model,
+                                     purpose='review')
+        validated = _remember(raw_verdict)
+
+        # Multi-model cross-validation consensus voting for high-stakes actionable entries
+        consensus_enabled = self.config.get("llm_consensus_enabled", True)
+        consensus_threshold = float(self.config.get("llm_consensus_threshold", 0.65))
+        providers = self._provider_order()
+
+        if (consensus_enabled and
+                isinstance(validated, dict) and
+                validated.get("action") in ("buy", "sell") and
+                validated.get("confidence", 0.0) >= consensus_threshold and
+                len(providers) >= 2):
+            try:
+                consensus_sys = (
+                    "You are an independent quantitative risk officer performing dual-model cross-validation.\n"
+                    "A primary AI model has reviewed the market context and approved an actionable trade.\n"
+                    "Independently evaluate whether you agree with this execution or recommend vetoing to 'hold'.\n"
+                    "Return raw JSON:\n"
+                    '{"agree": true/false, "action": "buy|sell|hold", "confidence": <float 0.0-1.0>, "reasoning": "<rationale>"}\n'
+                )
+                consensus_usr = (
+                    f"Target Symbol: {symbol}\n"
+                    f"Market Close Price: {market_data.get('close', 'Unknown')}\n"
+                    f"Primary AI Verdict: action={validated.get('action')}, confidence={validated.get('confidence')}\n"
+                    f"Primary Rationale: {validated.get('reasoning')}\n"
+                    "Provide your independent verification now."
+                )
+                secondary_verdict = self.propose_json_secondary(consensus_sys, consensus_usr)
+                if secondary_verdict and isinstance(secondary_verdict, dict):
+                    validated["secondary_verdict"] = secondary_verdict
+                    sec_action = secondary_verdict.get("action", "").lower()
+                    sec_agree = secondary_verdict.get("agree", False)
+                    primary_action = validated.get("action", "").lower()
+
+                    if sec_agree and sec_action == primary_action:
+                        validated["consensus_verified"] = True
+                        validated["confidence"] = min(1.0, float(validated.get("confidence", 0.5)) + 0.05)
+                        logger.info(f"Consensus AGREE on {symbol} {primary_action.upper()}: verified by dual models.")
+                    elif sec_action == "hold" or not sec_agree:
+                        validated["consensus_verified"] = False
+                        validated["action"] = "hold"
+                        validated["confidence"] = max(0.1, float(validated.get("confidence", 0.5)) - 0.15)
+                        sec_reason = secondary_verdict.get("reasoning", "disagreement")
+                        validated["reasoning"] = f"[Consensus Veto: Consensus Disagreement] Secondary: {sec_reason}"
+                        logger.warning(f"Consensus VETO on {symbol} {primary_action.upper()}: secondary recommended HOLD.")
+            except Exception as e:
+                logger.warning(f"Consensus cross-validation error on {symbol}: {e}")
+
+        if isinstance(validated, dict) and "consensus_verified" not in validated:
+            validated["consensus_verified"] = None
+        return validated
 
     def propose_json(self, system_prompt: str, user_prompt: str, model_override: Optional[str] = None):
         """Generic JSON completion (used by the weight allocator and sector specialists).

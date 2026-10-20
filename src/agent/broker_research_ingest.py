@@ -1,3 +1,61 @@
+KNOWN_PUBLISHERS = [
+    # East Africa / NSE
+    (r"\baib[- ]?axys\b|\baxys\b", "AIB AXYS Africa"),
+    (r"\bgenghis(\s+capital)?\b", "Genghis Capital"),
+    (r"\bfaida(\s+investment\s+bank)?\b|\bfib\b", "Faida Investment Bank"),
+    (r"\bstandard\s+investment\s+bank\b|\bsib\b", "Standard Investment Bank"),
+    (r"\bdyer\s*(&|and)\s*blair\b", "Dyer & Blair"),
+    (r"\bkcb\s+capital\b", "KCB Capital"),
+    (r"\bncba(\s+investment\s+bank)?\b", "NCBA Investment Bank"),
+    (r"\bsterling(\s+capital)?\b", "Sterling Capital"),
+    (r"\bold\s+mutual(\s+securities)?\b", "Old Mutual Securities"),
+    (r"\brencap\b|\brenaissance\s+capital\b", "Renaissance Capital"),
+    # International / US
+    (r"\bgoldman(\s+sachs)?\b|\bgs\s+research\b", "Goldman Sachs"),
+    (r"\bmorgan\s+stanley\b|\bms\s+research\b", "Morgan Stanley"),
+    (r"\bj\.?p\.?\s*morgan\b|\bjpmorgan\b", "J.P. Morgan"),
+    (r"\bbank\s+of\s+america\b|\bbofa\b|\bmerrill\s+lynch\b", "Bank of America"),
+    (r"\bciti(group)?(\s+research)?\b", "Citigroup"),
+    (r"\bbarclays(\s+capital)?\b", "Barclays"),
+    (r"\bubs(\s+investment\s+bank)?\b", "UBS"),
+    (r"\bjefferies\b", "Jefferies"),
+    (r"\bmorningstar\b", "Morningstar"),
+    (r"\bzacks(\s+investment\s+research)?\b", "Zacks"),
+    (r"\bcfra(\s+research)?\b", "CFRA"),
+]
+
+SOURCE_ALIAS_MAP = {
+    "auto": None,
+    "aib_axys": "AIB AXYS Africa",
+    "genghis": "Genghis Capital",
+    "faida": "Faida Investment Bank",
+    "sib": "Standard Investment Bank",
+    "dyer_blair": "Dyer & Blair",
+    "ncba": "NCBA Investment Bank",
+    "kcb": "KCB Capital",
+    "goldman": "Goldman Sachs",
+    "morgan_stanley": "Morgan Stanley",
+    "jpmorgan": "J.P. Morgan",
+    "bofa": "Bank of America",
+    "citi": "Citigroup",
+    "morningstar": "Morningstar",
+    "generic": "Institutional Research",
+}
+
+
+def detect_research_source(text: str, filename: str = "", preferred_source: str = "auto") -> str:
+    """Resolve or auto-detect research publisher name from text and filename."""
+    import re
+    if preferred_source and preferred_source.lower() not in ("auto", ""):
+        return SOURCE_ALIAS_MAP.get(preferred_source.lower(), preferred_source)
+    
+    sample = f"{filename} {text[:3500]}".lower()
+    for pattern, canonical_name in KNOWN_PUBLISHERS:
+        if re.search(pattern, sample, re.IGNORECASE):
+            return canonical_name
+            
+    return "Institutional Research"
+
 """
 Broker Research Ingest Pipeline:
 Extracts research signals from text using LLM orchestration and evaluates them for auto-follow or escalation.
@@ -109,14 +167,20 @@ class BrokerResearchIngest:
         except Exception:
             return False
 
-    def process_pdf(self, file_path: str, source: str = 'aib_axys') -> Dict[str, Any]:
+    def process_pdf(self, file_path: str, source: str = 'auto') -> Dict[str, Any]:
         """
         Ingest a PDF research paper, extract signals, and apply follow/escalation logic.
         """
         logger.info(f"Starting ingest of research PDF: {file_path}")
         
+        # 1. Parse PDF with full table & page structure
+        extracted = pdf_parser.extract_all(file_path)
+        text = extracted.get("text", "")
+        resolved_source = detect_research_source(text, os.path.basename(file_path), source)
+        logger.info(f"Research publisher resolved: {resolved_source}")
+        
         # Record upload in DB
-        upload_id = self.escalation_manager.record_upload(os.path.basename(file_path), source)
+        upload_id = self.escalation_manager.record_upload(os.path.basename(file_path), resolved_source)
         
         try:
             # 0. AIB-AXYS's daily Market Pulse is market data, not a note
@@ -163,9 +227,9 @@ class BrokerResearchIngest:
                 from src.agent import research_notes
                 kept = research_notes.ingest(file_path, extracted, self.llm, self.config)
                 self.escalation_manager.update_upload_status(upload_id, "completed", 0)
-                return self._summarised(upload_id, kept)
-            return self._summarised(upload_id, {"document_type": "analyst_note",
-                                                **self._handle_signals(upload_id, signals)})
+                return self._summarised(upload_id, {"source": resolved_source, **kept})
+            return self._summarised(upload_id, {"document_type": "analyst_note", "source": resolved_source,
+                                                **self._handle_signals(upload_id, signals, source_name=resolved_source)})
 
         except Exception as e:
             logger.error(f"Error processing research PDF {file_path}: {e}")
@@ -208,7 +272,7 @@ class BrokerResearchIngest:
         return result
 
     def _handle_signals(self, upload_id: int, signals: List[Dict[str, Any]],
-                        queue_untracked: bool = True) -> Dict[str, Any]:
+                        queue_untracked: bool = True, source_name: Optional[str] = None) -> Dict[str, Any]:
         """Record each signal, then follow it or ask the operator.
 
         With `queue_untracked` False, a rating for a stock the agent does not
@@ -246,7 +310,7 @@ class BrokerResearchIngest:
                 self.escalation_manager.add_to_watchlist(
                     symbol=symbol,
                     market=signal.get("market", "kenyan"),
-                    source=f"upload_{upload_id}",
+                    source=source_name or signal.get("source") or f"upload_{upload_id}",
                     recommendation=signal.get("recommendation", "HOLD"),
                     target_price=signal.get("target_price", 0.0),
                     rationale=signal.get("rationale", "")
@@ -308,8 +372,20 @@ class BrokerResearchIngest:
             "SASINI": ["SASINI", "SASINI PLC"],
             "BOC": ["BOC", "B.O.C KENYA"],
             "BAT": ["BAT", "BAT KENYA", "BRITISH AMERICAN TOBACCO"],
-            "BRIT": ["BRITAM", "BRITAM HOLDINGS"]
+            "BRIT": ["BRITAM", "BRITAM HOLDINGS"],
+            "NVDA": ["NVDA", "NVIDIA"],
+            "AAPL": ["AAPL", "APPLE"],
+            "MSFT": ["MSFT", "MICROSOFT"],
+            "GOOGL": ["GOOGL", "GOOG", "ALPHABET", "GOOGLE"],
+            "AMZN": ["AMZN", "AMAZON"],
+            "TSLA": ["TSLA", "TESLA"],
+            "META": ["META"],
+            "AMD": ["AMD", "ADVANCED MICRO DEVICES"],
+            "PLTR": ["PLTR", "PALANTIR"],
+            "SPY": ["SPY", "S&P 500", "S&P500"],
+            "QQQ": ["QQQ", "NASDAQ"]
         }
+        US_SYMBOLS = {"NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "AMD", "PLTR", "SPY", "QQQ"}
         
         extracted = []
         import re
@@ -398,7 +474,7 @@ class BrokerResearchIngest:
 
                     extracted.append({
                         "symbol": canonical_sym,
-                        "market": "kenyan",
+                        "market": "international" if canonical_sym in US_SYMBOLS else "kenyan",
                         "current_price": current_price,
                         "target_price": target_price,
                         "upside_pct": round(((target_price - current_price) / current_price * 100), 2) if (target_price and current_price and current_price > 0) else None,

@@ -1330,11 +1330,15 @@ class TradingAgent:
                                         self._verdict_scores_at = time.time()
                                     from src.agent.verdict_scoreboard import summary_line
 
+                                    # Build episodic memory for this asset
+                                    symbol_memory = self._build_symbol_episodic_memory(symbol)
+
                                     # Validate with LLM Orchestrator
                                     validated_signal = self.components['llm_orchestrator'].validate_trade(
                                         symbol, symbol_signals, symbol_data, symbol_news,
                                         research_context=research_context, sector_outlook=sector_outlook,
-                                        track_record=summary_line(self._verdict_scores, symbol)
+                                        track_record=summary_line(self._verdict_scores, symbol),
+                                        episodic_memory=symbol_memory
                                     )
                                     dec['llm_verdict'] = {
                                         'action': validated_signal.get('action'),
@@ -1342,8 +1346,16 @@ class TradingAgent:
                                         'reasoning': validated_signal.get('reasoning'),
                                         'model': validated_signal.get('_model'),
                                     }
+                                    if 'consensus_verified' in validated_signal:
+                                        dec['llm_verdict']['consensus_verified'] = validated_signal['consensus_verified']
+                                    if 'secondary_verdict' in validated_signal:
+                                        dec['llm_verdict']['secondary_verdict'] = validated_signal['secondary_verdict']
+
                                     if validated_signal.get('action') == 'hold':
-                                        dec['skip_reason'] = 'llm_veto'
+                                        if validated_signal.get('consensus_verified') is False:
+                                            dec['skip_reason'] = 'consensus_disagreement'
+                                        else:
+                                            dec['skip_reason'] = 'llm_veto'
 
                                     # Herding check (bias_detector.detect_bias): a new buy
                                     # waits when its market has already had several new
@@ -1720,16 +1732,26 @@ class TradingAgent:
                     dec['skip_reason'] = blocked
                     validated = {'action': 'hold', 'confidence': 0.0}
                 elif signals and proposed != 'hold' and llm:
+                    symbol_memory = self._build_symbol_episodic_memory(symbol)
                     validated = llm.validate_trade(symbol, signals, symbol_data, None,
-                                                   research_context=TradingAgent._nse_research(self, symbol))
+                                                   research_context=TradingAgent._nse_research(self, symbol),
+                                                   episodic_memory=symbol_memory)
                     dec['llm_verdict'] = {
                         'action': validated.get('action'),
                         'confidence': validated.get('confidence'),
                         'reasoning': validated.get('reasoning'),
                         'model': validated.get('_model'),
                     }
+                    if 'consensus_verified' in validated:
+                        dec['llm_verdict']['consensus_verified'] = validated['consensus_verified']
+                    if 'secondary_verdict' in validated:
+                        dec['llm_verdict']['secondary_verdict'] = validated['secondary_verdict']
+
                     if validated.get('action') == 'hold':
-                        dec['skip_reason'] = 'llm_veto'
+                        if validated.get('consensus_verified') is False:
+                            dec['skip_reason'] = 'consensus_disagreement'
+                        else:
+                            dec['skip_reason'] = 'llm_veto'
 
                 action = (validated or {}).get('action', 'hold')
                 confidence = (validated or {}).get('confidence', 0.0)
@@ -1948,6 +1970,69 @@ class TradingAgent:
         except Exception as e:
             logger.debug(f"No NSE volume for {symbol}: {e}")
             return None
+
+    def _build_symbol_episodic_memory(self, symbol: str) -> Dict[str, Any]:
+        """Construct episodic memory context for an asset from journals and past reviews."""
+        memory: Dict[str, Any] = {
+            'recent_decisions': [],
+            'recent_fills': [],
+        }
+
+        # 1. Recent agent decisions on this symbol
+        dj = getattr(self, 'decision_journal', None)
+        if dj:
+            try:
+                recent_decs = dj.recent(symbol, limit=3)
+                for d in recent_decs:
+                    exec_str = "executed" if d.get('executed') else f"skipped ({d.get('skip_reason') or 'hold'})"
+                    price_str = f" @ {d['price']:.2f}" if d.get('price') else ""
+                    memory['recent_decisions'].append(
+                        f"Cycle {d.get('cycle')}: {str(d.get('action')).upper()}{price_str} -> {exec_str}"
+                    )
+            except Exception as e:
+                logger.debug(f"Episodic memory decision retrieval error for {symbol}: {e}")
+
+        # 2. Recent orders & fills on this symbol
+        oj = getattr(self, 'order_journal', None) or self.components.get('order_journal')
+        if oj:
+            try:
+                recent_orders = oj.orders_for_symbol(symbol, limit=3)
+                for o in recent_orders:
+                    qty = o.get('filled_quantity') or o.get('quantity') or 0
+                    p = o.get('filled_avg_price') or o.get('limit_price') or 0
+                    price_str = f" @ {p:.2f}" if p else ""
+                    memory['recent_fills'].append(
+                        f"{str(o.get('side')).upper()} {qty}{price_str} [{o.get('status')}]"
+                    )
+            except Exception as e:
+                logger.debug(f"Episodic memory order retrieval error for {symbol}: {e}")
+
+        # 3. Check for consecutive losses
+        try:
+            if oj:
+                fills = oj.filled_orders()
+                sym_fills = [f for f in fills if f.get('symbol') == symbol]
+                consecutive_losses = 0
+                for f in reversed(sym_fills):
+                    pnl = float(f.get('pnl') or f.get('realized_pnl') or 0.0)
+                    if pnl < 0:
+                        consecutive_losses += 1
+                    elif pnl > 0:
+                        break
+                if consecutive_losses >= 2:
+                    memory['loss_warning'] = f"Asset has {consecutive_losses} consecutive realized losses. Caution on re-entry."
+        except Exception:
+            pass
+
+        # 4. Check cached veto accuracy from self._verdict_scores or _last_veto_accuracy
+        if hasattr(self, '_verdict_scores') and isinstance(self._verdict_scores, dict) and self._verdict_scores:
+            sym_score = self._verdict_scores.get(symbol)
+            if sym_score:
+                memory['veto_accuracy'] = f"Score: {sym_score.get('score', 'N/A')}, Trades Scored: {sym_score.get('total', 0)}"
+        elif hasattr(self, '_last_veto_accuracy') and self._last_veto_accuracy is not None:
+            memory['veto_accuracy'] = f"{float(self._last_veto_accuracy):.1f}%"
+
+        return memory
 
     def _run_sleeve_cycle(self):
         """Monthly dividend-sleeve accumulation pass. Pulls current NSE
