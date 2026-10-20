@@ -1265,16 +1265,43 @@ class TradingAPI:
             success, escalation = em.resolve_escalation(escalation_id, status, notes, resolved_by='operator')
             if not success:
                 return jsonify({'error': 'Escalation not found or already resolved'}), 404
-                
+
+            def _infer_market(sym: str, esc: Dict[str, Any]) -> str:
+                m = esc.get('market')
+                if m in ('us', 'kenyan'):
+                    return m
+                cfg_dm = (self.trading_agent.config.get('data_manager') or {}) if self.trading_agent else {}
+                if sym in cfg_dm.get('symbols', []):
+                    return 'us'
+                if sym in cfg_dm.get('nse_symbols', []):
+                    return 'kenyan'
+                if 'US' in str(esc.get('reason', '')):
+                    return 'us'
+                return 'kenyan'
+
             if status == 'approved' and escalation and escalation.get('action') == 'add_symbol':
                 # Route by market and persist, so the approval survives a
                 # restart and reaches the market it belongs to. US symbols
                 # previously had no path here at all.
                 from src.agent.universe_manager import persist_universe
                 symbol = (escalation.get('symbol') or '').upper()
-                market = escalation.get('market') or 'kenyan'
+                market = _infer_market(symbol, escalation)
                 persist_universe(self.trading_agent.config, symbol, market)
                 em.add_to_watchlist(symbol, market=market, source='universe_scout')
+            elif status == 'approved' and escalation and escalation.get('action') == 'remove_symbol':
+                from src.agent.universe_manager import remove_from_universe
+                symbol = (escalation.get('symbol') or '').upper()
+                market = _infer_market(symbol, escalation)
+                remove_from_universe(self.trading_agent.config, symbol, market)
+                em.remove_from_watchlist(symbol)
+                try:
+                    dm = self.trading_agent.components.get('data_manager')
+                    if dm:
+                        target_list = dm.nse_symbols if market == 'kenyan' else dm.symbols
+                        if symbol in target_list:
+                            target_list.remove(symbol)
+                except Exception as e:
+                    logger.error(f"Failed to dynamically remove symbol from data_manager: {e}")
             elif status == 'approved' and escalation:
                 symbol = escalation.get('symbol')
                 market = escalation.get('market', 'kenyan')

@@ -13,7 +13,7 @@ import tempfile
 
 import pytest
 
-from src.agent.universe_manager import effective_universe, persist_universe
+from src.agent.universe_manager import effective_universe, persist_universe, remove_from_universe
 
 
 def base_config():
@@ -116,6 +116,35 @@ def test_persisting_the_same_symbol_twice_is_idempotent():
         persist_universe(cfg, 'NVDA', 'us', overlay)
         persist_universe(cfg, 'NVDA', 'us', overlay)
         assert cfg['data_manager']['symbols'].count('NVDA') == 1
+    finally:
+        if os.path.exists(overlay):
+            os.unlink(overlay)
+
+
+def test_remove_from_universe_removes_symbol_and_persists_overlay():
+    fd, overlay = tempfile.mkstemp(suffix='.json')
+    os.close(fd)
+    os.unlink(overlay)
+    try:
+        cfg = base_config()
+        remove_from_universe(cfg, 'AAPL', 'us', overlay)
+        assert 'AAPL' not in cfg['data_manager']['symbols']
+        saved = json.loads(open(overlay, encoding='utf-8').read())
+        assert 'AAPL' not in saved['data_manager.symbols']
+        assert 'MSFT' in saved['data_manager.symbols']
+    finally:
+        if os.path.exists(overlay):
+            os.unlink(overlay)
+
+
+def test_remove_from_universe_nonexistent_symbol_is_safe():
+    fd, overlay = tempfile.mkstemp(suffix='.json')
+    os.close(fd)
+    os.unlink(overlay)
+    try:
+        cfg = base_config()
+        remove_from_universe(cfg, 'NONEXISTENT', 'us', overlay)
+        assert cfg['data_manager']['symbols'] == ['AAPL', 'MSFT']
     finally:
         if os.path.exists(overlay):
             os.unlink(overlay)

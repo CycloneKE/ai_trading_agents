@@ -1009,24 +1009,13 @@ class TradingAgent:
                                     if pruned > 0:
                                         logger.info(f"SwarmStateStore: Pruned {pruned} expired local cache entries.")
 
-                            # Universe scout: propose untracked NSE movers as operator escalations.
-                            # This NEVER auto-trades — it only creates a pending escalation; the
-                            # symbol is added to the runtime universe/watchlist solely on operator approval.
+                            # Autonomous universe scout and pruning cycle:
+                            # Proposes screened additions and performance/regime removals.
+                            # All changes strictly escalate to the operator and never auto-apply.
                             try:
-                                from src.agent.universe_scout import propose_candidates
-                                nse = self.components.get('data_manager')
-                                em = self.components.get('escalation_manager')
-                                if em and nse:
-                                    tracked = set(self.config.get('data_manager', {}).get('nse_symbols', []))
-                                    movers = []
-                                    nse_conn = getattr(nse, 'connectors', {}).get('nse')
-                                    if nse_conn:
-                                        quotes = nse_conn.get_all_quotes()
-                                        movers = [{'symbol': q.get('symbol'), 'change_pct': q.get('change_pct')} for q in quotes]
-                                    for cand in propose_candidates(tracked, movers, [])[:3]:
-                                        em.create_escalation(None, cand['symbol'], 'add_symbol', cand['reason'], 'low')
+                                self._run_universe_scout_and_prune(market_data)
                             except Exception as e:
-                                logger.warning(f"Universe scout skipped: {e}")
+                                logger.warning(f"Universe scout and prune cycle failed: {e}")
                         except Exception as e:
                             logger.error(f"Error in self-assessment cycle: {e}")
                 
@@ -1186,6 +1175,151 @@ class TradingAgent:
                         logger.debug(f"NSE decision record error: {e}")
             except Exception as e:
                 logger.error(f"Error evaluating NSE symbol {symbol}: {e}")
+
+    def _run_universe_scout_and_prune(self, market_data: Optional[Dict[str, Any]] = None):
+        """Autonomous universe scouting, screening, and pruning pipeline.
+
+        Screens raw US & NSE candidates against liquidity, price, and correlation
+        limits, and reviews active symbols for consecutive losses or stale regimes.
+        Proposals are strictly submitted as operator escalations (never auto-applied).
+        """
+        em = self.components.get('escalation_manager')
+        if not em:
+            return
+
+        try:
+            from src.agent.universe_manager import (
+                effective_universe, propose_additions, propose_removals, compute_symbol_stats
+            )
+            from src.agent.universe_scout import propose_candidates, scout_us_candidates
+        except ImportError as e:
+            logger.warning(f"Universe scout/prune import error: {e}")
+            return
+
+        try:
+            existing_pending = {
+                ((e.get('symbol') or '').upper(), e.get('action'))
+                for e in (em.get_pending_escalations() or [])
+            }
+        except Exception:
+            existing_pending = set()
+
+        # 1. Determine currently tracked symbols
+        tracked_us = set(self.config.get('data_manager', {}).get('symbols', []))
+        tracked_nse = set(self.config.get('data_manager', {}).get('nse_symbols', []))
+        if hasattr(em, 'get_watchlist'):
+            try:
+                wl = em.get_watchlist() or []
+                tracked_us = set(effective_universe(self.config, wl, market='us'))
+                tracked_nse = set(effective_universe(self.config, wl, market='kenyan'))
+            except Exception as e:
+                logger.debug(f"Error computing effective universe: {e}")
+
+        # 2. Scout & Screen US Candidates
+        try:
+            quotes = {}
+            if isinstance(market_data, dict):
+                for k, v in market_data.items():
+                    if isinstance(v, dict) and ('close' in v or 'price' in v or 'change_pct' in v):
+                        quotes[k] = v
+                from src.agent.universe_scout import DEFAULT_US_CANDIDATE_POOL
+                for sym in DEFAULT_US_CANDIDATE_POOL:
+                    if sym not in quotes and hasattr(self, '_extract_symbol_data'):
+                        sd = self._extract_symbol_data(market_data, sym)
+                        if sd:
+                            quotes[sym] = sd
+
+            raw_us = scout_us_candidates(tracked_us, quotes)
+            if raw_us:
+                strat_mgr = self.components.get('strategy_manager')
+                history: Dict[str, List[float]] = {}
+                if strat_mgr and hasattr(strat_mgr, '_regime_history') and strat_mgr._regime_history:
+                    for s, bars in strat_mgr._regime_history.items():
+                        if bars:
+                            history[s] = list(bars)
+
+                needed = set(tracked_us).union({c['symbol'] for c in raw_us})
+                missing = [s for s in needed if s not in history]
+                if missing:
+                    try:
+                        from src.connectors import yahoo_history as yh
+                        fetched = yh.fetch_many(missing, range_="6mo")
+                        for s, bars in (fetched or {}).items():
+                            if bars:
+                                history[s] = list(bars)
+                    except Exception as e:
+                        logger.debug(f"Universe scout yahoo fetch error: {e}")
+
+                screened_us = propose_additions(tracked_us, raw_us, history, cfg=self.config)
+                for prop in (screened_us or []):
+                    sym = prop['symbol']
+                    if (sym, 'add_symbol') not in existing_pending:
+                        reason = f"US Screened: {prop.get('reason', 'mover')}"
+                        em.create_escalation(None, sym, 'add_symbol', reason, 'low')
+                        existing_pending.add((sym, 'add_symbol'))
+                        logger.info(f"Universe: escalated US addition for {sym}: {reason}")
+        except Exception as e:
+            logger.warning(f"Error scouting US universe: {e}")
+
+        # 3. Scout & Screen NSE Candidates
+        try:
+            dm = self.components.get('data_manager')
+            nse_conn = getattr(dm, 'connectors', {}).get('nse') if dm and hasattr(dm, 'connectors') else None
+            if nse_conn:
+                quotes = nse_conn.get_all_quotes() or []
+                movers = []
+                for q in quotes:
+                    movers.append({
+                        'symbol': q.get('symbol'),
+                        'change_pct': q.get('change_pct'),
+                        'price': q.get('price') or q.get('price_kes') or q.get('close'),
+                        'avg_dollar_volume': q.get('avg_dollar_volume') or (float(q.get('volume') or 0) * float(q.get('price') or q.get('price_kes') or 1.0)),
+                    })
+                raw_nse = propose_candidates(tracked_nse, movers, [])
+                if raw_nse:
+                    import csv as _csv
+                    from pathlib import Path as _Path
+                    hist_dir = _Path(__file__).resolve().parent.parent.parent / 'data' / 'nse_historical'
+                    nse_history: Dict[str, List[float]] = {}
+                    all_nse_check = tracked_nse.union({c['symbol'] for c in raw_nse})
+                    for s in all_nse_check:
+                        csv_p = hist_dir / f"{s}.csv"
+                        if csv_p.exists():
+                            try:
+                                with open(csv_p, 'r', newline='', encoding='utf-8') as f:
+                                    closes = [float(r['close']) for r in _csv.DictReader(f) if r.get('close') and float(r['close']) > 0]
+                                if closes:
+                                    nse_history[s] = closes
+                            except Exception:
+                                pass
+                    screened_nse = propose_additions(tracked_nse, raw_nse, nse_history, cfg=self.config) if nse_history else raw_nse
+                    for prop in (screened_nse or [])[:3]:
+                        sym = prop['symbol']
+                        if (sym, 'add_symbol') not in existing_pending:
+                            reason = f"NSE Screened: {prop.get('reason', 'mover')}"
+                            em.create_escalation(None, sym, 'add_symbol', reason, 'low')
+                            existing_pending.add((sym, 'add_symbol'))
+                            logger.info(f"Universe: escalated NSE addition for {sym}: {reason}")
+        except Exception as e:
+            logger.warning(f"Error scouting NSE universe: {e}")
+
+        # 4. Systematic Portfolio Pruning
+        try:
+            oj = getattr(self, 'order_journal', None) or self.components.get('order_journal')
+            fills = oj.filled_orders() if oj and hasattr(oj, 'filled_orders') else []
+            stats = compute_symbol_stats(fills)
+
+            all_tracked = tracked_us.union(tracked_nse)
+            removals = propose_removals(all_tracked, stats, cfg=self.config)
+            for rem in (removals or []):
+                sym = rem['symbol']
+                if (sym, 'remove_symbol') not in existing_pending:
+                    reason = rem.get('reason', 'prune proposal')
+                    em.create_escalation(None, sym, 'remove_symbol', reason, 'medium')
+                    existing_pending.add((sym, 'remove_symbol'))
+                    logger.info(f"Universe: escalated removal proposal for {sym}: {reason}")
+        except Exception as e:
+            logger.warning(f"Error evaluating universe pruning: {e}")
 
     def _run_sleeve_cycle(self):
         """Monthly dividend-sleeve accumulation pass. Pulls current NSE

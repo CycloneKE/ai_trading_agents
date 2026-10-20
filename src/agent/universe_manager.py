@@ -225,6 +225,64 @@ def propose_removals(tracked: Set[str], stats: Dict[str, Dict[str, Any]],
     return out
 
 
+def compute_symbol_stats(fills: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Compute per-symbol trading metrics from order fills."""
+    fills_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+    for f in fills or []:
+        sym = f.get('symbol')
+        if sym:
+            fills_by_symbol.setdefault(sym, []).append(f)
+
+    stats: Dict[str, Dict[str, Any]] = {}
+    for sym, sym_fills in fills_by_symbol.items():
+        closed_pnls = []
+        open_qty = 0.0
+        avg_cost = 0.0
+        dollar_volumes = []
+
+        # Sort primarily by timestamp; prioritize buy before sell on identical timestamps
+        for f in sorted(sym_fills, key=lambda x: (x.get('created_at') or '', 0 if x.get('side') == 'buy' else 1)):
+            qty = float(f.get('filled_quantity') or 0.0)
+            price = float(f.get('filled_avg_price') or 0.0)
+            side = f.get('side')
+            if qty <= 0 or price <= 0:
+                continue
+
+            dollar_volumes.append(qty * price)
+            signed = qty if side == 'buy' else -qty
+
+            if open_qty == 0 or (open_qty > 0) == (signed > 0):
+                new_total = abs(open_qty) + qty
+                avg_cost = (abs(open_qty) * avg_cost + qty * price) / new_total
+                open_qty += signed
+            else:
+                closing = min(qty, abs(open_qty))
+                direction = 1 if open_qty > 0 else -1
+                pnl = (price - avg_cost) * closing * direction
+                closed_pnls.append(pnl)
+                open_qty += signed
+                if open_qty == 0:
+                    avg_cost = 0.0
+
+        consecutive_losses = 0
+        for pnl in reversed(closed_pnls):
+            if pnl < 0:
+                consecutive_losses += 1
+            else:
+                break
+
+        avg_vol = sum(dollar_volumes) / len(dollar_volumes) if dollar_volumes else 0.0
+        stats[sym] = {
+            'attribution': sum(closed_pnls),
+            'closed_trades': len(closed_pnls),
+            'consecutive_losses': consecutive_losses,
+            'avg_dollar_volume': avg_vol,
+            'undefined_regime_days': 0,
+        }
+
+    return stats
+
+
 def _finite_number(value: Any) -> Optional[float]:
     """Coerce to a finite float, or None. NaN and Infinity are None: they
     pass every `<` comparison silently instead of failing loudly."""
@@ -289,4 +347,22 @@ def persist_universe(config: Dict[str, Any], symbol: str, market: str,
     _write_overlay_key(f'data_manager.{key}', list(target),
                        overlay_path or DEFAULT_OVERLAY_PATH)
     logger.warning(f"Universe: {symbol} added to {key} and persisted")
+
+
+def remove_from_universe(config: Dict[str, Any], symbol: str, market: str,
+                         overlay_path: Optional[str] = None) -> None:
+    """Remove a symbol from the configuration and persist the removal to the overlay."""
+    from src.agent.self_assessment import DEFAULT_OVERLAY_PATH, _write_overlay_key
+
+    symbol = (symbol or '').upper()
+    if not symbol:
+        return
+    key = MARKET_CONFIG_KEY.get(market, 'symbols')
+    target = config.setdefault('data_manager', {}).setdefault(key, [])
+    if symbol in target:
+        target.remove(symbol)
+    _write_overlay_key(f'data_manager.{key}', list(target),
+                       overlay_path or DEFAULT_OVERLAY_PATH)
+    logger.warning(f"Universe: {symbol} removed from {key} and persisted")
+
 

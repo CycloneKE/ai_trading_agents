@@ -20,70 +20,13 @@ from src.agent.escalation_manager import EscalationManager
 from src.agent.order_journal import OrderJournal
 from src.agent.self_assessment import _write_overlay_key, apply_overlay
 from src.agent.strategy_attribution import compute_attribution
-from src.agent.universe_manager import effective_universe, propose_removals
+from src.agent.universe_manager import effective_universe, propose_removals, compute_symbol_stats
 from src.utils.paths import DATA_DIR
 from src.utils.timeutil import utc_now_iso
 
 logger = logging.getLogger(__name__)
 
-
-def _compute_symbol_stats(fills: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """Compute per-symbol trading metrics from order fills."""
-    fills_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
-    for f in fills:
-        sym = f.get('symbol')
-        if sym:
-            fills_by_symbol.setdefault(sym, []).append(f)
-
-    stats: Dict[str, Dict[str, Any]] = {}
-    for sym, sym_fills in fills_by_symbol.items():
-        # Track positions and closed trade PnLs using simple FIFO / average cost
-        closed_pnls = []
-        open_qty = 0.0
-        avg_cost = 0.0
-        dollar_volumes = []
-
-        for f in sorted(sym_fills, key=lambda x: x.get('created_at') or ''):
-            qty = float(f.get('filled_quantity') or 0.0)
-            price = float(f.get('filled_avg_price') or 0.0)
-            side = f.get('side')
-            if qty <= 0 or price <= 0:
-                continue
-
-            dollar_volumes.append(qty * price)
-            signed = qty if side == 'buy' else -qty
-
-            if open_qty == 0 or (open_qty > 0) == (signed > 0):
-                new_total = abs(open_qty) + qty
-                avg_cost = (abs(open_qty) * avg_cost + qty * price) / new_total
-                open_qty += signed
-            else:
-                closing = min(qty, abs(open_qty))
-                direction = 1 if open_qty > 0 else -1
-                pnl = (price - avg_cost) * closing * direction
-                closed_pnls.append(pnl)
-                open_qty += signed
-                if open_qty == 0:
-                    avg_cost = 0.0
-
-        # Calculate consecutive losses from the end
-        consecutive_losses = 0
-        for pnl in reversed(closed_pnls):
-            if pnl < 0:
-                consecutive_losses += 1
-            else:
-                break
-
-        avg_vol = sum(dollar_volumes) / len(dollar_volumes) if dollar_volumes else 0.0
-        stats[sym] = {
-            'attribution': sum(closed_pnls),
-            'closed_trades': len(closed_pnls),
-            'consecutive_losses': consecutive_losses,
-            'avg_dollar_volume': avg_vol,
-            'undefined_regime_days': 0,
-        }
-
-    return stats
+_compute_symbol_stats = compute_symbol_stats
 
 
 def run_growth_cycle(config: Optional[Dict[str, Any]] = None,
