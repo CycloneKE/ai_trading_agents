@@ -141,7 +141,7 @@ class LLMOrchestrator:
                     logger.debug(f"LLM provider '{provider}' failed: {e}")
         return fallback
 
-    def validate_trade(self, symbol: str, strategy_signal: Dict[str, Any], market_data: Dict[str, Any], news_data: list = None, research_context: Dict[str, Any] = None, sector_outlook: Dict[str, Any] = None, track_record: str = None) -> Dict[str, Any]:
+    def validate_trade(self, symbol: str, strategy_signal: Dict[str, Any], market_data: Dict[str, Any], news_data: list = None, research_context: Dict[str, Any] = None, sector_outlook: Dict[str, Any] = None, track_record: str = None, episodic_memory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Takes the base strategy signal and validates it against current market context using an LLM.
         """
@@ -217,37 +217,112 @@ class LLMOrchestrator:
         if track_record:
             user_prompt += f"Agent Track Record: {track_record}\n"
 
+        if episodic_memory:
+            user_prompt += f"\n--- Episodic Memory and Historical Performance for {symbol} ---\n"
+            if isinstance(episodic_memory, dict):
+                if episodic_memory.get("recent_decisions"):
+                    user_prompt += "Recent Decisions on this asset:\n"
+                    for d in episodic_memory["recent_decisions"]:
+                        user_prompt += f"  * {d}\n"
+                if episodic_memory.get("recent_fills"):
+                    user_prompt += "Recent Fills / Execution PnL:\n"
+                    for f in episodic_memory["recent_fills"]:
+                        user_prompt += f"  * {f}\n"
+                if episodic_memory.get("veto_accuracy"):
+                    user_prompt += f"Historical LLM Veto Accuracy: {episodic_memory['veto_accuracy']}\n"
+                if episodic_memory.get("loss_warning"):
+                    user_prompt += f"Risk Warning: {episodic_memory['loss_warning']}\n"
+                if episodic_memory.get("summary"):
+                    user_prompt += f"Summary Memory: {episodic_memory['summary']}\n"
+            elif isinstance(episodic_memory, str):
+                user_prompt += f"{episodic_memory}\n"
+
         user_prompt += "\nEvaluate this signal critically. Do you agree with the ensemble? Provide your validated JSON output now."
         
         # Resolve dynamic model config
         model = self.config.get("swarm", {}).get("agents", {}).get("synthesizer", "meta-llama/llama-3.1-8b-instruct")
-        
-        def _remember(verdict, _outage_sentinel=strategy_signal):
-            # Only cache genuine LLM verdicts. _complete returns the base
-            # strategy_signal object unchanged on an all-providers-down outage
-            # (or a JSON-decode failure); caching that would suppress real LLM
-            # validation for this (symbol, action, confidence) bucket for the
-            # full TTL even after the provider recovers from a brief 429.
-            if not isinstance(verdict, dict) or verdict is _outage_sentinel:
-                # An outage returns the base signal object itself; caching it
-                # would suppress real validation for the whole TTL.
-                return dict(strategy_signal)
 
-            validated = validate_verdict(verdict, strategy_signal)
-            # A rejected direction-flip is our decision, not the model's —
-            # caching it would keep vetoing the symbol for the full TTL on the
-            # strength of one bad response.
-            flipped = str(verdict.get('action', '')).strip().lower() not in (
-                validated['action'], '')
-            if not flipped:
-                self._verdict_cache[cache_key] = (time.time() + self.cache_ttl,
-                                                  dict(validated))
-            return validated
+        raw_verdict = self._complete(system_prompt, user_prompt,
+                                     strategy_signal, model_override=model)
+        if not isinstance(raw_verdict, dict) or raw_verdict is strategy_signal:
+            return dict(strategy_signal)
 
-        # All-providers-down returns the base signal: a trade is never
-        # force-held by an LLM outage.
-        return _remember(self._complete(system_prompt, user_prompt,
-                                        strategy_signal, model_override=model))
+        validated = validate_verdict(raw_verdict, strategy_signal)
+
+        # Multi-model consensus voting for actionable entry signals
+        consensus_enabled = self.config.get("llm_consensus_enabled", True)
+        consensus_threshold = float(self.config.get("llm_consensus_threshold", 0.65))
+        providers = self._provider_order()
+
+        if (consensus_enabled and
+                validated.get("action") in ("buy", "sell") and
+                validated.get("confidence", 0.0) >= consensus_threshold and
+                len(providers) >= 2):
+            try:
+                consensus_sys = (
+                    "You are an independent quantitative risk officer performing dual-model cross-validation.\n"
+                    "A primary AI model has reviewed the market context and approved an actionable trade.\n"
+                    "Independently evaluate whether you agree with this execution or recommend vetoing to 'hold'.\n"
+                    "Return raw JSON:\n"
+                    '{"agree": true/false, "action": "buy|sell|hold", "confidence": <float 0.0-1.0>, "reasoning": "<rationale>"}\n'
+                )
+                consensus_usr = (
+                    f"Target Asset: {symbol}\n"
+                    f"Proposed Action: {validated['action'].upper()} (Confidence: {validated['confidence']:.2f})\n"
+                    f"Primary Rationale: {validated.get('reasoning', '')}\n"
+                    f"Ensemble Context: {json.dumps(strategy_signal)}\n"
+                    f"Market Close: {market_data.get('close', 'Unknown')}, Volatility: {volatility}\n"
+                )
+                if episodic_memory:
+                    consensus_usr += f"Asset Memory: {json.dumps(episodic_memory)}\n"
+                consensus_usr += "Do you agree with this trade? Provide your JSON verdict now."
+
+                secondary_verdict = self.propose_json_secondary(consensus_sys, consensus_usr)
+                if secondary_verdict and isinstance(secondary_verdict, dict):
+                    sec_action = str(secondary_verdict.get("action") or "").strip().lower()
+                    sec_agree = bool(secondary_verdict.get("agree", False)) or (sec_action == validated["action"])
+
+                    if sec_agree and sec_action == validated["action"]:
+                        validated["consensus_verified"] = True
+                        validated["confidence"] = min(1.0, round(validated["confidence"] + 0.05, 3))
+                        validated["secondary_verdict"] = {
+                            "action": sec_action,
+                            "confidence": secondary_verdict.get("confidence"),
+                            "reasoning": secondary_verdict.get("reasoning", "")
+                        }
+                        logger.info(f"Consensus verified for {symbol}: Primary={validated['action']} and Secondary agree.")
+                    else:
+                        validated["consensus_verified"] = False
+                        validated["secondary_verdict"] = {
+                            "action": sec_action,
+                            "confidence": secondary_verdict.get("confidence"),
+                            "reasoning": secondary_verdict.get("reasoning", "")
+                        }
+                        strict = self.config.get("llm_consensus_strict", True)
+                        if strict or sec_action in ("hold", ""):
+                            logger.warning(f"Consensus disagreement for {symbol}: Primary={validated['action']} vs Secondary={sec_action}. Vetoing to hold.")
+                            validated["action"] = "hold"
+                            validated["confidence"] = min(validated["confidence"], 0.3)
+                            sec_reason = secondary_verdict.get("reasoning", "Disagreement")
+                            validated["reasoning"] = f"Consensus Veto: Secondary disagreed ({sec_reason}). Primary had: {validated.get('reasoning', '')}"
+                        else:
+                            validated["confidence"] = max(0.0, round(validated["confidence"] * 0.7, 3))
+                else:
+                    validated["consensus_verified"] = None
+                    logger.debug(f"Multi-model consensus skipped for {symbol}: secondary provider unavailable.")
+            except Exception as e:
+                logger.warning(f"Consensus verification call failed for {symbol}: {e}")
+                validated["consensus_verified"] = None
+        else:
+            if "consensus_verified" not in validated:
+                validated["consensus_verified"] = None
+
+        flipped = str(raw_verdict.get("action", "")).strip().lower() not in (
+            validated["action"], "")
+        if not flipped:
+            self._verdict_cache[cache_key] = (time.time() + self.cache_ttl,
+                                              dict(validated))
+        return validated
 
     # Each bucket spans this fractional price move; a verdict is reused only
     # while the price stays inside the band it was formed in.

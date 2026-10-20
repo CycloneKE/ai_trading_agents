@@ -26,6 +26,7 @@ SKIP_REASONS = {
     'below_confidence',   # under the execution confidence floor
     'bias_downgrade',     # bias detector pushed the signal to hold
     'llm_veto',           # LLM validation changed action to hold
+    'consensus_disagreement', # dual-model consensus failed to agree
     'fallback_price',     # price was synthetic fallback, not tradeable
     'halted',             # kill switch engaged
     'pdt_guard',          # pattern-day-trader block

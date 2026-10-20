@@ -889,19 +889,31 @@ class TradingAgent:
                                         self._verdict_scores_at = time.time()
                                     from src.agent.verdict_scoreboard import summary_line
 
+                                    # Build episodic memory for this asset
+                                    symbol_memory = self._build_symbol_episodic_memory(symbol)
+
                                     # Validate with LLM Orchestrator
                                     validated_signal = self.components['llm_orchestrator'].validate_trade(
                                         symbol, symbol_signals, symbol_data, symbol_news,
                                         research_context=research_context, sector_outlook=sector_outlook,
-                                        track_record=summary_line(self._verdict_scores, symbol)
+                                        track_record=summary_line(self._verdict_scores, symbol),
+                                        episodic_memory=symbol_memory
                                     )
                                     dec['llm_verdict'] = {
                                         'action': validated_signal.get('action'),
                                         'confidence': validated_signal.get('confidence'),
                                         'reasoning': validated_signal.get('reasoning'),
                                     }
+                                    if 'consensus_verified' in validated_signal:
+                                        dec['llm_verdict']['consensus_verified'] = validated_signal['consensus_verified']
+                                    if 'secondary_verdict' in validated_signal:
+                                        dec['llm_verdict']['secondary_verdict'] = validated_signal['secondary_verdict']
+
                                     if validated_signal.get('action') == 'hold':
-                                        dec['skip_reason'] = 'llm_veto'
+                                        if validated_signal.get('consensus_verified') is False:
+                                            dec['skip_reason'] = 'consensus_disagreement'
+                                        else:
+                                            dec['skip_reason'] = 'llm_veto'
 
                                     # Check for Algorithmic/Cognitive Bias
                                     is_biased = self.components['bias_detector'].detect_bias(validated_signal, symbol_data, market_data)
@@ -1002,6 +1014,14 @@ class TradingAgent:
                                 # Auto-apply safe changes
                                 auto_applied, escalated = engine.apply_improvements(plan, require_approval=False)
                                 logger.info(f"Retrospective assessment completed: applied {len(auto_applied)} auto-improvements, escalated {len(escalated)} structural proposals.")
+
+                                # Cache prediction and veto accuracy for episodic memory
+                                try:
+                                    perf_metrics = engine._analyze_prediction_accuracy(cycles_to_review=assessment_interval)
+                                    if perf_metrics and perf_metrics.get('veto_accuracy_pct') is not None:
+                                        self._last_veto_accuracy = float(perf_metrics['veto_accuracy_pct'])
+                                except Exception as e:
+                                    logger.debug(f"Failed to cache veto accuracy: {e}")
 
                                 # Prune expired local cache entries to prevent memory leaks in local offline mode
                                 if state_store:
@@ -1120,14 +1140,23 @@ class TradingAgent:
 
                 validated = signals
                 if signals and signals.get('action') != 'hold' and llm:
-                    validated = llm.validate_trade(symbol, signals, symbol_data, None)
+                    symbol_memory = self._build_symbol_episodic_memory(symbol)
+                    validated = llm.validate_trade(symbol, signals, symbol_data, None, episodic_memory=symbol_memory)
                     dec['llm_verdict'] = {
                         'action': validated.get('action'),
                         'confidence': validated.get('confidence'),
                         'reasoning': validated.get('reasoning'),
                     }
+                    if 'consensus_verified' in validated:
+                        dec['llm_verdict']['consensus_verified'] = validated['consensus_verified']
+                    if 'secondary_verdict' in validated:
+                        dec['llm_verdict']['secondary_verdict'] = validated['secondary_verdict']
+
                     if validated.get('action') == 'hold':
-                        dec['skip_reason'] = 'llm_veto'
+                        if validated.get('consensus_verified') is False:
+                            dec['skip_reason'] = 'consensus_disagreement'
+                        else:
+                            dec['skip_reason'] = 'llm_veto'
 
                 action = (validated or {}).get('action', 'hold')
                 confidence = (validated or {}).get('confidence', 0.0)
@@ -1175,6 +1204,61 @@ class TradingAgent:
                         logger.debug(f"NSE decision record error: {e}")
             except Exception as e:
                 logger.error(f"Error evaluating NSE symbol {symbol}: {e}")
+
+    def _build_symbol_episodic_memory(self, symbol: str) -> Dict[str, Any]:
+        """Construct episodic memory context for an asset from journals and past reviews."""
+        memory: Dict[str, Any] = {
+            'recent_decisions': [],
+            'recent_fills': [],
+        }
+
+        # 1. Recent agent decisions on this symbol
+        dj = getattr(self, 'decision_journal', None)
+        if dj:
+            try:
+                recent_decs = dj.recent(symbol, limit=3)
+                for d in recent_decs:
+                    exec_str = "executed" if d.get('executed') else f"skipped ({d.get('skip_reason') or 'hold'})"
+                    price_str = f" @ {d['price']:.2f}" if d.get('price') else ""
+                    memory['recent_decisions'].append(
+                        f"Cycle {d.get('cycle')}: {str(d.get('action')).upper()}{price_str} -> {exec_str}"
+                    )
+            except Exception as e:
+                logger.debug(f"Episodic memory decision retrieval error for {symbol}: {e}")
+
+        # 2. Recent orders & fills on this symbol
+        oj = getattr(self, 'order_journal', None) or self.components.get('order_journal')
+        if oj:
+            try:
+                recent_orders = oj.orders_for_symbol(symbol, limit=3)
+                for o in recent_orders:
+                    qty = o.get('filled_quantity') or o.get('quantity') or 0
+                    p = o.get('filled_avg_price') or o.get('limit_price') or 0
+                    price_str = f" @ {p:.2f}" if p else ""
+                    memory['recent_fills'].append(
+                        f"{str(o.get('side')).upper()} {qty}{price_str} [{o.get('status')}]"
+                    )
+            except Exception as e:
+                logger.debug(f"Episodic memory order retrieval error for {symbol}: {e}")
+
+        # 3. Loss streak warning if any
+        if oj:
+            try:
+                from src.agent.universe_manager import compute_symbol_stats
+                fills = oj.filled_orders()
+                stats = compute_symbol_stats(fills)
+                losses = stats.get(symbol, {}).get('consecutive_losses', 0)
+                if losses > 0:
+                    memory['loss_warning'] = f"Alert: Symbol has {losses} consecutive losing round-trip(s)."
+            except Exception as e:
+                logger.debug(f"Episodic memory stats computation error for {symbol}: {e}")
+
+        # 4. Self-assessment veto accuracy if cached
+        veto_acc = getattr(self, '_last_veto_accuracy', None)
+        if veto_acc is not None:
+            memory['veto_accuracy'] = f"{veto_acc:.1f}%"
+
+        return memory
 
     def _run_universe_scout_and_prune(self, market_data: Optional[Dict[str, Any]] = None):
         """Autonomous universe scouting, screening, and pruning pipeline.
