@@ -891,6 +891,52 @@ class TradingAPI:
                 return jsonify({'holdings': [], 'pending_tickets': [],
                                'cumulative_dividends_kes': 0, 'capital_target_kes': 0})
 
+        @self.app.route('/api/growth-report', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_growth_report():
+            """Returns the latest nightly growth & self-assessment cycle report."""
+            try:
+                report_path = os.path.join(DATA_DIR, 'nightly_growth_report.json')
+                if os.path.exists(report_path):
+                    with open(report_path, 'r', encoding='utf-8') as f:
+                        return jsonify(json.load(f))
+                from scripts.run_nightly_growth_cycle import run_growth_cycle
+                return jsonify(run_growth_cycle(self.trading_agent.config, str(DATA_DIR), dry_run=True))
+            except Exception as e:
+                logger.error(f"Error fetching growth report: {e}")
+                return jsonify({'error': str(e)}), 500
+
+        @self.app.route('/api/shadow-strategies', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_shadow_strategies():
+            """Champion vs Challenger strategy evaluation metrics and acceptance gate status."""
+            try:
+                from src.api.growth_view import build_growth_view
+                report_path = os.path.join(DATA_DIR, 'nightly_growth_report.json')
+                report = {}
+                if os.path.exists(report_path):
+                    try:
+                        with open(report_path, 'r', encoding='utf-8') as f:
+                            report = json.load(f)
+                    except Exception:
+                        pass
+
+                bt_path = os.path.join(DATA_DIR, 'strategy_backtest_results.json')
+                bt = {}
+                if os.path.exists(bt_path):
+                    try:
+                        with open(bt_path, 'r', encoding='utf-8') as f:
+                            bt = json.load(f)
+                    except Exception:
+                        pass
+
+                return jsonify(build_growth_view(self.trading_agent.config, report, bt))
+            except Exception as e:
+                logger.error(f"Error building shadow strategies view: {e}")
+                return jsonify({'error': str(e)}), 500
+
         @self.app.route('/api/correlation-matrix', methods=['GET'])
         @require_rate_limit
         @token_required
