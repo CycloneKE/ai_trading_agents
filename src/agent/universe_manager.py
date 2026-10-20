@@ -235,3 +235,58 @@ def _finite_number(value: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return num if math.isfinite(num) else None
+
+
+MARKET_CONFIG_KEY = {'us': 'symbols', 'kenyan': 'nse_symbols'}
+
+
+def effective_universe(config: Dict[str, Any], watchlist: List[Dict[str, Any]],
+                       market: str = 'us') -> List[str]:
+    """What the trading loop should actually iterate over.
+
+    config symbols + operator-approved additions - paused/removed names.
+    Previously the loop read config alone, so an approved symbol was written
+    to the watchlist and never traded.
+    """
+    key = MARKET_CONFIG_KEY.get(market, 'symbols')
+    universe = list((config.get('data_manager') or {}).get(key) or [])
+
+    for row in watchlist or []:
+        symbol = (row.get('symbol') or '').upper()
+        if not symbol or row.get('market', 'us') != market:
+            continue
+        status = row.get('status', 'active')
+        if status == 'active':
+            if symbol not in universe:
+                universe.append(symbol)
+        elif symbol in universe:
+            universe.remove(symbol)
+
+    seen, out = set(), []
+    for symbol in universe:
+        if symbol not in seen:
+            seen.add(symbol)
+            out.append(symbol)
+    return out
+
+
+def persist_universe(config: Dict[str, Any], symbol: str, market: str,
+                     overlay_path: Optional[str] = None) -> None:
+    """Add an approved symbol to the right list AND to the on-disk overlay.
+
+    Without the overlay the approval is in-memory only and the next restart
+    silently reverts it.
+    """
+    from src.agent.self_assessment import DEFAULT_OVERLAY_PATH, _write_overlay_key
+
+    symbol = (symbol or '').upper()
+    if not symbol:
+        return
+    key = MARKET_CONFIG_KEY.get(market, 'symbols')
+    target = config.setdefault('data_manager', {}).setdefault(key, [])
+    if symbol not in target:
+        target.append(symbol)
+    _write_overlay_key(f'data_manager.{key}', list(target),
+                       overlay_path or DEFAULT_OVERLAY_PATH)
+    logger.warning(f"Universe: {symbol} added to {key} and persisted")
+

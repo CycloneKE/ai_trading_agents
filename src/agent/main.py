@@ -630,7 +630,15 @@ class TradingAgent:
     def run_main_loop(self):
         logger.info("Starting main trading loop...")
         loop_interval = self.config.get('trading_loop_interval', 60)  # seconds
-        symbols = self.config.get('data_manager', {}).get('symbols', ['AAPL', 'GOOGL', 'MSFT', 'TSLA'])
+        # config + operator-approved additions - paused/removed. Reading config
+        # alone meant an approved symbol was written to the watchlist and
+        # never actually traded.
+        from src.agent.universe_manager import effective_universe
+        em = self.components.get('escalation_manager')
+        watchlist = em.get_active_watchlist() if em else []
+        symbols = effective_universe(self.config, watchlist, 'us')
+        if not symbols:
+            symbols = ['AAPL', 'GOOGL', 'MSFT', 'TSLA']
         self._last_optimization_date = None  # Track daily optimization
         
         # Stop-loss configuration

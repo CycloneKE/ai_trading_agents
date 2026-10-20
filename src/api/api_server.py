@@ -1221,17 +1221,14 @@ class TradingAPI:
                 return jsonify({'error': 'Escalation not found or already resolved'}), 404
                 
             if status == 'approved' and escalation and escalation.get('action') == 'add_symbol':
-                # Universe-scout escalation: the operator just approved adding a brand-new
-                # symbol to the tracked universe. There is no research_signals row backing
-                # this escalation (signal_id is None), so add it to the runtime NSE universe
-                # and the persistent watchlist directly instead of going through the
-                # research-signal path below (which assumes market/recommendation data).
+                # Route by market and persist, so the approval survives a
+                # restart and reaches the market it belongs to. US symbols
+                # previously had no path here at all.
+                from src.agent.universe_manager import persist_universe
                 symbol = (escalation.get('symbol') or '').upper()
-                nse_symbols = self.trading_agent.config.setdefault('data_manager', {}).setdefault('nse_symbols', [])
-                if symbol not in nse_symbols:
-                    nse_symbols.append(symbol)
-                    logger.info(f"Added approved symbol {symbol} to config data_manager.nse_symbols")
-                em.add_to_watchlist(symbol, market='kenyan', source='universe_scout')
+                market = escalation.get('market') or 'kenyan'
+                persist_universe(self.trading_agent.config, symbol, market)
+                em.add_to_watchlist(symbol, market=market, source='universe_scout')
             elif status == 'approved' and escalation:
                 symbol = escalation.get('symbol')
                 market = escalation.get('market', 'kenyan')

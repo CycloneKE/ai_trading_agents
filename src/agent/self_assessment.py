@@ -119,6 +119,29 @@ WEIGHT_LO, WEIGHT_HI = 0.0, 2.0
 DEFAULT_OVERLAY_PATH = str(DATA_DIR / 'config_overlay.json')
 
 
+def _write_overlay_key(dotted_key: str, value: Any, path: str) -> None:
+    """Merge one key into the overlay and rewrite it atomically."""
+    try:
+        saved = {}
+        if os.path.exists(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as fh:
+                    loaded = json.load(fh)
+                if isinstance(loaded, dict):
+                    saved = loaded
+            except (OSError, ValueError):
+                logger.warning("Overwriting unreadable config overlay")
+        saved[dotted_key] = value
+        saved['_updated_at'] = utc_now_iso()
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        tmp = f'{path}.tmp'
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            json.dump(saved, fh, indent=2)
+        os.replace(tmp, path)
+    except Exception as e:
+        logger.error(f"Failed to persist config overlay: {e}")
+
+
 def apply_overlay(config: Dict[str, Any], path: str = DEFAULT_OVERLAY_PATH) -> int:
     """Replay persisted auto-applied changes onto a freshly loaded config.
 
@@ -421,25 +444,7 @@ class SelfAssessmentEngine:
         """Record the change so `apply_overlay` can replay it after a restart."""
         if not self.overlay_path:
             return
-        try:
-            saved = {}
-            if os.path.exists(self.overlay_path):
-                try:
-                    with open(self.overlay_path, 'r', encoding='utf-8') as fh:
-                        loaded = json.load(fh)
-                    if isinstance(loaded, dict):
-                        saved = loaded
-                except (OSError, ValueError):
-                    logger.warning("Overwriting unreadable config overlay")
-            saved[dotted_key] = value
-            saved['_updated_at'] = utc_now_iso()
-            os.makedirs(os.path.dirname(self.overlay_path) or '.', exist_ok=True)
-            tmp = f'{self.overlay_path}.tmp'
-            with open(tmp, 'w', encoding='utf-8') as fh:
-                json.dump(saved, fh, indent=2)
-            os.replace(tmp, self.overlay_path)      # atomic
-        except Exception as e:
-            logger.error(f"Failed to persist config overlay: {e}")
+        _write_overlay_key(dotted_key, value, self.overlay_path)
 
     def _analyze_prediction_accuracy(self, decisions: List[Dict[str, Any]], fills: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
