@@ -7,7 +7,7 @@ import {
   TrendingUp, TrendingDown, Activity, Shield, Zap, AlertTriangle, 
   Clock, Layers, ChevronRight, Maximize2, Globe, Cpu, RefreshCw,
   Search, Info, ExternalLink, Play, Square, Pause, Terminal, Flag,
-  Lock, Bell, BarChart as BarChartIcon, LogOut, FileText, CheckCircle, XCircle, Upload
+  Lock, Bell, BarChart as BarChartIcon, LogOut, FileText, CheckCircle, XCircle, Upload, Award
 } from 'lucide-react';
 import AgentActivity from './AgentActivity';
 import AgentFocus from './AgentFocus';
@@ -18,6 +18,7 @@ import SymbolDrilldown from './SymbolDrilldown';
 import SectorDrilldown from './SectorDrilldown';
 import AdvancedAnalytics from './AdvancedAnalytics';
 import UnifiedPortfolio from './UnifiedPortfolio';
+import GrowthView from './GrowthView';
 import { theme, glassCard } from './DashboardStyles';
 import { getApiBase } from '../utils/apiBase';
 
@@ -69,8 +70,26 @@ const ResearchView = ({ activeTab, fetchData, onDrill }) => {
   const [escalations, setEscalations] = useState([]);
   const [watchlist, setWatchlist] = useState([]);
   const [uploads, setUploads] = useState([]);
+  const [filterTab, setFilterTab] = useState('all');
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('trading_token') : null;
+
+  const isKenyanSym = (sym) => {
+    if (!sym) return false;
+    const kenyanSymbols = ['SCOM', 'EQTY', 'KCB', 'EABL', 'BAT', 'BAMB', 'COOP', 'NCBA', 'ABSA', 'SCBK'];
+    return kenyanSymbols.includes(sym.toUpperCase()) || sym.endsWith('.NR') || sym.endsWith('.KE');
+  };
+  const symCur = (sym) => isKenyanSym(sym) ? 'KES ' : '$';
+
+  const isUniverseAction = (act) => ['add_symbol', 'remove_symbol'].includes(act);
+  const scoutEscalations = useMemo(() => escalations.filter(e => isUniverseAction(e.action)), [escalations]);
+  const researchEscalations = useMemo(() => escalations.filter(e => !isUniverseAction(e.action)), [escalations]);
+
+  const displayedEscalations = useMemo(() => {
+    if (filterTab === 'scout') return scoutEscalations;
+    if (filterTab === 'research') return researchEscalations;
+    return escalations;
+  }, [filterTab, escalations, scoutEscalations, researchEscalations]);
 
   const loadResearchData = useCallback(async () => {
     try {
@@ -252,48 +271,123 @@ const ResearchView = ({ activeTab, fetchData, onDrill }) => {
       </div>
 
       <div style={glassCard}>
-        <SectionHeader title="Operator Approval Queue" icon={AlertTriangle} />
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '10px' }}>
+          <SectionHeader title="Operator Approval Queue" icon={AlertTriangle} />
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button
+              onClick={() => setFilterTab('all')}
+              style={{
+                backgroundColor: filterTab === 'all' ? 'rgba(59,130,246,0.2)' : 'transparent',
+                color: filterTab === 'all' ? theme.colors.secondary : theme.colors.textMuted,
+                border: `1px solid ${filterTab === 'all' ? theme.colors.secondary : theme.colors.border}`,
+                borderRadius: '6px', padding: '5px 12px', fontSize: '11px', fontWeight: 800, cursor: 'pointer'
+              }}
+            >
+              ALL ({escalations.length})
+            </button>
+            <button
+              onClick={() => setFilterTab('scout')}
+              style={{
+                backgroundColor: filterTab === 'scout' ? 'rgba(16,185,129,0.2)' : 'transparent',
+                color: filterTab === 'scout' ? theme.colors.primary : theme.colors.textMuted,
+                border: `1px solid ${filterTab === 'scout' ? theme.colors.primary : theme.colors.border}`,
+                borderRadius: '6px', padding: '5px 12px', fontSize: '11px', fontWeight: 800, cursor: 'pointer'
+              }}
+            >
+              UNIVERSE SCOUT & PRUNE ({scoutEscalations.length})
+            </button>
+            <button
+              onClick={() => setFilterTab('research')}
+              style={{
+                backgroundColor: filterTab === 'research' ? 'rgba(139,92,246,0.2)' : 'transparent',
+                color: filterTab === 'research' ? theme.colors.accent : theme.colors.textMuted,
+                border: `1px solid ${filterTab === 'research' ? theme.colors.accent : theme.colors.border}`,
+                borderRadius: '6px', padding: '5px 12px', fontSize: '11px', fontWeight: 800, cursor: 'pointer'
+              }}
+            >
+              RESEARCH SIGNALS ({researchEscalations.length})
+            </button>
+          </div>
+        </div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
             <thead>
               <tr style={{ borderBottom: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary, textAlign: 'left' }}>
                 <th style={{ padding: '10px 0' }}>ASSET</th>
-                <th style={{ padding: '10px 0' }}>ACTION</th>
-                <th style={{ padding: '10px 0' }}>BROKER RATING</th>
+                <th style={{ padding: '10px 0' }}>ACTION TYPE</th>
+                <th style={{ padding: '10px 0' }}>CLASSIFICATION</th>
                 <th style={{ padding: '10px 0' }}>TARGET (UPSIDE)</th>
-                <th style={{ padding: '10px 0' }}>RISK / ESCALATION REASON</th>
+                <th style={{ padding: '10px 0' }}>SYSTEMATIC REASON & RATIONALE</th>
                 <th style={{ padding: '10px 0', textAlign: 'right' }}>DECISION</th>
               </tr>
             </thead>
             <tbody>
-              {escalations.length > 0 ? (
-                escalations.map(esc => (
-                  <tr key={esc.id} style={{ borderBottom: `1px solid ${theme.colors.border}30` }}>
-                    <td style={{ padding: '12px 0', fontWeight: 'bold' }}>{esc.symbol}</td>
-                    <td style={{ padding: '12px 0' }}><span style={{ backgroundColor: `${theme.colors.accent}15`, color: theme.colors.accent, padding: '3px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: '800' }}>{esc.action.toUpperCase()}</span></td>
-                    <td style={{ padding: '12px 0' }}><span style={{ color: esc.recommendation === 'SELL' ? theme.colors.danger : theme.colors.primary, fontWeight: '700' }}>{esc.recommendation || 'UNKNOWN'}</span></td>
-                    <td style={{ padding: '12px 0' }}>
-                      {esc.target_price ? (
-                        <span>KES {esc.target_price.toFixed(2)} ({esc.upside_pct ? `${esc.upside_pct.toFixed(1)}%` : '-%'})</span>
-                      ) : (
-                        <span style={{ color: theme.colors.textMuted }}>N/A</span>
-                      )}
-                    </td>
-                    <td style={{ padding: '12px 0', maxWidth: '380px', whiteSpace: 'normal', fontSize: '12px' }}>
-                      <span style={{ color: theme.colors.warning, fontWeight: '700', marginRight: '5px' }}>[{esc.risk_level.toUpperCase()}]</span>
-                      <span style={{ color: theme.colors.textSecondary, fontWeight: '600' }}>{esc.reason}</span>
-                      {esc.rationale && (
-                        <p style={{ margin: '4px 0 0 0', fontSize: '11px', color: theme.colors.textMuted, fontStyle: 'italic', lineHeight: '1.4' }}>
-                          "{esc.rationale}"
-                        </p>
-                      )}
-                    </td>
-                    <td style={{ padding: '12px 0', textAlign: 'right' }}>
-                      <button onClick={() => handleResolveEscalation(esc.id, 'approved')} style={{ backgroundColor: theme.colors.primary, color: '#000', border: 'none', padding: '6px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: '800', cursor: 'pointer', marginRight: '8px' }}>APPROVE</button>
-                      <button onClick={() => handleResolveEscalation(esc.id, 'rejected')} style={{ backgroundColor: 'rgba(244, 63, 94, 0.1)', color: theme.colors.danger, border: `1px solid ${theme.colors.danger}`, padding: '5px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: '800', cursor: 'pointer' }}>REJECT</button>
-                    </td>
-                  </tr>
-                ))
+              {displayedEscalations.length > 0 ? (
+                displayedEscalations.map(esc => {
+                  const isAdd = esc.action === 'add_symbol';
+                  const isRemove = esc.action === 'remove_symbol';
+                  return (
+                    <tr key={esc.id} style={{ borderBottom: `1px solid ${theme.colors.border}30` }}>
+                      <td style={{ padding: '12px 0' }}>
+                        <span
+                          onClick={() => onDrill && onDrill(esc.symbol)}
+                          title={`Drill down into ${esc.symbol}`}
+                          style={{ fontWeight: 'bold', cursor: 'pointer', color: theme.colors.text, textDecoration: 'underline' }}
+                        >
+                          {esc.symbol}
+                        </span>
+                      </td>
+                      <td style={{ padding: '12px 0' }}>
+                        {isAdd && (
+                          <span style={{ backgroundColor: 'rgba(16, 185, 129, 0.15)', color: theme.colors.primary, padding: '3px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: '800' }}>
+                            ADD UNIVERSE
+                          </span>
+                        )}
+                        {isRemove && (
+                          <span style={{ backgroundColor: 'rgba(244, 63, 94, 0.15)', color: theme.colors.danger, padding: '3px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: '800' }}>
+                            PRUNE UNIVERSE
+                          </span>
+                        )}
+                        {!isAdd && !isRemove && (
+                          <span style={{ backgroundColor: `${theme.colors.accent}15`, color: theme.colors.accent, padding: '3px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: '800' }}>
+                            RESEARCH SIGNAL
+                          </span>
+                        )}
+                      </td>
+                      <td style={{ padding: '12px 0' }}>
+                        {isAdd && <span style={{ color: theme.colors.primary, fontWeight: '700' }}>SCOUT CANDIDATE</span>}
+                        {isRemove && <span style={{ color: theme.colors.danger, fontWeight: '700' }}>SYSTEMATIC PRUNE</span>}
+                        {!isAdd && !isRemove && (
+                          <span style={{ color: esc.recommendation === 'SELL' ? theme.colors.danger : theme.colors.primary, fontWeight: '700' }}>
+                            {esc.recommendation || 'BUY'}
+                          </span>
+                        )}
+                      </td>
+                      <td style={{ padding: '12px 0' }}>
+                        {esc.target_price ? (
+                          <span>{symCur(esc.symbol)}{esc.target_price.toFixed(2)} ({esc.upside_pct ? `${esc.upside_pct.toFixed(1)}%` : '-%'})</span>
+                        ) : (
+                          <span style={{ color: theme.colors.textMuted }}>— (Market)</span>
+                        )}
+                      </td>
+                      <td style={{ padding: '12px 0', maxWidth: '380px', whiteSpace: 'normal', fontSize: '12px' }}>
+                        <span style={{ color: esc.risk_level === 'high' ? theme.colors.danger : theme.colors.warning, fontWeight: '700', marginRight: '5px' }}>
+                          [{esc.risk_level.toUpperCase()}]
+                        </span>
+                        <span style={{ color: theme.colors.textSecondary, fontWeight: '600' }}>{esc.reason}</span>
+                        {esc.rationale && (
+                          <p style={{ margin: '4px 0 0 0', fontSize: '11px', color: theme.colors.textMuted, fontStyle: 'italic', lineHeight: '1.4' }}>
+                            "{esc.rationale}"
+                          </p>
+                        )}
+                      </td>
+                      <td style={{ padding: '12px 0', textAlign: 'right' }}>
+                        <button onClick={() => handleResolveEscalation(esc.id, 'approved')} style={{ backgroundColor: theme.colors.primary, color: '#000', border: 'none', padding: '6px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: '800', cursor: 'pointer', marginRight: '8px' }}>APPROVE</button>
+                        <button onClick={() => handleResolveEscalation(esc.id, 'rejected')} style={{ backgroundColor: 'rgba(244, 63, 94, 0.1)', color: theme.colors.danger, border: `1px solid ${theme.colors.danger}`, padding: '5px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: '800', cursor: 'pointer' }}>REJECT</button>
+                      </td>
+                    </tr>
+                  );
+                })
               ) : (
                 <tr><td colSpan="6" style={{ padding: '30px 0', textAlign: 'center', color: theme.colors.textMuted }}>Approval queue is empty. System running autonomously.</td></tr>
               )}
@@ -324,7 +418,7 @@ const ResearchView = ({ activeTab, fetchData, onDrill }) => {
                     <td style={{ padding: '12px 0', fontWeight: 'bold' }}>{item.symbol}</td>
                     <td style={{ padding: '12px 0', color: theme.colors.textSecondary }}>{item.market.toUpperCase()}</td>
                     <td style={{ padding: '12px 0', color: theme.colors.primary, fontWeight: '700' }}>{item.recommendation}</td>
-                    <td style={{ padding: '12px 0' }}>{item.target_price ? `KES ${item.target_price.toFixed(2)}` : 'N/A'}</td>
+                    <td style={{ padding: '12px 0' }}>{item.target_price ? `${symCur(item.symbol)}${item.target_price.toFixed(2)}` : 'N/A'}</td>
                     <td style={{ padding: '12px 0', color: theme.colors.textMuted }}>{item.source}</td>
                     <td>
                       <span style={{ backgroundColor: item.status === 'active' ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)', color: item.status === 'active' ? theme.colors.primary : theme.colors.warning, padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold' }}>
@@ -1048,6 +1142,7 @@ const AdvancedDashboard = ({ onLogout }) => {
   const tabs = [
     { id: 'portfolio', label: 'PORTFOLIO & WEALTH', icon: Globe, component: () => <UnifiedPortfolio onDrill={setDrilldownSymbol} /> },
     { id: 'overview', label: 'COMMAND DESK', icon: Activity, component: renderOverview },
+    { id: 'growth', label: 'GROWTH & LEARNING', icon: Award, component: () => <GrowthView onDrill={setDrilldownSymbol} /> },
     { id: 'research', label: 'RESEARCH & AUTO-PILOT', icon: FileText, component: () => <ResearchView activeTab={activeTab} fetchData={fetchData} onDrill={setDrilldownSymbol} /> },
     { id: 'nse', label: 'NSE KENYA', icon: Flag, component: renderKenyaNSE },
     { id: 'analytics', label: 'ANALYTICS', icon: TrendingUp, component: renderAnalytics },

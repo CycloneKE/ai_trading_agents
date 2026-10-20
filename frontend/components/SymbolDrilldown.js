@@ -7,11 +7,19 @@ import { X, TrendingUp, TrendingDown, Activity, Layers, AlertTriangle, BarChart2
 import { theme, glassCard } from './DashboardStyles';
 import { getApiBase } from '../utils/apiBase';
 
+const isKenyan = (sym) => {
+  if (!sym) return false;
+  const kenyanSymbols = ['SCOM', 'EQTY', 'KCB', 'EABL', 'BAT', 'BAMB', 'COOP', 'NCBA', 'ABSA', 'SCBK'];
+  return kenyanSymbols.includes(sym.toUpperCase()) || sym.endsWith('.NR') || sym.endsWith('.KE');
+};
+const curPrefix = (sym) => isKenyan(sym) ? 'KES ' : '$';
+
 const REASON_LABEL = {
   hold: 'No directional signal',
   below_confidence: 'Below confidence floor',
   bias_downgrade: 'Bias detector downgrade',
   llm_veto: 'LLM vetoed the trade',
+  consensus_disagreement: 'Dual-model consensus disagreement',
   fallback_price: 'Price was synthetic fallback',
   halted: 'Trading halted (kill switch)',
   risk_limits: 'Portfolio risk limit hit',
@@ -26,7 +34,7 @@ const REASON_LABEL = {
 const reasonColor = (r) => {
   if (!r) return theme.colors.primary;
   if (['halted', 'risk_limits', 'pdt_guard'].includes(r)) return theme.colors.danger;
-  if (['llm_veto', 'bias_downgrade'].includes(r)) return theme.colors.accent;
+  if (['llm_veto', 'bias_downgrade', 'consensus_disagreement'].includes(r)) return theme.colors.accent;
   if (r === 'hold') return theme.colors.textMuted;
   return theme.colors.warning;
 };
@@ -153,8 +161,8 @@ const SymbolDrilldown = ({ symbol, onClose }) => {
           <>
             {/* Headline stats */}
             <div style={{ display: 'flex', gap: '12px', marginBottom: '20px', flexWrap: 'wrap' }}>
-              <Stat label="Current Price" value={alpha.current_price ? `$${alpha.current_price.toFixed(2)}` : '—'} subtitle="Live Market Feed" />
-              <Stat label="Agent P&L" value={`${alpha.agent_pnl >= 0 ? '+' : ''}$${(alpha.agent_pnl || 0).toFixed(2)}`}
+              <Stat label="Current Price" value={alpha.current_price ? `${curPrefix(symbol)}${alpha.current_price.toFixed(2)}` : '—'} subtitle="Live Market Feed" />
+              <Stat label="Agent P&L" value={`${alpha.agent_pnl >= 0 ? '+' : '-'}${curPrefix(symbol)}${Math.abs(alpha.agent_pnl || 0).toFixed(2)}`}
                     color={alpha.agent_pnl >= 0 ? theme.colors.primary : theme.colors.danger} subtitle="Realized + Floating" />
               <Stat label="Buy & Hold" value={alpha.buy_hold_return_pct != null ? `${alpha.buy_hold_return_pct >= 0 ? '+' : ''}${alpha.buy_hold_return_pct}%` : '—'}
                     color={theme.colors.secondary} subtitle="Benchmark Return" />
@@ -173,7 +181,7 @@ const SymbolDrilldown = ({ symbol, onClose }) => {
                 <Cpu size={18} color={theme.colors.primary} />
                 <div>
                   {alpha.first_entry_price
-                    ? <>Agent entry at <strong style={{ color: '#fff' }}>${alpha.first_entry_price.toFixed(2)}</strong>. Net performance: <strong style={{ color: alpha.agent_pnl >= 0 ? theme.colors.primary : theme.colors.danger }}>${alpha.agent_pnl.toFixed(2)}</strong> (Buy & Hold: <strong style={{ color: theme.colors.secondary }}>{alpha.buy_hold_return_pct}%</strong>).</>
+                    ? <>Agent entry at <strong style={{ color: '#fff' }}>{curPrefix(symbol)}{alpha.first_entry_price.toFixed(2)}</strong>. Net performance: <strong style={{ color: alpha.agent_pnl >= 0 ? theme.colors.primary : theme.colors.danger }}>{alpha.agent_pnl >= 0 ? '+' : '-'}{curPrefix(symbol)}{Math.abs(alpha.agent_pnl).toFixed(2)}</strong> (Buy & Hold: <strong style={{ color: theme.colors.secondary }}>{alpha.buy_hold_return_pct}%</strong>).</>
                     : <>No agent entries on {symbol} yet — benchmark comparison pending initial trade execution.</>}
                 </div>
               </div>
@@ -221,7 +229,7 @@ const SymbolDrilldown = ({ symbol, onClose }) => {
                       <YAxis domain={['dataMin - (dataMin * 0.03)', 'dataMax + (dataMax * 0.03)']} tick={{ fontSize: 10, fill: theme.colors.textMuted }} width={55} />
                       <Tooltip
                         contentStyle={{ background: theme.colors.bgSecondary, border: `1px solid ${theme.colors.border}`, borderRadius: '8px', fontSize: '12px' }}
-                        formatter={(v, n) => [typeof v === 'number' ? `$${v.toFixed(2)}` : v, n.toUpperCase()]}
+                        formatter={(v, n) => [typeof v === 'number' ? `${curPrefix(symbol)}${v.toFixed(2)}` : v, n.toUpperCase()]}
                       />
                       <Line type="monotone" dataKey="price" stroke={theme.colors.secondary} dot={false} strokeWidth={2.5} name="price" />
                       {showSMA20 && <Line type="monotone" dataKey="sma20" stroke={theme.colors.accent} dot={false} strokeWidth={1.5} strokeDasharray="4 4" name="sma20" />}
@@ -229,10 +237,10 @@ const SymbolDrilldown = ({ symbol, onClose }) => {
 
                       {/* Reference lines */}
                       {data.target_price && (
-                        <ReferenceLine y={data.target_price} stroke={theme.colors.primary} strokeDasharray="3 3" label={{ value: `Target: $${data.target_price.toFixed(2)}`, fill: theme.colors.primary, position: 'top', fontSize: 9 }} />
+                        <ReferenceLine y={data.target_price} stroke={theme.colors.primary} strokeDasharray="3 3" label={{ value: `Target: ${curPrefix(symbol)}${data.target_price.toFixed(2)}`, fill: theme.colors.primary, position: 'top', fontSize: 9 }} />
                       )}
                       {alpha.first_entry_price && (
-                        <ReferenceLine y={alpha.first_entry_price} stroke={theme.colors.warning} strokeDasharray="3 3" label={{ value: `Entry: $${alpha.first_entry_price.toFixed(2)}`, fill: theme.colors.warning, position: 'bottom', fontSize: 9 }} />
+                        <ReferenceLine y={alpha.first_entry_price} stroke={theme.colors.warning} strokeDasharray="3 3" label={{ value: `Entry: ${curPrefix(symbol)}${alpha.first_entry_price.toFixed(2)}`, fill: theme.colors.warning, position: 'bottom', fontSize: 9 }} />
                       )}
 
                       {/* Buy Executed Markers (Green) */}
@@ -277,20 +285,59 @@ const SymbolDrilldown = ({ symbol, onClose }) => {
                     <div style={{ color: theme.colors.textMuted, fontSize: '13px' }}>Decision internals are visible to operators only.</div>
                   )}
                   {!data.decisions_restricted && decisions.length === 0 && <div style={{ color: theme.colors.textMuted, fontSize: '13px' }}>No decisions recorded yet.</div>}
-                  {decisions.map((d, i) => (
-                    <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: `1px solid ${theme.colors.border}30`, fontSize: '12px' }}>
-                      <div>
-                        <span style={{ color: reasonColor(d.skip_reason), fontWeight: 700 }}>
-                          {d.executed ? `EXECUTED ${d.action?.toUpperCase()}` : (REASON_LABEL[d.skip_reason] || d.skip_reason || 'hold')}
-                        </span>
-                        <div style={{ color: theme.colors.textMuted, fontSize: '10px' }}>
-                          conf {(d.ensemble_confidence || 0).toFixed(2)}
-                          {d.llm_verdict?.reasoning ? ` · LLM: ${String(d.llm_verdict.reasoning).slice(0, 45)}` : ''}
+                  {decisions.map((d, i) => {
+                    const verdict = d.llm_verdict;
+                    const hasConsensus = verdict && verdict.consensus_verified !== undefined;
+                    const isDualVerified = verdict && verdict.consensus_verified === true;
+                    const sec = verdict && verdict.secondary_verdict;
+
+                    return (
+                      <div key={i} style={{ padding: '10px 0', borderBottom: `1px solid ${theme.colors.border}30`, fontSize: '12px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '4px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                            <span style={{ color: reasonColor(d.skip_reason), fontWeight: 700 }}>
+                              {d.executed ? `EXECUTED ${d.action?.toUpperCase()}` : (REASON_LABEL[d.skip_reason] || d.skip_reason || 'hold')}
+                            </span>
+                            {hasConsensus && (
+                              <span style={{
+                                fontSize: '10px',
+                                padding: '2px 6px',
+                                borderRadius: '4px',
+                                fontWeight: 800,
+                                backgroundColor: isDualVerified ? 'rgba(16,185,129,0.15)' : 'rgba(244,63,94,0.15)',
+                                color: isDualVerified ? theme.colors.primary : theme.colors.danger,
+                                border: `1px solid ${isDualVerified ? theme.colors.primary : theme.colors.danger}40`
+                              }}>
+                                {isDualVerified ? '✓ DUAL CONSENSUS' : '✗ CONSENSUS DISAGREEMENT'}
+                              </span>
+                            )}
+                          </div>
+                          <span style={{ color: theme.colors.textMuted, fontSize: '10px', whiteSpace: 'nowrap' }}>
+                            {d.ts ? new Date(d.ts).toLocaleTimeString() : ''}
+                          </span>
                         </div>
+                        <div style={{ color: theme.colors.textMuted, fontSize: '11px', lineHeight: '1.4' }}>
+                          <span>conf {(d.ensemble_confidence || 0).toFixed(2)}</span>
+                          {verdict?.reasoning && (
+                            <span style={{ color: theme.colors.textSecondary }}> · LLM: {verdict.reasoning}</span>
+                          )}
+                        </div>
+                        {sec && (
+                          <div style={{
+                            marginTop: '5px',
+                            padding: '4px 8px',
+                            borderRadius: '4px',
+                            backgroundColor: 'rgba(139,92,246,0.08)',
+                            border: '1px solid rgba(139,92,246,0.2)',
+                            fontSize: '10px',
+                            color: '#c084fc'
+                          }}>
+                            <strong>Secondary [{sec.model || 'Reviewer'}]:</strong> {sec.action?.toUpperCase()} ({sec.confidence?.toFixed(2)}) — {sec.reasoning}
+                          </div>
+                        )}
                       </div>
-                      <span style={{ color: theme.colors.textMuted, fontSize: '10px' }}>{d.ts ? new Date(d.ts).toLocaleTimeString() : ''}</span>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
 
@@ -306,7 +353,7 @@ const SymbolDrilldown = ({ symbol, onClose }) => {
                         <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                           <span style={{ fontWeight: 700, fontSize: '12px', textTransform: 'capitalize' }}>{name.replace(/_/g, ' ')}</span>
                           <span style={{ fontWeight: 800, color: total >= 0 ? theme.colors.primary : theme.colors.danger }}>
-                            {total >= 0 ? '+' : ''}${total.toFixed(2)}
+                            {total >= 0 ? '+' : '-'}{curPrefix(symbol)}{Math.abs(total).toFixed(2)}
                           </span>
                         </div>
                         <div style={{ fontSize: '10px', color: theme.colors.textMuted }}>
