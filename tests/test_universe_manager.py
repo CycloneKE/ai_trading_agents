@@ -266,3 +266,23 @@ def test_a_symbol_with_non_finite_stats_is_kept():
                           attribution=float('nan'))},
         RCFG)
     assert out == []
+
+
+def test_a_none_stats_dict_does_not_raise():
+    """Journals can hand back None on a read failure; a removal pass must
+    degrade to "no evidence, keep everything", not crash."""
+    assert propose_removals({'AAPL'}, None, RCFG) == []
+
+
+def test_one_corrupt_stats_entry_does_not_poison_the_removal_pass():
+    """Mirrors the same guard on the additions side: one bad row must not
+    block evaluation of every other symbol."""
+    out = propose_removals(
+        {'AAPL', 'TSLA'},
+        {'AAPL': 'not-a-dict', 'TSLA': stat(consecutive_losses=9)},
+        RCFG)
+    assert [r['symbol'] for r in out] == ['TSLA']
+
+
+def test_a_none_tracked_set_is_handled():
+    assert propose_removals(None, {'AAPL': stat()}, RCFG) == []

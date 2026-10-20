@@ -191,9 +191,16 @@ def propose_removals(tracked: Set[str], stats: Dict[str, Dict[str, Any]],
     max_undefined = int(section.get('max_undefined_days', DEFAULT_MAX_UNDEFINED_DAYS))
 
     out = []
+    stats = stats if isinstance(stats, dict) else {}
     for symbol in sorted(tracked or set()):
         s = stats.get(symbol)
-        if not s:
+        # A missing entry, or one that isn't a dict, is "no evidence" — the
+        # same guard the additions side already has, so one corrupt journal
+        # row cannot crash the whole removal pass.
+        if not isinstance(s, dict) or not s:
+            if s:
+                logger.warning(
+                    f"Universe: ignoring unreadable stats for {symbol}: {s!r}")
             continue
 
         losses = _finite_number(s.get('consecutive_losses'))
