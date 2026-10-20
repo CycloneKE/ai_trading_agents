@@ -11,6 +11,7 @@ benchmark. Writes data/strategy_backtest_results.json.
 """
 
 import json
+import logging
 import os
 import sys
 
@@ -111,6 +112,7 @@ def show(s):
 
 
 def main():
+    logging.disable(logging.WARNING)
     if not os.path.exists(HISTORY):
         print(f"missing {HISTORY} — fetch daily closes first")
         return 1

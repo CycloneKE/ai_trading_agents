@@ -1,0 +1,589 @@
+{
+  "grid": [
+    {
+      "window": 10,
+      "trend_threshold": 0.3,
+      "range_threshold": 0.1,
+      "sharpe": 0.386,
+      "total_return": 0.0972,
+      "trades": 747,
+      "max_drawdown": 0.0501
+    },
+    {
+      "window": 10,
+      "trend_threshold": 0.3,
+      "range_threshold": 0.15,
+      "sharpe": 0.317,
+      "total_return": 0.0882,
+      "trades": 735,
+      "max_drawdown": 0.0486
+    },
+    {
+      "window": 10,
+      "trend_threshold": 0.3,
+      "range_threshold": 0.2,
+      "sharpe": 0.347,
+      "total_return": 0.0917,
+      "trades": 729,
+      "max_drawdown": 0.0464
+    },
+    {
+      "window": 10,
+      "trend_threshold": 0.3,
+      "range_threshold": 0.25,
+      "sharpe": 0.408,
+      "total_return": 0.0991,
+      "trades": 714,
+      "max_drawdown": 0.0468
+    },
+    {
+      "window": 10,
+      "trend_threshold": 0.35,
+      "range_threshold": 0.1,
+      "sharpe": 0.467,
+      "total_return": 0.1069,
+      "trades": 731,
+      "max_drawdown": 0.0502
+    },
+    {
+      "window": 10,
+      "trend_threshold": 0.35,
+      "range_threshold": 0.15,
+      "sharpe": 0.435,
+      "total_return": 0.1026,
+      "trades": 713,
+      "max_drawdown": 0.0464
+    },
+    {
+      "window": 10,
+      "trend_threshold": 0.35,
+      "range_threshold": 0.2,
+      "sharpe": 0.464,
+      "total_return": 0.106,
+      "trades": 703,
+      "max_drawdown": 0.0443
+    },
+    {
+      "window": 10,
+      "trend_threshold": 0.35,
+      "range_threshold": 0.25,
+      "sharpe": 0.546,
+      "total_return": 0.1156,
+      "trades": 684,
+      "max_drawdown": 0.044
+    },
+    {
+      "window": 10,
+      "trend_threshold": 0.4,
+      "range_threshold": 0.1,
+      "sharpe": 0.321,
+      "total_return": 0.0881,
+      "trades": 726,
+      "max_drawdown": 0.054
+    },
+    {
+      "window": 10,
+      "trend_threshold": 0.4,
+      "range_threshold": 0.15,
+      "sharpe": 0.349,
+      "total_return": 0.0913,
+      "trades": 701,
+      "max_drawdown": 0.0502
+    },
+    {
+      "window": 10,
+      "trend_threshold": 0.4,
+      "range_threshold": 0.2,
+      "sharpe": 0.368,
+      "total_return": 0.0935,
+      "trades": 693,
+      "max_drawdown": 0.0501
+    },
+    {
+      "window": 10,
+      "trend_threshold": 0.4,
+      "range_threshold": 0.25,
+      "sharpe": 0.407,
+      "total_return": 0.0977,
+      "trades": 678,
+      "max_drawdown": 0.0478
+    },
+    {
+      "window": 10,
+      "trend_threshold": 0.45,
+      "range_threshold": 0.1,
+      "sharpe": 0.349,
+      "total_return": 0.0901,
+      "trades": 696,
+      "max_drawdown": 0.0535
+    },
+    {
+      "window": 10,
+      "trend_threshold": 0.45,
+      "range_threshold": 0.15,
+      "sharpe": 0.443,
+      "total_return": 0.1015,
+      "trades": 674,
+      "max_drawdown": 0.0494
+    },
+    {
+      "window": 10,
+      "trend_threshold": 0.45,
+      "range_threshold": 0.2,
+      "sharpe": 0.426,
+      "total_return": 0.0991,
+      "trades": 657,
+      "max_drawdown": 0.0497
+    },
+    {
+      "window": 10,
+      "trend_threshold": 0.45,
+      "range_threshold": 0.25,
+      "sharpe": 0.477,
+      "total_return": 0.104,
+      "trades": 638,
+      "max_drawdown": 0.0474
+    },
+    {
+      "window": 20,
+      "trend_threshold": 0.3,
+      "range_threshold": 0.1,
+      "sharpe": 0.384,
+      "total_return": 0.0893,
+      "trades": 568,
+      "max_drawdown": 0.0474
+    },
+    {
+      "window": 20,
+      "trend_threshold": 0.3,
+      "range_threshold": 0.15,
+      "sharpe": 0.307,
+      "total_return": 0.0811,
+      "trades": 566,
+      "max_drawdown": 0.0539
+    },
+    {
+      "window": 20,
+      "trend_threshold": 0.3,
+      "range_threshold": 0.2,
+      "sharpe": 0.206,
+      "total_return": 0.0701,
+      "trades": 555,
+      "max_drawdown": 0.0536
+    },
+    {
+      "window": 20,
+      "trend_threshold": 0.3,
+      "range_threshold": 0.25,
+      "sharpe": 0.107,
+      "total_return": 0.0597,
+      "trades": 552,
+      "max_drawdown": 0.0632
+    },
+    {
+      "window": 20,
+      "trend_threshold": 0.35,
+      "range_threshold": 0.1,
+      "sharpe": 0.578,
+      "total_return": 0.1083,
+      "trades": 534,
+      "max_drawdown": 0.0387
+    },
+    {
+      "window": 20,
+      "trend_threshold": 0.35,
+      "range_threshold": 0.15,
+      "sharpe": 0.466,
+      "total_return": 0.0963,
+      "trades": 539,
+      "max_drawdown": 0.0386
+    },
+    {
+      "window": 20,
+      "trend_threshold": 0.35,
+      "range_threshold": 0.2,
+      "sharpe": 0.333,
+      "total_return": 0.0817,
+      "trades": 520,
+      "max_drawdown": 0.0389
+    },
+    {
+      "window": 20,
+      "trend_threshold": 0.35,
+      "range_threshold": 0.25,
+      "sharpe": 0.483,
+      "total_return": 0.0963,
+      "trades": 506,
+      "max_drawdown": 0.0326
+    },
+    {
+      "window": 20,
+      "trend_threshold": 0.4,
+      "range_threshold": 0.1,
+      "sharpe": 0.284,
+      "total_return": 0.0749,
+      "trades": 533,
+      "max_drawdown": 0.0409
+    },
+    {
+      "window": 20,
+      "trend_threshold": 0.4,
+      "range_threshold": 0.15,
+      "sharpe": 0.221,
+      "total_return": 0.0694,
+      "trades": 528,
+      "max_drawdown": 0.0414
+    },
+    {
+      "window": 20,
+      "trend_threshold": 0.4,
+      "range_threshold": 0.2,
+      "sharpe": 0.083,
+      "total_return": 0.0567,
+      "trades": 510,
+      "max_drawdown": 0.0414
+    },
+    {
+      "window": 20,
+      "trend_threshold": 0.4,
+      "range_threshold": 0.25,
+      "sharpe": 0.212,
+      "total_return": 0.0677,
+      "trades": 507,
+      "max_drawdown": 0.0349
+    },
+    {
+      "window": 20,
+      "trend_threshold": 0.45,
+      "range_threshold": 0.1,
+      "sharpe": -0.163,
+      "total_return": 0.0369,
+      "trades": 472,
+      "max_drawdown": 0.0577
+    },
+    {
+      "window": 20,
+      "trend_threshold": 0.45,
+      "range_threshold": 0.15,
+      "sharpe": -0.277,
+      "total_return": 0.0277,
+      "trades": 464,
+      "max_drawdown": 0.0598
+    },
+    {
+      "window": 20,
+      "trend_threshold": 0.45,
+      "range_threshold": 0.2,
+      "sharpe": -0.338,
+      "total_return": 0.0245,
+      "trades": 451,
+      "max_drawdown": 0.0566
+    },
+    {
+      "window": 20,
+      "trend_threshold": 0.45,
+      "range_threshold": 0.25,
+      "sharpe": -0.278,
+      "total_return": 0.0292,
+      "trades": 449,
+      "max_drawdown": 0.0589
+    },
+    {
+      "window": 30,
+      "trend_threshold": 0.3,
+      "range_threshold": 0.1,
+      "sharpe": -0.342,
+      "total_return": 0.0209,
+      "trades": 511,
+      "max_drawdown": 0.0625
+    },
+    {
+      "window": 30,
+      "trend_threshold": 0.3,
+      "range_threshold": 0.15,
+      "sharpe": -0.55,
+      "total_return": 0.0065,
+      "trades": 493,
+      "max_drawdown": 0.0642
+    },
+    {
+      "window": 30,
+      "trend_threshold": 0.3,
+      "range_threshold": 0.2,
+      "sharpe": -0.564,
+      "total_return": 0.0062,
+      "trades": 469,
+      "max_drawdown": 0.0616
+    },
+    {
+      "window": 30,
+      "trend_threshold": 0.3,
+      "range_threshold": 0.25,
+      "sharpe": -0.651,
+      "total_return": 0.0007,
+      "trades": 477,
+      "max_drawdown": 0.0579
+    },
+    {
+      "window": 30,
+      "trend_threshold": 0.35,
+      "range_threshold": 0.1,
+      "sharpe": -0.418,
+      "total_return": 0.0171,
+      "trades": 468,
+      "max_drawdown": 0.0677
+    },
+    {
+      "window": 30,
+      "trend_threshold": 0.35,
+      "range_threshold": 0.15,
+      "sharpe": -0.655,
+      "total_return": 0.0015,
+      "trades": 466,
+      "max_drawdown": 0.07
+    },
+    {
+      "window": 30,
+      "trend_threshold": 0.35,
+      "range_threshold": 0.2,
+      "sharpe": -0.658,
+      "total_return": 0.0027,
+      "trades": 443,
+      "max_drawdown": 0.0643
+    },
+    {
+      "window": 30,
+      "trend_threshold": 0.35,
+      "range_threshold": 0.25,
+      "sharpe": -0.717,
+      "total_return": 0.0003,
+      "trades": 433,
+      "max_drawdown": 0.0591
+    },
+    {
+      "window": 30,
+      "trend_threshold": 0.4,
+      "range_threshold": 0.1,
+      "sharpe": -0.87,
+      "total_return": -0.0138,
+      "trades": 463,
+      "max_drawdown": 0.0839
+    },
+    {
+      "window": 30,
+      "trend_threshold": 0.4,
+      "range_threshold": 0.15,
+      "sharpe": -0.993,
+      "total_return": -0.0202,
+      "trades": 448,
+      "max_drawdown": 0.0783
+    },
+    {
+      "window": 30,
+      "trend_threshold": 0.4,
+      "range_threshold": 0.2,
+      "sharpe": -0.955,
+      "total_return": -0.0142,
+      "trades": 430,
+      "max_drawdown": 0.0678
+    },
+    {
+      "window": 30,
+      "trend_threshold": 0.4,
+      "range_threshold": 0.25,
+      "sharpe": -1.031,
+      "total_return": -0.0175,
+      "trades": 415,
+      "max_drawdown": 0.0662
+    },
+    {
+      "window": 30,
+      "trend_threshold": 0.45,
+      "range_threshold": 0.1,
+      "sharpe": -0.602,
+      "total_return": 0.0065,
+      "trades": 411,
+      "max_drawdown": 0.0732
+    },
+    {
+      "window": 30,
+      "trend_threshold": 0.45,
+      "range_threshold": 0.15,
+      "sharpe": -0.772,
+      "total_return": -0.004,
+      "trades": 402,
+      "max_drawdown": 0.0707
+    },
+    {
+      "window": 30,
+      "trend_threshold": 0.45,
+      "range_threshold": 0.2,
+      "sharpe": -0.903,
+      "total_return": -0.0109,
+      "trades": 382,
+      "max_drawdown": 0.0673
+    },
+    {
+      "window": 30,
+      "trend_threshold": 0.45,
+      "range_threshold": 0.25,
+      "sharpe": -0.824,
+      "total_return": -0.0055,
+      "trades": 376,
+      "max_drawdown": 0.0646
+    },
+    {
+      "window": 40,
+      "trend_threshold": 0.3,
+      "range_threshold": 0.1,
+      "sharpe": -0.788,
+      "total_return": -0.0113,
+      "trades": 460,
+      "max_drawdown": 0.0813
+    },
+    {
+      "window": 40,
+      "trend_threshold": 0.3,
+      "range_threshold": 0.15,
+      "sharpe": -0.624,
+      "total_return": 0.0021,
+      "trades": 443,
+      "max_drawdown": 0.075
+    },
+    {
+      "window": 40,
+      "trend_threshold": 0.3,
+      "range_threshold": 0.2,
+      "sharpe": -0.55,
+      "total_return": 0.0082,
+      "trades": 443,
+      "max_drawdown": 0.0717
+    },
+    {
+      "window": 40,
+      "trend_threshold": 0.3,
+      "range_threshold": 0.25,
+      "sharpe": -0.899,
+      "total_return": -0.0132,
+      "trades": 441,
+      "max_drawdown": 0.0728
+    },
+    {
+      "window": 40,
+      "trend_threshold": 0.35,
+      "range_threshold": 0.1,
+      "sharpe": -0.769,
+      "total_return": -0.01,
+      "trades": 439,
+      "max_drawdown": 0.0747
+    },
+    {
+      "window": 40,
+      "trend_threshold": 0.35,
+      "range_threshold": 0.15,
+      "sharpe": -0.674,
+      "total_return": -0.0013,
+      "trades": 420,
+      "max_drawdown": 0.0664
+    },
+    {
+      "window": 40,
+      "trend_threshold": 0.35,
+      "range_threshold": 0.2,
+      "sharpe": -0.913,
+      "total_return": -0.0169,
+      "trades": 416,
+      "max_drawdown": 0.0727
+    },
+    {
+      "window": 40,
+      "trend_threshold": 0.35,
+      "range_threshold": 0.25,
+      "sharpe": -1.149,
+      "total_return": -0.0309,
+      "trades": 406,
+      "max_drawdown": 0.0738
+    },
+    {
+      "window": 40,
+      "trend_threshold": 0.4,
+      "range_threshold": 0.1,
+      "sharpe": -1.08,
+      "total_return": -0.029,
+      "trades": 380,
+      "max_drawdown": 0.0781
+    },
+    {
+      "window": 40,
+      "trend_threshold": 0.4,
+      "range_threshold": 0.15,
+      "sharpe": -0.914,
+      "total_return": -0.0158,
+      "trades": 349,
+      "max_drawdown": 0.0636
+    },
+    {
+      "window": 40,
+      "trend_threshold": 0.4,
+      "range_threshold": 0.2,
+      "sharpe": -0.936,
+      "total_return": -0.0169,
+      "trades": 343,
+      "max_drawdown": 0.0639
+    },
+    {
+      "window": 40,
+      "trend_threshold": 0.4,
+      "range_threshold": 0.25,
+      "sharpe": -1.084,
+      "total_return": -0.0283,
+      "trades": 348,
+      "max_drawdown": 0.0732
+    },
+    {
+      "window": 40,
+      "trend_threshold": 0.45,
+      "range_threshold": 0.1,
+      "sharpe": -0.877,
+      "total_return": -0.0124,
+      "trades": 335,
+      "max_drawdown": 0.0641
+    },
+    {
+      "window": 40,
+      "trend_threshold": 0.45,
+      "range_threshold": 0.15,
+      "sharpe": -0.823,
+      "total_return": -0.0081,
+      "trades": 325,
+      "max_drawdown": 0.0603
+    },
+    {
+      "window": 40,
+      "trend_threshold": 0.45,
+      "range_threshold": 0.2,
+      "sharpe": -0.745,
+      "total_return": -0.0019,
+      "trades": 311,
+      "max_drawdown": 0.0549
+    },
+    {
+      "window": 40,
+      "trend_threshold": 0.45,
+      "range_threshold": 0.25,
+      "sharpe": -0.808,
+      "total_return": -0.0088,
+      "trades": 322,
+      "max_drawdown": 0.0646
+    }
+  ],
+  "best": {
+    "window": 20,
+    "trend_threshold": 0.35,
+    "range_threshold": 0.1,
+    "sharpe": 0.578,
+    "total_return": 0.1083,
+    "trades": 534,
+    "max_drawdown": 0.0387
+  }
+}

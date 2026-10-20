@@ -10,6 +10,7 @@ size.
 """
 
 import json
+import logging
 import os
 import sys
 
@@ -27,13 +28,14 @@ RANGE = [0.10, 0.15, 0.20, 0.25]
 
 
 def main():
+    logging.disable(logging.WARNING)
     history = json.load(open(HISTORY, encoding='utf-8'))
     config = json.load(open(CONFIG, encoding='utf-8'))
     history = {s: c for s, c in history.items() if c and len(c) > 60}
 
     n = min(len(c) for c in history.values())
     first_half = {s: c[: n // 2] for s, c in history.items()}
-    print(f'calibrating on bars 0..{n // 2} of {n} — second half NOT touched')
+    print(f'calibrating on bars 0..{n // 2} of {n} — second half NOT touched', flush=True)
 
     results = []
     for window in WINDOWS:
@@ -53,7 +55,7 @@ def main():
                        'max_drawdown': round(res.max_drawdown, 4)}
                 results.append(row)
                 print(f"  w={window:2d} t={trend:.2f} r={rng:.2f} -> "
-                      f"sharpe {row['sharpe']:6.2f}  trades {row['trades']:4d}")
+                      f"sharpe {row['sharpe']:6.2f}  trades {row['trades']:4d}", flush=True)
 
     # Require enough trades that the Sharpe means something. A 3-trade
     # parameter set with a great ratio is noise, not a strategy.

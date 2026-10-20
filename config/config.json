@@ -47,6 +47,12 @@
       }
     }
   },
+  "regime": {
+    "_comment": "Fitted on the first half of data/backtest_history.json by scripts/calibrate_regime.py. See docs/superpowers/specs/2026-08-02-regime-routed-signals-design.md section 7.",
+    "window": 20,
+    "trend_threshold": 0.35,
+    "range_threshold": 0.1
+  },
   "ensemble_method": "adaptive_confidence",
   "performance_window": 30,
   "rebalance_frequency": 7,
