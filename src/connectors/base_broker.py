@@ -7,6 +7,7 @@ from datetime import datetime
 import logging
 import abc
 from dataclasses import dataclass
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +213,7 @@ class BaseBroker(abc.ABC):
                 'positions_count': len(positions),
                 'positions_value': total_positions_value,
                 'unrealized_pl': total_unrealized_pl,
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': utc_now().isoformat()
             }
             
         except Exception as e:
@@ -220,7 +221,7 @@ class BaseBroker(abc.ABC):
             return {
                 'broker_name': self.broker_name,
                 'error': str(e),
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': utc_now().isoformat()
             }
     
     def health_check(self) -> Dict[str, Any]:
@@ -256,7 +257,7 @@ class BaseBroker(abc.ABC):
                 'connection_ok': connection_ok,
                 'account_ok': account_ok,
                 'market_data_ok': market_data_ok,
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': utc_now().isoformat()
             }
             
         except Exception as e:
@@ -265,5 +266,5 @@ class BaseBroker(abc.ABC):
                 'broker_name': self.broker_name,
                 'overall_health': False,
                 'error': str(e),
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': utc_now().isoformat()
             }

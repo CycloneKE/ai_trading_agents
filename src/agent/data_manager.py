@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import queue
+from src.utils.timeutil import utc_now
 
 try:
     import redis
@@ -360,7 +361,7 @@ class DataManager:
                         'type': 'market_data',
                         'source': connector_name,
                         'data': data,
-                        'timestamp': datetime.utcnow().isoformat()
+                        'timestamp': utc_now().isoformat()
                     })
                     data_collected = True
                     break  # primary delivered; skip redundant fallback fetches
@@ -380,7 +381,7 @@ class DataManager:
                             'high': prices[symbol]['price'] * 1.01,
                             'low': prices[symbol]['price'] * 0.98,
                             'volume': prices[symbol]['volume'],
-                            'timestamp': datetime.utcnow().isoformat()
+                            'timestamp': utc_now().isoformat()
                         }
                 
                 if fallback_data:
@@ -388,7 +389,7 @@ class DataManager:
                         'type': 'market_data',
                         'source': 'fallback',
                         'data': fallback_data,
-                        'timestamp': datetime.utcnow().isoformat()
+                        'timestamp': utc_now().isoformat()
                     })
                     logger.debug("Used fallback data for market data")
             except Exception as e:
@@ -419,7 +420,7 @@ class DataManager:
                         'type': 'news_data',
                         'source': connector_name,
                         'data': data,
-                        'timestamp': datetime.utcnow().isoformat()
+                        'timestamp': utc_now().isoformat()
                     })
             except Exception as e:
                 logger.error(f"Error collecting news data from {connector_name}: {str(e)}")

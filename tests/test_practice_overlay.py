@@ -17,9 +17,11 @@ CONFIG = {
 
 
 def test_overlay_applies_promoted_params(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    os.makedirs('data', exist_ok=True)
-    with open(os.path.join('data', 'strategy_params.json'), 'w') as f:
+    # strategy_manager reads the overlay from the repo-anchored DATA_DIR
+    # (not the CWD), so isolate the test by pointing DATA_DIR at tmp_path
+    # rather than chdir'ing into it.
+    monkeypatch.setattr('src.agent.strategy_manager.DATA_DIR', tmp_path)
+    with open(tmp_path / 'strategy_params.json', 'w') as f:
         json.dump({'momentum': {'rsi_oversold': 35}}, f)
 
     mgr = StrategyManager(CONFIG)
@@ -29,12 +31,11 @@ def test_overlay_applies_promoted_params(tmp_path, monkeypatch):
 
 
 def test_missing_or_corrupt_overlay_is_harmless(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr('src.agent.strategy_manager.DATA_DIR', tmp_path)
     mgr = StrategyManager(CONFIG)          # no overlay file at all
     assert mgr.strategies['momentum'].rsi_oversold == 30
 
-    os.makedirs('data', exist_ok=True)
-    with open(os.path.join('data', 'strategy_params.json'), 'w') as f:
+    with open(tmp_path / 'strategy_params.json', 'w') as f:
         f.write('{not valid json')
     mgr2 = StrategyManager(CONFIG)         # corrupt overlay: config wins
     assert mgr2.strategies['momentum'].rsi_oversold == 30

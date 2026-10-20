@@ -8,7 +8,11 @@ import requests
 import json
 import subprocess
 import os
+import sys
 from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.utils.paths import DATA_DIR
 
 def check_system_status():
     """Check if the system is working properly"""
@@ -44,7 +48,7 @@ def check_system_status():
         print("[FAIL] Log file: NOT FOUND")
     
     # 3. Check paper trading state
-    state_file = "data/paper_trading_state.json"
+    state_file = str(DATA_DIR / "paper_trading_state.json")
     if os.path.exists(state_file):
         print("[OK] Paper trading state: EXISTS")
         try:
@@ -59,7 +63,7 @@ def check_system_status():
     
     # 4. Check optimization results
     today = datetime.now().strftime('%Y%m%d')
-    opt_file = f"data/optimization_results_{today}.json"
+    opt_file = str(DATA_DIR / f"optimization_results_{today}.json")
     if os.path.exists(opt_file):
         print("[OK] Today's optimization: EXISTS")
     else:

@@ -18,6 +18,7 @@ from nltk.tag import pos_tag
 from collections import Counter
 import spacy
 from transformers import pipeline
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -427,7 +428,7 @@ class FinancialTextProcessor:
                     'sentence_count': sentence_count,
                     'avg_words_per_sentence': word_count / sentence_count if sentence_count > 0 else 0
                 },
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': utc_now().isoformat()
             }
             
             return result
@@ -461,7 +462,7 @@ class FinancialTextProcessor:
                 'sentence_count': 0,
                 'avg_words_per_sentence': 0
             },
-            'timestamp': datetime.utcnow().isoformat()
+            'timestamp': utc_now().isoformat()
         }
     
     def process_batch(self, texts: List[str], include_summary: bool = True) -> List[Dict[str, Any]]:

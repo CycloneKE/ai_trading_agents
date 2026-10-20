@@ -266,7 +266,10 @@ class RealDataConnector:
                     results.append({
                         'sector': name,
                         'symbol': symbol,
-                        'change': data.get('change_percent', 0),
+                        # change_percent is in percentage-point form (e.g. 2.5
+                        # meaning 2.5%); the dashboard multiplies this by 100
+                        # to render a percent, so store it as a fraction.
+                        'performance': data.get('change_percent', 0) / 100,
                         'price': data.get('price', 0),
                         'volume': data.get('volume', 0)
                     })

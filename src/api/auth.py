@@ -9,6 +9,7 @@ import bcrypt
 import json
 import os
 from datetime import datetime, timedelta
+from src.utils.timeutil import utc_now
 
 # Roles. 'operator' is full control (kill switch, config, decision internals);
 # 'viewer' sees outcomes only (positions, P&L, price tape).
@@ -65,8 +66,8 @@ TOKEN_TTL_HOURS = float(os.environ.get('TOKEN_TTL_HOURS', '8'))
 def create_token(username: str, role: str = DEFAULT_ROLE) -> str:
     """Creates a JWT token for a user, carrying their role."""
     payload = {
-        'exp': datetime.utcnow() + timedelta(hours=TOKEN_TTL_HOURS),
-        'iat': datetime.utcnow(),
+        'exp': utc_now() + timedelta(hours=TOKEN_TTL_HOURS),
+        'iat': utc_now(),
         'sub': username,
         'role': role if role in ROLES else 'viewer',
     }

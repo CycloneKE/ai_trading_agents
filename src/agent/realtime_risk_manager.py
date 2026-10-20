@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import numpy as np
 from enum import Enum
 from typing import Optional
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +63,11 @@ class RealTimeRiskManager:
         self.confidence_level = config.get('confidence_level', 0.95)
         self.rebalance_threshold = config.get('rebalance_threshold', 0.05)
         
-        # Emergency controls
+        # Emergency controls & Persistent Kill Switch
         self.emergency_stop = False
         self.risk_alerts = []
+        self._init_persistent_risk_state()
+        
         # Prometheus counters (optional)
         try:
             from prometheus_client import Counter
@@ -74,6 +77,39 @@ class RealTimeRiskManager:
             # prometheus_client not installed or failed to import; use no-op placeholders
             self.trade_attempts_counter = None
             self.trade_success_counter = None
+            
+    def _init_persistent_risk_state(self):
+        """Initialize and read persistent kill switch state from SQLite."""
+        try:
+            import sqlite3
+            import os
+            from src.utils.paths import DATA_DIR
+            db_path = str(DATA_DIR / 'risk_state.db')
+            os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
+            self._risk_db_conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
+            self._risk_db_conn.execute("CREATE TABLE IF NOT EXISTS risk_state (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
+            self._risk_db_conn.commit()
+            
+            cur = self._risk_db_conn.execute("SELECT value FROM risk_state WHERE key='kill_switch_active'")
+            row = cur.fetchone()
+            if row and row[0] == 'true':
+                self.emergency_stop = True
+                logger.warning("Persistent Kill Switch active: emergency stop restored from DB")
+        except Exception as e:
+            logger.error(f"Failed to initialize persistent risk state DB: {e}")
+
+    def set_persistent_kill_switch(self, active: bool, reason: str = ""):
+        """Set kill switch state in memory and persist to DB."""
+        self.emergency_stop = active
+        try:
+            if hasattr(self, '_risk_db_conn') and self._risk_db_conn:
+                now = utc_now().isoformat()
+                val = 'true' if active else 'false'
+                self._risk_db_conn.execute("INSERT OR REPLACE INTO risk_state (key, value, updated_at) VALUES ('kill_switch_active', ?, ?)", (val, now))
+                self._risk_db_conn.commit()
+                logger.warning(f"Persistent Kill Switch set to {val}: {reason}")
+        except Exception as e:
+            logger.error(f"Error persisting kill switch state: {e}")
         
     def _initialize_risk_limits(self) -> List[RiskLimit]:
         """Initialize risk limits from configuration"""
@@ -344,7 +380,7 @@ class RealTimeRiskManager:
             
             # Store in history
             self.risk_history.append({
-                'timestamp': datetime.utcnow(),
+                'timestamp': utc_now(),
                 'metrics': self.current_metrics
             })
             
@@ -368,7 +404,7 @@ class RealTimeRiskManager:
                 
                 if current_value > limit.threshold:
                     alert = {
-                        'timestamp': datetime.utcnow(),
+                        'timestamp': utc_now(),
                         'limit_name': limit.name,
                         'limit_type': limit.limit_type,
                         'current_value': current_value,
@@ -392,7 +428,7 @@ class RealTimeRiskManager:
             self.risk_alerts.extend(alerts)
             
             # Keep only recent alerts
-            cutoff_time = datetime.utcnow() - timedelta(hours=24)
+            cutoff_time = utc_now() - timedelta(hours=24)
             self.risk_alerts = [a for a in self.risk_alerts if a['timestamp'] > cutoff_time]
             
         except Exception as e:
@@ -531,7 +567,7 @@ class RealTimeRiskManager:
                     })
             
             return {
-                'timestamp': datetime.utcnow().isoformat(),
+                'timestamp': utc_now().isoformat(),
                 'portfolio_value': self.portfolio_value,
                 'cash': self.cash,
                 'emergency_stop': self.emergency_stop,
@@ -571,13 +607,13 @@ class RealTimeRiskManager:
             # Check if conditions are safe to resume
             critical_breaches = [a for a in self.risk_alerts 
                                if a['severity'] == RiskLevel.CRITICAL and 
-                               a['timestamp'] > datetime.utcnow() - timedelta(minutes=30)]
+                               a['timestamp'] > utc_now() - timedelta(minutes=30)]
             
             if critical_breaches:
                 logger.warning("Cannot reset emergency stop: critical risk breaches still active")
                 return False
             
-            self.emergency_stop = False
+            self.set_persistent_kill_switch(False, "Reset via reset_emergency_stop")
             logger.info("Emergency stop reset")
             return True
             
@@ -592,7 +628,7 @@ class RealTimeRiskManager:
             'active_positions': len([p for p in self.positions.values() if p['quantity'] > 0]),
             'portfolio_value': self.portfolio_value,
             'recent_alerts': len([a for a in self.risk_alerts 
-                                if a['timestamp'] > datetime.utcnow() - timedelta(hours=1)]),
+                                if a['timestamp'] > utc_now() - timedelta(hours=1)]),
             'risk_limits_count': len(self.risk_limits),
             'current_var': self.current_metrics.portfolio_var,
             'current_leverage': self.current_metrics.leverage

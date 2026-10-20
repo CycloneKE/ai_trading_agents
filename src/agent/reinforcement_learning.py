@@ -16,6 +16,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from .base_strategy import BaseStrategy
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -251,7 +252,7 @@ class DQNStrategy(BaseStrategy):
                     self.target_model.load_state_dict(self.model.state_dict())
                     logger.debug(f"Updated target model for {self.name}")
             
-            self.last_update = datetime.utcnow()
+            self.last_update = utc_now()
             return True
             
         except Exception as e:

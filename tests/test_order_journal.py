@@ -112,3 +112,95 @@ def test_reconcile_resolves_crash_states():
     finally:
         journal.close()
         os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Lock durability
+#
+# Regression for 2026-07-24: `Error enforcing stop-loss for TSLA: database is
+# locked` x10 while the position was 21% underwater. The journal is the
+# gate every order passes through, so a contended write must wait, not fail.
+# ---------------------------------------------------------------------------
+
+def test_journal_connection_carries_busy_timeout():
+    from src.utils.sqlite_util import BUSY_TIMEOUT_MS
+    journal, path = make_journal()
+    try:
+        got = journal._conn.execute('PRAGMA busy_timeout').fetchone()[0]
+        assert got == BUSY_TIMEOUT_MS
+    finally:
+        journal.close()
+        os.unlink(path)
+
+
+class _FlakyConn:
+    """Wraps a real connection and injects N lock errors on statements
+    starting with `verb`, so the retry path can be exercised deterministically
+    (sqlite3.Connection.execute itself is read-only and cannot be patched)."""
+
+    def __init__(self, conn, verb, failures):
+        self._conn = conn
+        self._verb = verb.upper()
+        self.left = failures
+
+    def execute(self, sql, *args, **kwargs):
+        import sqlite3
+        if sql.lstrip().upper().startswith(self._verb) and self.left > 0:
+            self.left -= 1
+            raise sqlite3.OperationalError('database is locked')
+        return self._conn.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def test_record_intent_retries_past_a_lock_instead_of_propagating():
+    """sqlite's own busy_timeout covers short contention; this covers what
+    happens when it is exhausted. Before the fix the OperationalError
+    escaped into _enforce_stop_losses and the stop-loss was skipped for that
+    cycle — which is exactly what the 2026-07-24 log shows."""
+    journal, path = make_journal()
+    try:
+        real = journal._conn
+        flaky = _FlakyConn(real, 'INSERT', 2)
+        journal._conn = flaky
+        coid = make_client_order_id('momentum', 'AAPL', 'buy', 99)
+        assert journal.record_intent(coid, 'AAPL', 'buy', 5, 'market') is True
+        assert flaky.left == 0                # both lock errors were absorbed
+        journal._conn = real
+        assert journal.get(coid)['status'] == 'intent'
+    finally:
+        journal.close()
+        os.unlink(path)
+
+
+def test_mark_final_retries_past_a_lock():
+    """Fill resolution matters as much as submission — an unretried lock here
+    leaves the journal claiming an order is still in flight."""
+    journal, path = make_journal()
+    try:
+        coid = make_client_order_id('momentum', 'AAPL', 'buy', 3)
+        journal.record_intent(coid, 'AAPL', 'buy', 5, 'market')
+
+        real = journal._conn
+        flaky = _FlakyConn(real, 'UPDATE', 1)
+        journal._conn = flaky
+        journal.mark_final(coid, 'filled', 5, 100.0)
+        journal._conn = real
+        assert journal.get(coid)['status'] == 'filled'
+    finally:
+        journal.close()
+        os.unlink(path)
+
+
+def test_duplicate_is_still_refused_under_contention():
+    """The retry must not turn an IntegrityError into a retry-then-succeed:
+    a duplicate decision has to stay refused, contention or not."""
+    journal, path = make_journal()
+    try:
+        coid = make_client_order_id('momentum', 'AAPL', 'buy', 7)
+        assert journal.record_intent(coid, 'AAPL', 'buy', 5, 'market') is True
+        assert journal.record_intent(coid, 'AAPL', 'buy', 5, 'market') is False
+    finally:
+        journal.close()
+        os.unlink(path)

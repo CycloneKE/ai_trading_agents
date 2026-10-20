@@ -27,6 +27,7 @@ import nltk
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize, sent_tokenize
 from nltk.stem import WordNetLemmatizer
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,7 @@ class FinancialSentimentAnalyzer:
         """
         try:
             # Initialize FinBERT for financial sentiment
-            if self.use_finbert:
+            if self.use_finbert and TRANSFORMERS_AVAILABLE:
                 try:
                     model_name = "ProsusAI/finbert"
                     self.finbert_tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -315,7 +316,7 @@ class FinancialSentimentAnalyzer:
                 'textblob': textblob_scores,
                 'keywords': keyword_scores,
                 'combined': combined_sentiment,
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': utc_now().isoformat()
             }
             
             return result
@@ -429,7 +430,7 @@ class FinancialSentimentAnalyzer:
                 'label': 'neutral',
                 'confidence': 0.0
             },
-            'timestamp': datetime.utcnow().isoformat()
+            'timestamp': utc_now().isoformat()
         }
     
     def analyze_batch(self, texts: List[str]) -> List[Dict[str, Any]]:

@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 import os
 from typing import Dict, Any, List
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class PerformanceTracker:
                 json.dump({
                     "trades": self.trades,
                     "daily_performance": self.daily_performance,
-                    "last_updated": datetime.utcnow().isoformat()
+                    "last_updated": utc_now().isoformat()
                 }, f, indent=4)
         except Exception as e:
             logger.error(f"Failed to save performance history: {e}")
@@ -50,7 +51,7 @@ class PerformanceTracker:
     def log_trade(self, symbol: str, action: str, price: float, quantity: float, strategy: str, result: float = None):
         """Logs an individual trade and its realized profit/loss."""
         trade = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_now().isoformat(),
             "symbol": symbol,
             "action": action,
             "price": price,
@@ -71,7 +72,7 @@ class PerformanceTracker:
         self.daily_performance[date_str] = {
             "portfolio_value": portfolio_value,
             "day_pnl": day_pnl,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": utc_now().isoformat()
         }
         self._save_history()
 

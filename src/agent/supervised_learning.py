@@ -14,6 +14,7 @@ import joblib
 import os
 
 from .base_strategy import BaseStrategy
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -334,7 +335,7 @@ class SupervisedLearningStrategy(BaseStrategy):
                     for feature, importance in zip(self.features, self.model.feature_importances_)
                 }
             
-            self.last_update = datetime.utcnow()
+            self.last_update = utc_now()
             logger.info(f"Updated model for {self.name} with {len(X)} samples")
             
             return True

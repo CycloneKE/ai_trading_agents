@@ -2,7 +2,7 @@ import json
 import tempfile
 import os
 
-import main as main_module
+from src.agent import main as main_module
 
 
 def test_main_propagates_top_level_use_fallback_only(monkeypatch):

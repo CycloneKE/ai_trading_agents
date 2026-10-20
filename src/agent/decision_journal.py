@@ -15,6 +15,9 @@ import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from src.utils.paths import DATA_DIR
+from src.utils.timeutil import utc_now
+
 logger = logging.getLogger(__name__)
 
 # Canonical skip reasons (null skip_reason + executed=1 means a trade went out)
@@ -23,6 +26,7 @@ SKIP_REASONS = {
     'below_confidence',   # under the execution confidence floor
     'bias_downgrade',     # bias detector pushed the signal to hold
     'llm_veto',           # LLM validation changed action to hold
+    'consensus_disagreement', # dual-model consensus failed to agree
     'fallback_price',     # price was synthetic fallback, not tradeable
     'halted',             # kill switch engaged
     'pdt_guard',          # pattern-day-trader block
@@ -58,7 +62,7 @@ class DecisionJournal:
     different threads). Change-detection lives here so callers can flush every
     symbol every cycle without flooding the table."""
 
-    def __init__(self, db_path: str = os.path.join('data', 'order_journal.db'),
+    def __init__(self, db_path: str = str(DATA_DIR / 'decision_journal.db'),
                  heartbeat_cycles: int = 30):
         os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
         self._lock = threading.Lock()
@@ -101,7 +105,7 @@ class DecisionJournal:
                 " llm_verdict_json, price, target_value, client_order_id)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    datetime.utcnow().isoformat(), cycle, symbol,
+                    utc_now().isoformat(), cycle, symbol,
                     decision.get('action'),
                     1 if decision.get('executed') else 0,
                     decision.get('skip_reason'),

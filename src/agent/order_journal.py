@@ -23,8 +23,11 @@ import os
 import sqlite3
 import threading
 import time
-from datetime import datetime
 from typing import Any, Dict, List, Optional
+
+from src.utils.paths import DATA_DIR
+from src.utils.timeutil import utc_now_iso
+from src.utils.sqlite_util import connect as _connect, write_retry
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +71,13 @@ class OrderJournal:
     (the trading loop, stop-loss enforcement and reconcile can run from
     different threads)."""
 
-    def __init__(self, db_path: str = os.path.join('data', 'order_journal.db')):
+    def __init__(self, db_path: str = str(DATA_DIR / 'order_journal.db')):
         os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.execute('PRAGMA journal_mode=WAL')
+        # Connection carries busy_timeout; every write additionally goes
+        # through write_retry so exhausting that timeout costs a retry rather
+        # than an escaped OperationalError (see src/utils/sqlite_util.py).
+        self._conn = _connect(db_path)
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
         self.db_path = db_path
@@ -92,16 +97,22 @@ class OrderJournal:
         retry after restart, or an order already in flight) — the caller
         must NOT submit.
         """
-        now = datetime.utcnow().isoformat()
+        now = utc_now_iso()
+
+        def _insert():
+            self._conn.execute(
+                "INSERT INTO orders (client_order_id, symbol, side, quantity,"
+                " order_type, limit_price, strategy, status, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, 'intent', ?, ?)",
+                (client_order_id, symbol, side, quantity, order_type,
+                 limit_price, strategy, now, now))
+            self._conn.commit()
+
         with self._lock:
             try:
-                self._conn.execute(
-                    "INSERT INTO orders (client_order_id, symbol, side, quantity,"
-                    " order_type, limit_price, strategy, status, created_at, updated_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, 'intent', ?, ?)",
-                    (client_order_id, symbol, side, quantity, order_type,
-                     limit_price, strategy, now, now))
-                self._conn.commit()
+                # IntegrityError (duplicate id) is NOT retried — the dedup
+                # guarantee depends on it surfacing on the first attempt.
+                write_retry(_insert)
                 return True
             except sqlite3.IntegrityError:
                 logger.warning(
@@ -129,13 +140,17 @@ class OrderJournal:
                      filled_avg_price=filled_avg_price)
 
     def _update(self, client_order_id: str, **fields):
-        fields['updated_at'] = datetime.utcnow().isoformat()
+        fields['updated_at'] = utc_now_iso()
         cols = ', '.join(f'{k} = ?' for k in fields)
-        with self._lock:
+
+        def _run():
             self._conn.execute(
                 f"UPDATE orders SET {cols} WHERE client_order_id = ?",
                 (*fields.values(), client_order_id))
             self._conn.commit()
+
+        with self._lock:
+            write_retry(_run)
 
     # ------------------------------------------------------------------
     # Read path

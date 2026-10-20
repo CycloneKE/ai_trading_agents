@@ -8,6 +8,7 @@ from typing import Dict, Any, List, Optional
 import logging
 import time
 from datetime import datetime
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,7 @@ class BaseConnector(ABC):
         # Default normalization - can be overridden by subclasses
         normalized = {
             'source': self.name,
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': utc_now().isoformat(),
             'data': data
         }
         return normalized

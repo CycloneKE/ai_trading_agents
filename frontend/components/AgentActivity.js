@@ -29,21 +29,26 @@ const AgentActivity = ({ theme = 'dark', activities = [] }) => {
     <div style={{ backgroundColor: currentTheme.bg, padding: '24px', borderRadius: '12px', border: `1px solid ${currentTheme.border}`, backdropFilter: 'blur(10px)' }}>
       <h3 style={{ color: '#fff', marginBottom: '20px', fontSize: '16px', fontWeight: '800', textTransform: 'uppercase', letterSpacing: '1px' }}>Agent Activity</h3>
       <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
-        {activities.map(activity => (
-          <div key={activity.id} style={{ 
-            display: 'flex', 
-            alignItems: 'center', 
-            padding: '12px 0', 
-            borderBottom: `1px solid ${currentTheme.border}` 
+        {activities.length === 0 && (
+          <div style={{ color: currentTheme.text, opacity: 0.5, fontSize: '13px', padding: '12px 0' }}>
+            No agent decisions yet this session.
+          </div>
+        )}
+        {activities.map((activity, i) => (
+          <div key={activity.id || i} style={{
+            display: 'flex',
+            alignItems: 'center',
+            padding: '12px 0',
+            borderBottom: `1px solid ${currentTheme.border}`
           }}>
-            <div style={{ width: '100px', color: currentTheme.text, fontSize: '14px' }}>{activity.time}</div>
+            <div style={{ width: '100px', color: currentTheme.text, fontSize: '14px' }}>{activity.time || ''}</div>
             <div style={{ width: '80px' }}>
-              <span style={getTypeStyle(activity.type)}>{activity.type}</span>
+              <span style={getTypeStyle(activity.type)}>{activity.type || '—'}</span>
             </div>
             <div style={{ flex: 1, color: currentTheme.text, fontSize: '14px', fontWeight: '500' }}>
-              {activity.symbol && `${activity.symbol} - ${activity.quantity} @ $${activity.price}`}
+              {activity.symbol ? `${activity.symbol}${activity.price ? ` @ ${activity.price}` : ''}` : ''}
             </div>
-            <div style={{ flex: 2, color: currentTheme.text, fontSize: '14px' }}>{activity.reason}</div>
+            <div style={{ flex: 2, color: currentTheme.text, fontSize: '14px' }}>{activity.reason || activity.message || ''}</div>
           </div>
         ))}
       </div>

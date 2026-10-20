@@ -5,9 +5,13 @@ Simple portfolio API server to show paper trading data
 
 import json
 import os
+import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 import threading
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.utils.paths import DATA_DIR
 
 class PortfolioHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -26,7 +30,7 @@ class PortfolioHandler(BaseHTTPRequestHandler):
     
     def handle_portfolio(self):
         try:
-            state_file = "data/paper_trading_state.json"
+            state_file = str(DATA_DIR / "paper_trading_state.json")
             portfolio_data = {
                 'cash': 100000,
                 'positions': {},

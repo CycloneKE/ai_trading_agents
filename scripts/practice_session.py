@@ -34,9 +34,10 @@ logger = logging.getLogger('practice')
 
 from src.utils.config_validator import load_config
 from src.agent.technical_strategy import TechnicalStrategy
+from src.utils.paths import DATA_DIR
 
-PARAMS_FILE = os.path.join('data', 'strategy_params.json')
-LOG_FILE = os.path.join('data', 'practice_log.jsonl')
+PARAMS_FILE = str(DATA_DIR / 'strategy_params.json')
+LOG_FILE = str(DATA_DIR / 'practice_log.jsonl')
 TRAIN_FRACTION = 0.7
 
 # Parameter grid per tunable knob; variants are single-knob deviations from
@@ -176,7 +177,6 @@ def main():
             print('  no variant beat current parameters out-of-sample; keeping current')
         print()
 
-        os.makedirs('data', exist_ok=True)
         with open(LOG_FILE, 'a') as f:
             f.write(json.dumps(record) + '\n')
 

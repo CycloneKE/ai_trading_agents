@@ -12,6 +12,7 @@ from src.connectors.base_broker import BaseBroker, OrderRequest, OrderResponse, 
 
 from .paper_trading import PaperTradingBroker
 import logging
+from src.utils.timeutil import utc_now
 try:
     from src.connectors.alpaca_broker import AlpacaBroker
     ALPACA_AVAILABLE = True
@@ -35,6 +36,16 @@ except Exception as e:
     logging.error(f"OandaBroker import failed: {e}")
 
 logger = logging.getLogger(__name__)
+
+_SENSITIVE_CONFIG_KEYS = {'api_key', 'api_secret', 'secret', 'passphrase', 'password'}
+
+
+def _redact_broker_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Mask credential fields before a broker config touches the logs."""
+    return {
+        k: ('***REDACTED***' if k.lower() in _SENSITIVE_CONFIG_KEYS and v else v)
+        for k, v in config.items()
+    }
 
 
 class BrokerManager:
@@ -72,11 +83,15 @@ class BrokerManager:
         """
         try:
             brokers_config = self.config.get('brokers', {})
-            logger.info(f"BrokerManager received brokers config: {brokers_config}")
+            redacted_brokers_config = {
+                name: _redact_broker_config(cfg) for name, cfg in brokers_config.items()
+            }
+            logger.info(f"BrokerManager received brokers config: {redacted_brokers_config}")
             logger.info(f"BrokerManager available broker types: {list(self.broker_types.keys())}")
             for broker_name, broker_config in brokers_config.items():
                 broker_type = broker_config.get('type', '').lower()
-                logger.info(f"Processing broker: {broker_name}, type: {broker_type}, config: {broker_config}")
+                logger.info(f"Processing broker: {broker_name}, type: {broker_type}, "
+                            f"config: {_redact_broker_config(broker_config)}")
                 if broker_type in self.broker_types:
                     broker_class = self.broker_types[broker_type]
                     broker = broker_class(broker_config)
@@ -430,7 +445,7 @@ class BrokerManager:
                     'broker_name': name,
                     'overall_health': False,
                     'error': str(e),
-                    'timestamp': datetime.utcnow().isoformat()
+                    'timestamp': utc_now().isoformat()
                 }
         
         return health_results
@@ -472,13 +487,13 @@ class BrokerManager:
                 'primary_broker': self.primary_broker,
                 'available_broker_types': list(self.broker_types.keys()),
                 'brokers': self.get_broker_list(),
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': utc_now().isoformat()
             }
             
         except Exception as e:
             logger.error(f"Error getting broker manager status: {str(e)}")
             return {
                 'error': str(e),
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': utc_now().isoformat()
             }
 

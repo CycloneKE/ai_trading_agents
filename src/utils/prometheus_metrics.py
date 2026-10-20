@@ -7,6 +7,7 @@ import threading
 import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ class PrometheusMetrics:
         self.metrics['trading_daily_pnl'] = daily_pnl
         self.metrics['trading_position_count'] = len(positions)
         
-        self.last_update['portfolio'] = datetime.utcnow()
+        self.last_update['portfolio'] = utc_now()
     
     def update_risk_metrics(self, max_drawdown: float, sharpe_ratio: float, 
                           portfolio_var: float, volatility: float):
@@ -89,7 +90,7 @@ class PrometheusMetrics:
         self.metrics['trading_portfolio_var'] = portfolio_var
         self.metrics['trading_volatility'] = volatility
         
-        self.last_update['risk'] = datetime.utcnow()
+        self.last_update['risk'] = utc_now()
     
     def update_trade_metrics(self, trade_count: int, win_count: int):
         """
@@ -107,7 +108,7 @@ class PrometheusMetrics:
         else:
             self.metrics['trading_win_rate'] = 0.0
         
-        self.last_update['trades'] = datetime.utcnow()
+        self.last_update['trades'] = utc_now()
     
     def update_strategy_returns(self, strategy_name: str, returns: float):
         """
@@ -125,7 +126,7 @@ class PrometheusMetrics:
         if 'strategy' not in self.last_update:
             self.last_update['strategy'] = {}
         
-        self.last_update['strategy'][strategy_name] = datetime.utcnow()
+        self.last_update['strategy'][strategy_name] = utc_now()
     
     def update_system_metrics(self, cpu_usage: float, memory_usage: float, disk_usage: float):
         """
@@ -140,7 +141,7 @@ class PrometheusMetrics:
         self.metrics['system_memory_usage'] = memory_usage
         self.metrics['system_disk_usage'] = disk_usage
         
-        self.last_update['system'] = datetime.utcnow()
+        self.last_update['system'] = utc_now()
     
     def get_prometheus_metrics(self) -> str:
         """

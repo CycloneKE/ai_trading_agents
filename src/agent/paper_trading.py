@@ -14,6 +14,8 @@ import random
 
 from src.connectors.base_broker import BaseBroker, OrderRequest, OrderResponse, Position, AccountInfo
 from src.utils.real_price_feed import price_feed  # Import the new real price feed
+from src.utils.paths import DATA_DIR
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +76,7 @@ class PaperTradingBroker(BaseBroker):
         """
         try:
             self.is_connected = True
-            self.last_connection_time = datetime.utcnow()
+            self.last_connection_time = utc_now()
             
             # Start order processor thread
             if not self.is_running:
@@ -145,7 +147,7 @@ class PaperTradingBroker(BaseBroker):
                 return None
             
             # Create order response
-            now = datetime.utcnow()
+            now = utc_now()
             order_response = OrderResponse(
                 order_id=order_id,
                 client_order_id=client_order_id,
@@ -196,7 +198,7 @@ class PaperTradingBroker(BaseBroker):
                     # Only cancel if not already filled
                     if order.status not in ["filled", "canceled", "rejected"]:
                         order.status = "canceled"
-                        order.updated_at = datetime.utcnow()
+                        order.updated_at = utc_now()
                         logger.info(f"Canceled paper trading order: {order_id}")
                         return True
                     else:
@@ -240,7 +242,7 @@ class PaperTradingBroker(BaseBroker):
                 initial_margin=0.0,
                 maintenance_margin=0.0,
                 day_trade_count=0,
-                last_updated=datetime.utcnow(),
+                last_updated=utc_now(),
                 broker_name=self.broker_name
             )
             
@@ -350,7 +352,7 @@ class PaperTradingBroker(BaseBroker):
                 'bid': bid,
                 'ask': ask,
                 'volume': random.randint(1000, 100000),
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': utc_now().isoformat()
             }
             
         except Exception as e:
@@ -454,7 +456,7 @@ class PaperTradingBroker(BaseBroker):
                         order_value = order.quantity * execution_price
                     else:
                         order.status = "rejected"
-                        order.updated_at = datetime.utcnow()
+                        order.updated_at = utc_now()
                         logger.warning(f"Order {order.order_id} rejected: insufficient funds")
                         return
             
@@ -462,7 +464,7 @@ class PaperTradingBroker(BaseBroker):
             order.filled_quantity = order.quantity
             order.filled_avg_price = execution_price
             order.status = "filled"
-            order.updated_at = datetime.utcnow()
+            order.updated_at = utc_now()
             
             # Update cash
             if order.side == "buy":
@@ -481,7 +483,7 @@ class PaperTradingBroker(BaseBroker):
                 'quantity': order.quantity,
                 'price': execution_price,
                 'commission': commission,
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': utc_now().isoformat()
             }
             self.trade_history.append(trade)
             
@@ -608,13 +610,13 @@ class PaperTradingBroker(BaseBroker):
                 },
                 'market_prices': self.market_prices,
                 'trade_history': self.trade_history[-100:],  # Keep last 100 trades
-                'last_updated': datetime.utcnow().isoformat()
+                'last_updated': utc_now().isoformat()
             }
             
             # Create directory if it doesn't exist
-            os.makedirs('data', exist_ok=True)
-            
-            with open('data/paper_trading_state.json', 'w') as f:
+            os.makedirs(str(DATA_DIR), exist_ok=True)
+
+            with open(str(DATA_DIR / 'paper_trading_state.json'), 'w') as f:
                 json.dump(state, f, indent=2)
                 
         except Exception as e:
@@ -623,8 +625,8 @@ class PaperTradingBroker(BaseBroker):
     def _load_state(self):
         """Load paper trading state from file."""
         try:
-            if os.path.exists('data/paper_trading_state.json'):
-                with open('data/paper_trading_state.json', 'r') as f:
+            if os.path.exists(str(DATA_DIR / 'paper_trading_state.json')):
+                with open(str(DATA_DIR / 'paper_trading_state.json'), 'r') as f:
                     state = json.load(f)
                 
                 self.cash = state.get('cash', self.initial_cash)

@@ -15,9 +15,27 @@ logger = logging.getLogger(__name__)
 # East Africa Time offset (UTC+3)
 EAT_OFFSET = timezone(timedelta(hours=3))
 
-# NSE Trading Hours (Nairobi time)
-NSE_OPEN_HOUR = 9    # 09:00 EAT
-NSE_CLOSE_HOUR = 15  # 15:00 EAT
+# NSE equities session (Nairobi time): pre-open auction 09:00-09:30,
+# continuous trading 09:30-15:00. Orders may only be submitted while 'open'.
+from datetime import time as dtime
+NSE_PREOPEN_START = dtime(9, 0)
+NSE_OPEN = dtime(9, 30)
+NSE_CLOSE = dtime(15, 0)
+
+# Kenya's fixed-date public holidays, 2026 (NSE closes on all gazetted public
+# holidays). Easter-linked (Good Friday, Easter Monday) and Eid al-Fitr/
+# al-Adha move every year and are deliberately NOT included — add them (and
+# refresh this list annually) via config.data_manager.nse_holidays.
+_DEFAULT_NSE_HOLIDAYS_2026 = {
+    "2026-01-01",  # New Year's Day
+    "2026-05-01",  # Labour Day
+    "2026-06-01",  # Madaraka Day
+    "2026-10-10",  # Utamaduni Day
+    "2026-10-20",  # Mashujaa Day
+    "2026-12-12",  # Jamhuri Day
+    "2026-12-25",  # Christmas Day
+    "2026-12-26",  # Boxing Day
+}
 
 # -------------------------------------------------------------------
 # Target NSE Symbols
@@ -85,6 +103,14 @@ class NSEConnector:
         # KES/USD
         self._kes_usd_rate: float = _DEFAULT_KES_USD
 
+        # Gazetted NSE closure dates (ISO 'YYYY-MM-DD'), config-overridable.
+        # The default covers Kenya's fixed-date public holidays for the
+        # current year; Easter-linked (Good Friday/Easter Monday) and Eid
+        # dates move every year and are NOT auto-computed here — update
+        # config.data_manager.nse_holidays annually / when the government
+        # gazettes moveable dates.
+        self._holidays = set(config.get("nse_holidays", _DEFAULT_NSE_HOLIDAYS_2026))
+
         logger.info(
             f"NSEConnector initialized - DB: {'yes' if self.db else 'no'}, "
             f"tracking {len(ALL_NSE_SYMBOLS)} symbols"
@@ -101,15 +127,26 @@ class NSEConnector:
             "cached_symbols": len(self._cache),
             "kes_usd_rate": self._kes_usd_rate,
             "market_open": self.is_market_open(),
+            "market_phase": self.market_phase(),
             "timestamp": datetime.now(EAT_OFFSET).isoformat(),
             "status": "ok",
         }
 
-    def is_market_open(self) -> bool:
-        now = datetime.now(EAT_OFFSET)
+    def market_phase(self, now=None) -> str:
+        now = now or datetime.now(EAT_OFFSET)
         if now.weekday() > 4:
-            return False
-        return NSE_OPEN_HOUR <= now.hour < NSE_CLOSE_HOUR
+            return 'closed'
+        if now.date().isoformat() in getattr(self, '_holidays', ()):
+            return 'closed'
+        t = now.timetz().replace(tzinfo=None)
+        if NSE_PREOPEN_START <= t < NSE_OPEN:
+            return 'preopen'
+        if NSE_OPEN <= t < NSE_CLOSE:
+            return 'open'
+        return 'closed'
+
+    def is_market_open(self, now=None) -> bool:
+        return self.market_phase(now) == 'open'
 
     def get_all_quotes(self) -> List[Dict[str, Any]]:
         results = []

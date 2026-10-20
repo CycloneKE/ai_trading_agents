@@ -28,13 +28,17 @@ class RealPriceFeed:
                 return cached['price']
 
         try:
-            # Map NSE symbols to yfinance format (e.g., SCOM -> SCOM.NR)
-            # This is a simplified mapping for common NSE stocks
-            yf_symbol = symbol
-            if not (symbol.endswith('.NR') or '-' in symbol): 
-                # Basic heuristic: if it's 3-4 chars and not crypto/US, it might be NSE
-                # But for now, we'll rely on the config to provide correct yf symbols
-                pass
+            # Map NSE symbols to yfinance format (e.g. SCOM -> SCOM.KE)
+            yf_symbol = symbol.upper()
+            
+            # Known Kenyan NSE symbol mapping
+            kenyan_symbols = {
+                "SCOM", "EQTY", "KCB", "COOP", "SCBK", "SBIC", "ABSA",
+                "BAT", "EABL", "KEGN", "KNRE", "BAMB", "TOTL", "CTUM",
+                "NMG", "NCBA", "BRIT", "CIC"
+            }
+            if yf_symbol in kenyan_symbols:
+                yf_symbol = f"{yf_symbol}.KE"
 
             ticker = yf.Ticker(yf_symbol)
             data = ticker.fast_info

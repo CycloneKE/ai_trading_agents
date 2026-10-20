@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 import numpy as np
 from .adaptive_agent import Goal, GoalType, SelfAdaptiveAgent
+from src.utils.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +142,7 @@ class GoalManager:
         for goal in self.active_goals:
             self.goal_history.append({
                 'goal': goal,
-                'archived_at': datetime.utcnow(),
+                'archived_at': utc_now(),
                 'reason': f'Market regime change to {market_regime}'
             })
         

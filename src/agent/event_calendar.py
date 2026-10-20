@@ -13,9 +13,11 @@ import os
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
+from src.utils.paths import DATA_DIR
+
 logger = logging.getLogger(__name__)
 
-CALENDAR_FILE = os.path.join('data', 'event_calendar.json')
+CALENDAR_FILE = str(DATA_DIR / 'event_calendar.json')
 
 # Defaults ship with the code; data/event_calendar.json (same shape) is
 # merged on top. days_before/days_after define the window; multiplier

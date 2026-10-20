@@ -5,16 +5,20 @@ Check if paper trading is active and can start trading
 
 import json
 import os
+import sys
 import requests
 from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.utils.paths import DATA_DIR
 
 def check_paper_trading_status():
     """Check current paper trading status"""
     print("Paper Trading Status Check")
     print("=" * 30)
-    
+
     # Check paper trading state file
-    state_file = "data/paper_trading_state.json"
+    state_file = str(DATA_DIR / "paper_trading_state.json")
     if os.path.exists(state_file):
         with open(state_file, 'r') as f:
             state = json.load(f)

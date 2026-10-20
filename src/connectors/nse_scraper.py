@@ -24,6 +24,7 @@ import sys
 import csv
 import time
 import json
+import re
 import logging
 import random
 import threading
@@ -235,6 +236,59 @@ def scrape_afx_kwayisi(symbols: List[str]) -> Dict[str, DailyBar]:
     return results
 
 
+_COMPANY_PAGE_FIELDS = {
+    'Earnings Per Share': 'eps',
+    'Price/Earning Ratio': 'pe_ratio',
+    'Dividend Per Share': 'dividend_per_share',
+    'Dividend Yield': 'dividend_yield_pct',
+}
+
+
+def scrape_afx_company_page(symbol: str) -> Optional[Dict[str, Any]]:
+    """Scrape EPS / P-E / dividend fields from a company's afx.kwayisi.org
+    page. Returns None on any network error, non-200, or unrecognized page
+    layout — callers must treat that as "no fundamentals available", never
+    guess a value."""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    url = f"https://afx.kwayisi.org/nse/{symbol.lower()}.html"
+    try:
+        resp = requests.get(url, headers=headers, timeout=20)
+        if resp.status_code != 200:
+            return None
+        html_text = resp.text
+    except Exception as e:
+        logger.warning(f"AFX company page scrape error ({symbol}): {e}")
+        return None
+    return _parse_company_page(html_text, symbol)
+
+
+def _parse_company_page(html_text: str, symbol: str) -> Optional[Dict[str, Any]]:
+    """Pure parser for the "Growth & Valuation" table afx renders as
+    <tr><td>Label</td><td>Value</td></tr> rows. No network, safe to unit test
+    directly against a captured HTML fixture."""
+    marker = html_text.find('Growth &amp; Valuation')
+    if marker == -1:
+        marker = html_text.find('Growth & Valuation')
+    if marker == -1:
+        return None
+    section = html_text[marker:marker + 2000]
+    row_re = re.compile(r'<td>([^<]+)</td>\s*<td[^>]*>([^<]*)</td>', re.IGNORECASE)
+    values: Dict[str, str] = {}
+    for label, value in row_re.findall(section):
+        label = label.strip()
+        if label in _COMPANY_PAGE_FIELDS:
+            values[_COMPANY_PAGE_FIELDS[label]] = value.strip()
+    if 'eps' not in values or 'dividend_yield_pct' not in values:
+        return None
+    return {
+        'symbol': symbol.upper(),
+        'eps': _parse_num(values.get('eps', '0')),
+        'pe_ratio': _parse_num(values.get('pe_ratio', '0')),
+        'dividend_per_share': _parse_num(values.get('dividend_per_share', '0')),
+        'dividend_yield_pct': _parse_num(values.get('dividend_yield_pct', '0')),
+    }
+
+
 def _parse_num(s: str) -> float:
     """Parse a number, removing commas and % signs."""
     try:
@@ -344,12 +398,83 @@ def backfill_afx_history(symbols: List[str]) -> Dict[str, int]:
     return added
 
 
+_CHART_POINT_RE = re.compile(r'\[d\("(\d{4}-\d{2}-\d{2})"\),\s*([\d.]+)\s*\]')
+CHART_MAX_STALENESS_DAYS = 10
+CHART_BACKFILL_DAYS = 120
+MIN_REAL_BARS = 50  # strategies' default lookback_period
+
+
+def parse_afx_chart(text: str) -> List[tuple]:
+    """Extract (date, close) pairs from afx's Highcharts chart script
+    (afx.kwayisi.org/chart/nse/<sym>), which carries ~10y of daily closes."""
+    return [(d, float(c)) for d, c in _CHART_POINT_RE.findall(text)]
+
+
+def build_chart_bars(symbol: str, points: List[tuple], days: int = 120,
+                     today: Optional[Any] = None) -> List[DailyBar]:
+    """Turn the last `days` chart points into DailyBars. The chart has closes
+    only, so open/high/low equal the close and volume is 0 rather than
+    inventing a range. A series whose last point is older than
+    CHART_MAX_STALENESS_DAYS (suspended/delisted) yields nothing — padding
+    strategies with a dead stock's last prices would feed them stale data."""
+    pts = [(d, c) for d, c in points if c > 0]
+    if not pts:
+        return []
+    today = today or datetime.now(EAT).date()
+    last = datetime.strptime(pts[-1][0], "%Y-%m-%d").date()
+    if (today - last).days > CHART_MAX_STALENESS_DAYS:
+        logger.warning(f"  {symbol}: chart series ends {pts[-1][0]}, stale - skipping")
+        return []
+    pts = pts[-days:]
+    bars: List[DailyBar] = []
+    for i, (d, close) in enumerate(pts):
+        prev = pts[i - 1][1] if i > 0 else close
+        bars.append(DailyBar(
+            date=d, symbol=symbol, open=close, high=close, low=close,
+            close=close, volume=0,
+            change_pct=round((close - prev) / prev * 100, 2) if prev > 0 else 0.0,
+            source="afx_chart",
+        ))
+    return bars
+
+
+def backfill_afx_chart_history(symbols: List[str], days: int = 120,
+                               db=None) -> Dict[str, int]:
+    """Backfill `days` of real daily closes from afx's chart endpoint so
+    strategies have their lookback (50 closes) immediately. Existing real
+    bars (with volume) are kept; only missing dates and synthetic rows are
+    filled. Returns {symbol: bars newly added}."""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    added: Dict[str, int] = {}
+    for sym in symbols:
+        try:
+            resp = requests.get(f"https://afx.kwayisi.org/chart/nse/{sym.lower()}",
+                                headers=headers, timeout=30)
+            if resp.status_code != 200:
+                continue
+            bars = build_chart_bars(sym, parse_afx_chart(resp.text), days)
+            if not bars:
+                continue
+            have = {r["date"]: r.get("source") for r in load_csv(sym)}
+            new = [b for b in bars if have.get(b.date) in (None, "synthetic")]
+            if not new:
+                continue
+            save_bars_csv(sym, new, overwrite=False)
+            save_bars_db(new, db)
+            added[sym] = len(new)
+            logger.info(f"  {sym}: chart-backfilled {len(new)} bars")
+        except Exception as e:
+            logger.warning(f"Chart backfill failed for {sym}: {e}")
+    return added
+
+
 # ======================================================================
 # Storage helpers
 # ======================================================================
 
-def save_bars_csv(symbol: str, bars: List[DailyBar]):
-    """Save/merge bars into a CSV file."""
+def save_bars_csv(symbol: str, bars: List[DailyBar], overwrite: bool = True):
+    """Save/merge bars into a CSV file. With overwrite=False, existing rows
+    are kept unless they are synthetic placeholders."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     csv_path = DATA_DIR / f"{symbol}.csv"
     existing: Dict[str, dict] = {}
@@ -358,6 +483,9 @@ def save_bars_csv(symbol: str, bars: List[DailyBar]):
             for row in csv.DictReader(f):
                 existing[row["date"]] = row
     for bar in bars:
+        if (not overwrite and bar.date in existing
+                and existing[bar.date].get("source") != "synthetic"):
+            continue
         existing[bar.date] = asdict(bar)
     fields = ["date", "symbol", "open", "high", "low", "close", "volume", "change_pct", "source"]
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
@@ -497,6 +625,13 @@ class NSEPeriodicScraper:
         Call this once on first setup.
         """
         logger.info(f"Seeding NSE historical data ({days} days, {len(self.symbols)} symbols)...")
+        # Real closes first: top up any symbol short of the strategy lookback,
+        # so the synthetic fallback below only fires when the fetch failed.
+        short = [s for s in self.symbols
+                 if sum(1 for b in load_csv(s) if b.get('source') != 'synthetic')
+                 < MIN_REAL_BARS]
+        if short:
+            backfill_afx_chart_history(short, days=CHART_BACKFILL_DAYS, db=self.db)
         for sym in self.symbols:
             csv_path = DATA_DIR / f"{sym}.csv"
             if csv_path.exists():
@@ -526,9 +661,10 @@ class NSEPeriodicScraper:
         while self._running:
             try:
                 now = datetime.now(EAT)
+                from src.connectors.nse_connector import NSE_PREOPEN_START, NSE_CLOSE
                 is_market_hours = (
                     now.weekday() < 5
-                    and 9 <= now.hour < 15
+                    and NSE_PREOPEN_START <= now.timetz().replace(tzinfo=None) < NSE_CLOSE
                 )
                 wait_time = self.interval if is_market_hours else self.off_hours_interval
 
@@ -629,6 +765,10 @@ def main():
     elif len(sys.argv) >= 2 and sys.argv[1] == "--backfill":
         added = backfill_afx_history(DEFAULT_SYMBOLS)
         print(f"\nBackfilled {sum(added.values())} bars across {len(added)} symbols")
+    elif len(sys.argv) >= 2 and sys.argv[1] == "--backfill-chart":
+        days = int(sys.argv[2]) if len(sys.argv) >= 3 else CHART_BACKFILL_DAYS
+        added = backfill_afx_chart_history(DEFAULT_SYMBOLS, days=days, db=scraper.db)
+        print(f"\nChart-backfilled {sum(added.values())} bars across {len(added)} symbols")
     else:
         print("=" * 55)
         print("  NSE Kenya Market Data Scraper")
@@ -637,6 +777,7 @@ def main():
         print("  --seed [days]   Seed historical data (default: 730 days)")
         print("  --scrape        Run a single scrape cycle")
         print("  --backfill      Backfill recent history from afx per-stock pages")
+        print("  --backfill-chart [days]  Backfill real closes from afx chart (default: 120 days)")
         print("\nSeeding historical data now...")
         scraper.seed_historical()
 
