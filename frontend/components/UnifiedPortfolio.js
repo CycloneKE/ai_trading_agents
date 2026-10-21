@@ -346,6 +346,7 @@ export default function UnifiedPortfolio({ onDrill }) {
           <div style={{ height: '230px' }}>
             <TradingViewDrawer
               data={perf?.portfolio_chart || []}
+              onDrill={onDrill}
               height={230}
               currency="USD"
               timeKey="timestamp"

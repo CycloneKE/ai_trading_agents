@@ -13,6 +13,34 @@ import { theme } from '../DashboardStyles';
 import { card, columns, SectionHeader, HUDCard, HudRow } from '../ui';
 
 const OverviewView = ({ data, isConnected, onDrill, mobile }) => {
+  const chartMarkers = React.useMemo(() => {
+    const raw = data.performance?.trade_markers || [];
+    if (raw.length > 0) {
+      return raw.map((m) => ({
+        time: m.time,
+        symbol: m.symbol,
+        kind: m.side?.toLowerCase() || 'buy',
+        text: `${m.side || 'TRADE'} ${m.symbol}`,
+        position: m.side === 'BUY' ? 'belowBar' : 'aboveBar',
+        shape: m.side === 'BUY' ? 'arrowUp' : 'arrowDown',
+        color: m.side === 'BUY' ? theme.colors.primary : theme.colors.danger,
+        id: `trade-${m.symbol}-${m.time}`
+      }));
+    }
+    return (data.agentActivity || [])
+      .filter((a) => (a.type === 'BUY' || a.type === 'SELL') && a.symbol)
+      .map((a) => ({
+        time: a.timestamp || a.time,
+        symbol: a.symbol,
+        kind: a.type.toLowerCase(),
+        text: `${a.type} ${a.symbol}`,
+        position: a.type === 'BUY' ? 'belowBar' : 'aboveBar',
+        shape: a.type === 'BUY' ? 'arrowUp' : 'arrowDown',
+        color: a.type === 'BUY' ? theme.colors.primary : theme.colors.danger,
+        id: `activity-${a.symbol}-${a.time || Math.random()}`
+      }));
+  }, [data.performance?.trade_markers, data.agentActivity]);
+
   if (data.loading) {
     return (
       <div style={{ padding: mobile ? '40px 16px' : '80px', textAlign: 'center', color: theme.colors.textMuted }}>
@@ -40,6 +68,8 @@ const OverviewView = ({ data, isConnected, onDrill, mobile }) => {
           <SectionHeader title="Performance Curve" icon={Activity} />
           <TradingViewDrawer
             data={data.performance.portfolio_chart || []}
+            markers={chartMarkers}
+            onDrill={onDrill}
             height={mobile ? 240 : 300}
             currency="USD"
             timeKey="timestamp"
@@ -64,7 +94,7 @@ const OverviewView = ({ data, isConnected, onDrill, mobile }) => {
         </div>
         <AgentFocus onDrill={onDrill} />
         <SleeveDashboard />
-        <AgentActivity activities={data.agentActivity} />
+        <AgentActivity activities={data.agentActivity} onDrill={onDrill} />
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: mobile ? '16px' : '24px', minWidth: 0 }}>
         <div style={card(mobile)}>

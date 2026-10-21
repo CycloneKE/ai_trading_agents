@@ -1,6 +1,6 @@
 import React from 'react';
 
-const AgentActivity = ({ theme = 'dark', activities = [] }) => {
+const AgentActivity = ({ theme = 'dark', activities = [], onDrill = null }) => {
 
   const colors = {
     dark: { bg: 'rgba(30, 41, 59, 0.5)', text: '#f8fafc', border: 'rgba(255,255,255,0.1)', buy: '#10b981', sell: '#ef4444', hold: '#f59e0b' },
@@ -41,14 +41,28 @@ const AgentActivity = ({ theme = 'dark', activities = [] }) => {
             padding: '12px 0',
             borderBottom: `1px solid ${currentTheme.border}`
           }}>
-            <div style={{ width: '100px', color: currentTheme.text, fontSize: '14px' }}>{activity.time || ''}</div>
+            <div style={{ width: '100px', color: currentTheme.text, fontSize: '13px' }}>{activity.time || ''}</div>
             <div style={{ width: '80px' }}>
               <span style={getTypeStyle(activity.type)}>{activity.type || '—'}</span>
             </div>
-            <div style={{ flex: 1, color: currentTheme.text, fontSize: '14px', fontWeight: '500' }}>
-              {activity.symbol ? `${activity.symbol}${activity.price ? ` @ ${activity.price}` : ''}` : ''}
+            <div
+              onClick={() => activity.symbol && onDrill && onDrill(activity.symbol)}
+              title={activity.symbol && onDrill ? `Drill down into ${activity.symbol}` : ''}
+              style={{
+                flex: 1,
+                color: currentTheme.text,
+                fontSize: '14px',
+                fontWeight: '600',
+                cursor: activity.symbol && onDrill ? 'pointer' : 'default',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px'
+              }}
+            >
+              <span>{activity.symbol ? `${activity.symbol}${activity.price ? ` @ ${activity.price}` : ''}` : ''}</span>
+              {activity.symbol && onDrill && <span style={{ fontSize: '10px', color: '#38bdf8' }}>↗</span>}
             </div>
-            <div style={{ flex: 2, color: currentTheme.text, fontSize: '14px' }}>{activity.reason || activity.message || ''}</div>
+            <div style={{ flex: 2, color: currentTheme.text, fontSize: '13px', opacity: 0.85 }}>{activity.reason || activity.message || ''}</div>
           </div>
         ))}
       </div>

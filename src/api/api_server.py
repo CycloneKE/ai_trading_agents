@@ -586,6 +586,20 @@ class TradingAPI:
                 metrics = report.get('metrics', {})
                 summary = report.get('summary', {})
                 current_value = summary.get('current_value', 0) or 0
+
+                # Query live broker equity if available so headline values and
+                # the chart include up-to-the-minute mark-to-market data.
+                try:
+                    broker_mgr = self.trading_agent.components.get('broker_manager')
+                    if broker_mgr:
+                        primary = broker_mgr.get_broker()
+                        if primary and primary.is_connected:
+                            acct = primary.get_account_info()
+                            if acct and acct.equity is not None and float(acct.equity) > 0:
+                                current_value = float(acct.equity)
+                except Exception as e:
+                    logger.debug(f"Live broker equity check error: {e}")
+
                 total_return = metrics.get('total_return', 0) or 0
                 # Derive dollar P&L from period return and current equity.
                 initial = current_value / (1 + total_return) if total_return > -1 else current_value
@@ -628,9 +642,30 @@ class TradingAPI:
                 except Exception as e:
                     logger.debug(f"NSE equity contribution unavailable: {e}")
 
+                # Append the latest live point to portfolio_chart so the curve
+                # reaches the current minute and includes the latest trade data.
+                chart = report.get('portfolio_chart') or []
+                now_iso = datetime.utcnow().isoformat()
+                if current_value > 0:
+                    if not chart:
+                        chart = [{'timestamp': now_iso, 'value': round(current_value, 2)}]
+                        report['portfolio_chart'] = chart
+                    else:
+                        last_pt = chart[-1]
+                        last_ts = last_pt.get('timestamp', '')
+                        need_append = True
+                        try:
+                            last_dt = datetime.fromisoformat(last_ts.replace('Z', ''))
+                            if (datetime.utcnow() - last_dt).total_seconds() < 120:
+                                last_pt['value'] = round(current_value, 2)
+                                need_append = False
+                        except Exception:
+                            pass
+                        if need_append:
+                            chart.append({'timestamp': now_iso, 'value': round(current_value, 2)})
+
                 # The S&P 500 (SPY) drawn on the same points, from the
                 # chart's own starting value.
-                chart = report.get('portfolio_chart') or []
                 if chart:
                     try:
                         from src.agent import benchmarks as bm
@@ -643,6 +678,27 @@ class TradingAPI:
                             report['benchmark_name'] = f'S&P 500 ({symbol})' if symbol == 'SPY' else symbol
                     except Exception as e:
                         logger.debug(f"US benchmark unavailable: {e}")
+
+                # Attach recent executed trades for chart execution markers and drilldowns
+                trade_markers = []
+                try:
+                    journal = getattr(self.trading_agent, 'order_journal', None)
+                    if journal:
+                        for order in journal.filled_orders()[-60:]:
+                            ts = order.get('created_at') or order.get('updated_at')
+                            side = (order.get('side') or 'buy').lower()
+                            sym = order.get('symbol', '')
+                            trade_markers.append({
+                                'time': ts,
+                                'symbol': sym,
+                                'side': side.upper(),
+                                'price': float(order.get('price') or order.get('filled_price') or 0),
+                                'quantity': float(order.get('filled_quantity') or order.get('quantity') or 0),
+                                'strategy': order.get('strategy', '')
+                            })
+                except Exception as e:
+                    logger.debug(f"Trade markers generation error: {e}")
+                report['trade_markers'] = trade_markers
 
                 report['us_paper_value'] = round(current_value, 2)
                 report['nse_value_usd'] = round(nse_value_usd, 2)
@@ -1820,9 +1876,36 @@ class TradingAPI:
             try:
                 fills = queue.fills(book='trading', since=paper.started_at)
                 curve = queue.paper_equity_history()
+                acct_summary = self._nse_paper_summary(with_stops=True)
+
+                # Ensure equity curve includes the latest trading session/today's equity
+                today = datetime.utcnow().strftime('%Y-%m-%d')
+                if acct_summary and acct_summary.get('equity_kes'):
+                    cur_eq = float(acct_summary.get('equity_kes') or 0)
+                    if not curve:
+                        curve = [{
+                            'day': today,
+                            'cash_kes': float(acct_summary.get('cash_kes') or 0),
+                            'holdings_kes': float(acct_summary.get('holdings_kes') or 0),
+                            'equity_kes': cur_eq
+                        }]
+                    else:
+                        last_day = curve[-1].get('day')
+                        if last_day != today:
+                            curve.append({
+                                'day': today,
+                                'cash_kes': float(acct_summary.get('cash_kes') or 0),
+                                'holdings_kes': float(acct_summary.get('holdings_kes') or 0),
+                                'equity_kes': cur_eq
+                            })
+                        else:
+                            curve[-1]['equity_kes'] = cur_eq
+                            curve[-1]['cash_kes'] = float(acct_summary.get('cash_kes') or 0)
+                            curve[-1]['holdings_kes'] = float(acct_summary.get('holdings_kes') or 0)
+
                 return jsonify({
                     'enabled': True,
-                    'account': self._nse_paper_summary(with_stops=True),
+                    'account': acct_summary,
                     'fills': list(reversed(fills))[:100],
                     'equity_curve': curve,
                     'benchmarks': self._nse_benchmarks(curve, paper.starting_capital),

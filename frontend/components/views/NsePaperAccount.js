@@ -51,7 +51,7 @@ export function versus(points, start) {
   return { account: r(last.equity_kes), tbill: r(last.tbill_kes), basket: r(last.basket_kes) };
 }
 
-function EquityCurve({ points, start, mobile }) {
+function EquityCurve({ points, start, mobile, fills = [], onDrill = null }) {
   if (points.length < 2) {
     return (
       <Empty>
@@ -61,10 +61,27 @@ function EquityCurve({ points, start, mobile }) {
     );
   }
   const vs = versus(points, start);
+  const markers = (fills || []).map((f) => {
+    const isBuy = (f.side || '').toLowerCase() === 'buy';
+    return {
+      time: f.day || f.time || f.created_at,
+      symbol: f.symbol,
+      kind: f.side?.toLowerCase(),
+      side: f.side?.toUpperCase(),
+      text: `${(f.side || 'TRADE').toUpperCase()} ${f.symbol}`,
+      position: isBuy ? 'belowBar' : 'aboveBar',
+      shape: isBuy ? 'arrowUp' : 'arrowDown',
+      color: isBuy ? theme.colors.primary : theme.colors.danger,
+      id: `nse-fill-${f.id || f.symbol}-${f.time || f.day}`
+    };
+  });
+
   return (
     <>
       <TradingViewDrawer
         data={points}
+        markers={markers}
+        onDrill={onDrill}
         height={mobile ? 220 : 280}
         currency="KES"
         timeKey="day"
@@ -277,7 +294,7 @@ export default function NsePaperAccount({ view, error, mobile, onDrill }) {
       <div style={columns('2fr 1fr', mobile)}>
         <div style={card(mobile)}>
           <SectionHeader title="Account value over time" icon={Activity} />
-          <EquityCurve points={view.equity_curve || []} start={start} mobile={mobile} />
+          <EquityCurve points={view.equity_curve || []} start={start} mobile={mobile} fills={view.fills || []} onDrill={onDrill} />
         </div>
         <div style={card(mobile)}>
           <SectionHeader title="The rules it trades by" icon={BookOpen} />
