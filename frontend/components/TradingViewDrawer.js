@@ -475,6 +475,25 @@ export default function TradingViewDrawer({
     }
   }, [range, cleanedData.length]);
 
+  // Active values (hover or last point)
+  const lastPoint = cleanedData.length ? (cleanedData[cleanedData.length - 1] || {}) : {};
+  const prevPoint = cleanedData.length > 1 ? (cleanedData[cleanedData.length - 2] || null) : null;
+  const activeTime = hover ? hover.time : lastPoint.time;
+  const activePrimaryVal = hover ? hover.values[primaryKey] : lastPoint[primaryKey];
+  const prevPrimaryVal = prevPoint ? prevPoint[primaryKey] : null;
+  const primaryChange = (typeof activePrimaryVal === 'number' && typeof prevPrimaryVal === 'number' && prevPrimaryVal > 0)
+    ? ((activePrimaryVal - prevPrimaryVal) / prevPrimaryVal) * 100
+    : null;
+
+  // Active trade marker matching current hovered/active bar - declared BEFORE any conditional return
+  const activeTrade = useMemo(() => {
+    if (!markers.length || !activeTime || !cleanedData.length) return null;
+    return markers.find((m) => {
+      const bar = findClosestBar(cleanedData, m.time);
+      return bar && bar.time === activeTime;
+    }) || null;
+  }, [markers, activeTime, cleanedData]);
+
   if (!cleanedData.length) {
     return (
       <div style={{
@@ -486,25 +505,6 @@ export default function TradingViewDrawer({
       </div>
     );
   }
-
-  // Active values (hover or last point)
-  const lastPoint = cleanedData[cleanedData.length - 1] || {};
-  const prevPoint = cleanedData[cleanedData.length - 2] || null;
-  const activeTime = hover ? hover.time : lastPoint.time;
-  const activePrimaryVal = hover ? hover.values[primaryKey] : lastPoint[primaryKey];
-  const prevPrimaryVal = prevPoint ? prevPoint[primaryKey] : null;
-  const primaryChange = (typeof activePrimaryVal === 'number' && typeof prevPrimaryVal === 'number' && prevPrimaryVal > 0)
-    ? ((activePrimaryVal - prevPrimaryVal) / prevPrimaryVal) * 100
-    : null;
-
-  // Active trade marker matching current hovered/active bar
-  const activeTrade = useMemo(() => {
-    if (!markers.length || !activeTime) return null;
-    return markers.find((m) => {
-      const bar = findClosestBar(cleanedData, m.time);
-      return bar && bar.time === activeTime;
-    }) || null;
-  }, [markers, activeTime, cleanedData]);
 
   return (
     <div style={{ position: 'relative', width: '100%', ...style }} className={className}>
