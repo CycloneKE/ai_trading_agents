@@ -2,7 +2,7 @@
 import json
 import pytest
 
-from src.agent.regime import (RANGING, TRENDING_DOWN, TRENDING_UP, UNKNOWN,
+from src.agent.regime import (RANGING, TRENDING_DOWN, TRENDING_UP, UNKNOWN, VOLATILE_CHOP,
                               RegimeDetector, family_of, filter_signals, is_active)
 from src.agent.strategy_manager import StrategyManager
 
@@ -159,3 +159,28 @@ def test_warm_start_seeds_the_detector():
     m = StrategyManager(_cfg())
     m.warm_start({'X': _rising()})
     assert m.regime_detector.regime('X') == TRENDING_UP
+
+
+# --- volatile chop ---------------------------------------------------------
+
+def test_detects_volatile_chop_when_volatility_exceeds_threshold():
+    wild = [100.0 + (10.0 if i % 2 else -10.0) for i in range(80)]
+    d = RegimeDetector(fast_period=20, slow_period=50, max_volatility_pct=0.05)
+    d.warm_start('WILD', wild)
+    assert d.regime('WILD') == VOLATILE_CHOP
+
+
+def test_momentum_and_mean_reversion_inactive_in_volatile_chop():
+    assert not is_active('momentum', VOLATILE_CHOP)
+    assert not is_active('mean_reversion', VOLATILE_CHOP)
+    assert is_active('rsi_strategy', VOLATILE_CHOP)
+
+
+def test_filter_drops_momentum_in_volatile_chop():
+    signals = {
+        'momentum': {'action': 'buy', 'confidence': 0.8},
+        'rsi_strategy': {'action': 'hold', 'confidence': 0.5}
+    }
+    filtered = filter_signals(signals, VOLATILE_CHOP)
+    assert 'momentum' not in filtered
+    assert 'rsi_strategy' in filtered

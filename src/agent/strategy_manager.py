@@ -105,7 +105,9 @@ class StrategyManager:
         self.regime_filter_enabled = rf.get('enabled', True)
         self.regime_detector = RegimeDetector(
             fast_period=rf.get('fast_period', 20),
-            slow_period=rf.get('slow_period', 50))
+            slow_period=rf.get('slow_period', 50),
+            max_volatility_pct=rf.get('max_volatility_pct'),
+            volatility_window=rf.get('volatility_window', 14))
         self.ensemble_method = config.get('ensemble_method', 'weighted_average')
         self.performance_window = config.get('performance_window', 30)  # Days
         self.rebalance_frequency = config.get('rebalance_frequency', 7)  # Days

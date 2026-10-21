@@ -24,7 +24,10 @@ class TechnicalStrategy(BaseStrategy):
         self.rsi_oversold = config.get('rsi_oversold', 30)
         self.momentum_threshold = config.get('threshold', 0.02)
         self.mean_reversion_band = config.get('band', 0.02)
+        self.multi_timeframe_confirm = config.get('multi_timeframe_confirm', False)
+        self.volume_knife_filter = config.get('volume_knife_filter', True)
         self.historical_data = {}
+        self.historical_volume = {}
         # Date of the last bar per symbol, for live daily-bar building.
         # See daily_bars.py; None means the next dated price appends.
         self._bar_dates = {}
@@ -66,6 +69,26 @@ class TechnicalStrategy(BaseStrategy):
             hist[-1] = price
         # SKIP: a frozen quote on a new date. Evaluate on the bars we have.
 
+        # Track volume when available
+        vol = data.get('volume')
+        vol_ratio = None
+        if vol is not None:
+            try:
+                vol = float(vol)
+                if vol > 0:
+                    v_hist = self.historical_volume.setdefault(symbol, [])
+                    if step == APPEND:
+                        v_hist.append(vol)
+                    elif step == REPLACE and v_hist:
+                        v_hist[-1] = vol
+                    self.historical_volume[symbol] = v_hist[-self.lookback_period:]
+                    if len(self.historical_volume[symbol]) >= 5:
+                        avg_vol = sum(self.historical_volume[symbol][-20:]) / len(self.historical_volume[symbol][-20:])
+                        if avg_vol > 0:
+                            vol_ratio = vol / avg_vol
+            except (TypeError, ValueError):
+                pass
+
         if len(hist) < self.lookback_period:
             return {'action': 'hold', 'confidence': 0.0, 'position_size': 0.0}
 
@@ -83,6 +106,13 @@ class TechnicalStrategy(BaseStrategy):
 
         momentum = (price - self.historical_data[symbol][-10]) / self.historical_data[symbol][-10]
 
+        # Macro trend alignment (20-day momentum)
+        macro_momentum = None
+        if len(self.historical_data[symbol]) >= 20:
+            p_20 = self.historical_data[symbol][-20]
+            if p_20 > 0:
+                macro_momentum = (price - p_20) / p_20
+
         # Each configured strategy name evaluates ONLY its own signal — these
         # used to all run the same combined RSI+momentum+mean-reversion logic
         # regardless of name, making "momentum"/"mean_reversion"/"rsi_strategy"
@@ -90,9 +120,9 @@ class TechnicalStrategy(BaseStrategy):
         # diversity requires them to actually measure different things.
         params = self._params(symbol)
         if 'momentum' in self.name:
-            action, confidence = self._momentum_signal(price, sma_50, momentum, params['threshold'])
+            action, confidence = self._momentum_signal(price, sma_50, momentum, params['threshold'], macro_momentum)
         elif 'reversion' in self.name:
-            action, confidence = self._mean_reversion_signal(price, sma_20, params['band'])
+            action, confidence = self._mean_reversion_signal(price, sma_20, params['band'], vol_ratio)
         elif 'rsi' in self.name:
             action, confidence = self._rsi_signal(rsi_val, params['rsi_oversold'], params['rsi_overbought'])
         else:
@@ -116,18 +146,26 @@ class TechnicalStrategy(BaseStrategy):
         1.0 at double the threshold's distance, capped at 1.0."""
         return min(0.5 + 0.5 * max(distance_beyond, 0.0) / span, 1.0) if span else 1.0
 
-    def _momentum_signal(self, price, sma_50, momentum, threshold=None):
+    def _momentum_signal(self, price, sma_50, momentum, threshold=None, macro_momentum=None):
         t = self.momentum_threshold if threshold is None else threshold
         if price > sma_50 and momentum > t:
+            # Multi-timeframe filter: don't buy short-term bounce into macro down-trend
+            if self.multi_timeframe_confirm and macro_momentum is not None and macro_momentum < -t:
+                return 'hold', 0.0
             return 'buy', self._scale(momentum - t, t)
         if price < sma_50 and momentum < -t:
+            if self.multi_timeframe_confirm and macro_momentum is not None and macro_momentum > t:
+                return 'hold', 0.0
             return 'sell', self._scale(-momentum - t, t)
         return 'hold', 0.0
 
-    def _mean_reversion_signal(self, price, sma_20, band=None):
+    def _mean_reversion_signal(self, price, sma_20, band=None, volume_ratio=None):
         band = self.mean_reversion_band if band is None else band
         lower, upper = sma_20 * (1 - band), sma_20 * (1 + band)
         if price < lower:
+            # Volume knife protection: excessive volume (>2.5x avg) on breakdown indicates falling knife
+            if self.volume_knife_filter and volume_ratio is not None and volume_ratio > 2.5:
+                return 'hold', 0.0
             return 'buy', self._scale(lower - price, sma_20 * band)
         if price > upper:
             return 'sell', self._scale(price - upper, sma_20 * band)
@@ -161,7 +199,7 @@ class TechnicalStrategy(BaseStrategy):
             return 'sell', (sell_signals - buy_signals) / 3.0
         return 'hold', 0.0
 
-    def seed_history(self, symbol: str, closes: List[float]) -> int:
+    def seed_history(self, symbol: str, closes: List[float], volumes: Optional[List[float]] = None) -> int:
         """Warm-start the price buffer from historical bars so the strategy
         can signal immediately instead of being blind for lookback_period
         live cycles after every restart."""
@@ -169,6 +207,10 @@ class TechnicalStrategy(BaseStrategy):
         if not cleaned:
             return 0
         self.historical_data[symbol] = cleaned[-self.lookback_period:]
+        if volumes:
+            v_cleaned = [float(v) for v in volumes if v and v > 0]
+            if v_cleaned:
+                self.historical_volume[symbol] = v_cleaned[-self.lookback_period:]
         # Seeded closes end before today, so the first live price starts
         # today's bar rather than overwriting the last historical close.
         self._bar_dates.pop(symbol, None)

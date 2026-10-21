@@ -25,6 +25,7 @@ TRENDING_UP = 'trending_up'
 TRENDING_DOWN = 'trending_down'
 RANGING = 'ranging'
 UNKNOWN = 'unknown'
+VOLATILE_CHOP = 'volatile_chop'
 
 # Which strategy families are allowed to act in each regime. A strategy whose
 # name matches none of these keys is never suppressed.
@@ -44,9 +45,12 @@ class RegimeDetector:
     """
 
     def __init__(self, fast_period: int = 20, slow_period: int = 50,
-                 maxlen: int = 400):
+                 maxlen: int = 400, max_volatility_pct: Optional[float] = None,
+                 volatility_window: int = 14):
         self.fast_period = max(2, int(fast_period))
         self.slow_period = max(self.fast_period + 1, int(slow_period))
+        self.max_volatility_pct = float(max_volatility_pct) if max_volatility_pct is not None else None
+        self.volatility_window = max(2, int(volatility_window))
         self._closes: Dict[str, deque] = {}
         self._bar_dates: Dict[str, str] = {}
         self._maxlen = max(maxlen, self.slow_period + 1)
@@ -96,6 +100,15 @@ class RegimeDetector:
             return UNKNOWN
         vals = list(buf)
         price = vals[-1]
+        # Check for extreme volatility chop if max_volatility_pct is configured
+        if self.max_volatility_pct is not None and len(vals) >= self.volatility_window + 1:
+            w = vals[-(self.volatility_window + 1):]
+            rets = [abs((w[i] - w[i-1]) / w[i-1]) for i in range(1, len(w)) if w[i-1] > 0]
+            if rets:
+                mean_vol = sum(rets) / len(rets)
+                if mean_vol > self.max_volatility_pct:
+                    return VOLATILE_CHOP
+
         fast = sum(vals[-self.fast_period:]) / self.fast_period
         slow = sum(vals[-self.slow_period:]) / self.slow_period
         if price > slow and fast > slow:

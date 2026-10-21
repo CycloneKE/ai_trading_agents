@@ -8,15 +8,26 @@
     "_comment": "Email alerts from the agent itself (src/agent/alerts.py). The mail server and recipient come from environment variables, never from this file: ALERT_EMAIL_TO, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM, SMTP_SECURITY (see .env.example). The same alert is not sent again within its cooldown; non-critical mail is capped per hour. Every alert is also recorded in data/alerts.jsonl, sent or not.",
     "enabled": true,
     "max_per_hour": 20,
-    "cooldown_seconds": {"info": 0, "warning": 3600, "critical": 900}
+    "cooldown_seconds": {
+      "info": 0,
+      "warning": 3600,
+      "critical": 900
+    }
   },
   "self_healing": {
     "_comment": "What the agent does about its own failures (src/agent/self_healing.py). A background worker that dies is restarted, at most max_restarts_per_hour times. A halt caused by the loop freezing (never any other halt: not a loss limit, not the operator's button) is lifted once the loop and the primary broker have been healthy for healthy_seconds, at most max_per_day times a day; set auto_resume.enabled to false to make every halt wait for a person. The operator is emailed at these loop-error counts in a row, and every loop_error_repeat_every after; and when a symbol has had no real price for degraded_symbol_minutes.",
     "enabled": true,
     "check_interval_seconds": 30,
     "max_restarts_per_hour": 6,
-    "auto_resume": {"enabled": true, "healthy_seconds": 600, "max_per_day": 3},
-    "loop_error_alert_at": [3, 10],
+    "auto_resume": {
+      "enabled": true,
+      "healthy_seconds": 600,
+      "max_per_day": 3
+    },
+    "loop_error_alert_at": [
+      3,
+      10
+    ],
     "loop_error_repeat_every": 30,
     "degraded_symbol_minutes": 30,
     "churn_alert_trips": 3,
@@ -65,7 +76,10 @@
       "min_days_for_return": 14,
       "min_forecast_signals": 100,
       "min_forecast_watch": 30,
-      "horizons": [5, 20],
+      "horizons": [
+        5,
+        20
+      ],
       "tuner_max_age_days": 14,
       "evidence_gate_trades": 5
     }
@@ -167,10 +181,13 @@
       "threshold": 0.02,
       "market_overrides": {
         "_comment": "Forex only: a major pair moves about 0.5% a day against a stock's 1.5%, so the 2% bar above almost never crossed there (about one buy day a year per pair). 0.6% gives forex about the pace stocks have.",
-        "forex": {"threshold": 0.006}
+        "forex": {
+          "threshold": 0.006
+        }
       },
       "weight": 1.0,
-      "max_position_size": 0.05
+      "max_position_size": 0.05,
+      "multi_timeframe_confirm": true
     },
     "mean_reversion": {
       "type": "technical",
@@ -178,10 +195,13 @@
       "lookback_period": 20,
       "market_overrides": {
         "_comment": "Forex only, for the same reason as momentum's: a 2% band around the 20-day average is rarely reached by a currency pair.",
-        "forex": {"band": 0.006}
+        "forex": {
+          "band": 0.006
+        }
       },
       "weight": 1.0,
-      "max_position_size": 0.05
+      "max_position_size": 0.05,
+      "volume_knife_filter": true
     },
     "rsi_strategy": {
       "type": "technical",
@@ -196,7 +216,9 @@
       "_comment": "Crypto only (src/agent/slow_strategies.py). Holds a coin while its close is more than `band` above its sma_period-day average, sells when it is more than `band` below, and otherwise has no view. Long-only, no leverage; sized by volatility like every trade. strategy_markets makes it crypto's only voter.",
       "type": "trend_following",
       "enabled": true,
-      "markets": ["crypto"],
+      "markets": [
+        "crypto"
+      ],
       "sma_period": 200,
       "band": 0.02,
       "weight": 1.0,
@@ -206,7 +228,9 @@
       "_comment": "Forex only (src/agent/slow_strategies.py). The forex counterpart of crypto_trend: holds a pair while its close is more than `band` above its sma_period-day average and sells when it is more than `band` below. Long-only, no leverage. Unlike crypto it votes alongside momentum and mean reversion (their forex thresholds are set in market_overrides), so it confirms a trend rather than trading alone. It abstains until it has sma_period daily bars.",
       "type": "trend_following",
       "enabled": true,
-      "markets": ["forex"],
+      "markets": [
+        "forex"
+      ],
       "sma_period": 50,
       "band": 0.004,
       "weight": 1.0,
@@ -216,7 +240,9 @@
       "_comment": "NSE only. Ranks the NSE stocks by their return over `lookback` trading days ending `skip` days ago (about six months, skipping the latest month); the top_n with a positive return are buys, and a holding outside the top exit_rank, or with a negative return, is a sell. Abstains until at least min_universe stocks have lookback + skip + 1 days of real history.",
       "type": "rotation",
       "enabled": true,
-      "markets": ["nse"],
+      "markets": [
+        "nse"
+      ],
       "lookback": 120,
       "skip": 20,
       "top_n": 3,
@@ -228,7 +254,9 @@
       "_comment": "US shares only. After an earnings beat of at least min_surprise (actual versus the analysts' estimate), a buy for hold_days calendar days, fading over the window; after a miss of that size, a sell. Needs TRADING_FINNHUB_API_KEY; without it, and outside a report's window, it abstains.",
       "type": "earnings_drift",
       "enabled": true,
-      "markets": ["us_equity"],
+      "markets": [
+        "us_equity"
+      ],
       "min_surprise": 0.05,
       "hold_days": 40,
       "weight": 1.0,
@@ -366,7 +394,9 @@
     "add_to_winners": {
       "_comment": "US/crypto book (src/agent/position_rules.py). A buy signal on a holding in one of `markets` adds to it only when selling it all now would already be profitable after costs, the price is at least min_gain_pct above the last entry, fewer than max_adds adds have been made, and the position stays within max_position_pct of equity. Entries are capped at risk_limits.max_position_size, so this cap sits a little above it. Add \"crypto\" to markets to let crypto add too.",
       "enabled": true,
-      "markets": ["us_equity"],
+      "markets": [
+        "us_equity"
+      ],
       "min_gain_pct": 0.05,
       "max_adds": 2,
       "add_size_pct": 0.5,
@@ -473,7 +503,7 @@
       "min_gain_pct": 0.05,
       "max_adds": 2,
       "add_size_pct": 0.5,
-      "max_position_pct": 0.4
+      "max_position_pct": 0.2
     },
     "exits": {
       "_comment": "A sell signal at or above full_exit_confidence closes the position; a weaker one sells trim_fraction of it, at most once a day, unless what would remain is under min_remaining_pct of the account, which closes it instead. partial_exits false always closes.",
@@ -486,7 +516,7 @@
       "_comment": "Checked every NSE evaluation before any signal: a position is sold in full when the price is stop_loss_pct below its cost (fees included) or trailing_stop_pct below the highest price since it opened. Where the stock's ATR is known the stops scale to risk_limits' ATR multiples, but never tighter than these: a round trip costs about 3.9% with slippage, and a stop tripped by an ordinary day's noise pays that for nothing.",
       "enabled": true,
       "stop_loss_pct": 0.08,
-      "trailing_stop_pct": 0.10
+      "trailing_stop_pct": 0.1
     },
     "dividend_withholding_pct": 0.05,
     "dividend_events_path": "config/nse_dividend_events.json",
@@ -494,7 +524,7 @@
     "interest_withholding_pct": 0.15,
     "trading_limits": {
       "_comment": "How often and how big the paper account may trade (src/agent/nse_paper_account.py). An order is capped at max_adv_fraction of the stock's average daily volume over adv_days; a signal cannot sell a position held for less than min_holding_days (stops still can); at most max_new_positions_per_week new holdings are opened in any 7 days (adds do not count); and sale proceeds are not spendable until settlement_days trading days later (CDSC's T+3).",
-      "max_adv_fraction": 0.10,
+      "max_adv_fraction": 0.1,
       "adv_days": 20,
       "min_holding_days": 30,
       "max_new_positions_per_week": 2,
@@ -560,7 +590,8 @@
     "_comment": "Momentum and mean reversion are opposed on entries. Rather than averaging them into a score neither can clear, let momentum vote only in trends and mean reversion only in ranges; the other abstains. A symbol with fewer than slow_period bars reads as unknown and is not filtered at all.",
     "enabled": true,
     "fast_period": 20,
-    "slow_period": 50
+    "slow_period": 50,
+    "max_volatility_pct": 0.04
   },
   "nse_screener": {
     "_comment": "Which NSE stocks the agent trades (src/agent/nse_screener.py). Every listed stock is screened weekly from its real history; the agent trades its holdings plus the best-ranked eligible stocks, at most max_per_sector from one sector, plus exploration_slots stocks ranked just below the cut (rotating weekly), up to max_symbols in all. Eligible: at least min_history_days real daily bars (what the strategies need to signal) and an average traded value of at least min_avg_value_kes a day (null: ten times nse_order_tickets.trade_notional_kes, since an order is capped at 10% of a day's volume). While too few stocks qualify, data_manager.nse_symbols fills the gaps. With llm_review, an AI may remove up to llm_max_removals names for a concrete reason (a suspension, a takeover offer). Set enabled to false to trade data_manager.nse_symbols as before.",
@@ -583,13 +614,19 @@
   },
   "strategy_markets": {
     "_comment": "For each market listed, only these strategies vote on its symbols; a market not listed is open to every strategy (a strategy's own `markets` still applies). Crypto trades on the 200-day trend alone, as the gap analysis recommends: the fast strategies' daily signals cost too much there. Delete the crypto line to let every strategy vote on crypto again.",
-    "crypto": ["crypto_trend"]
+    "crypto": [
+      "crypto_trend"
+    ]
   },
   "core_satellite": {
     "_comment": "US account only (src/agent/core_portfolio.py). The strategies trade active_share of equity, sizing every trade from that share; the rest is a core of low-cost index funds (S&P 500, 7-10 year Treasuries, gold) weighted so each carries about the same risk, rebalanced on the first session of each month or when a fund drifts more than drift_band from its target. The core never uses margin and has no stop-losses. Core funds must not be in data_manager.symbols (VOO, not SPY); any that are get dropped from the core. The gap analysis puts active_share at 0.50-0.60 for paper trading; when real money starts, begin lower and raise it in steps only while live results stay within tolerance of paper.",
     "enabled": true,
     "active_share": 0.55,
-    "core_symbols": ["VOO", "IEF", "IAU"],
+    "core_symbols": [
+      "VOO",
+      "IEF",
+      "IAU"
+    ],
     "vol_lookback": 60,
     "max_weight": 0.6,
     "drift_band": 0.05,
