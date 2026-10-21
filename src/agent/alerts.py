@@ -161,6 +161,12 @@ class EmailAlerter:
                           **{k: int(v) for k, v in (cfg.get('cooldown_seconds') or {}).items()
                              if k in SEVERITIES}}
         self.settings = _settings(dict(os.environ if env is None else env))
+        tg_env = dict(os.environ if env is None else env)
+        tg_cfg = cfg.get('telegram') or {}
+        tg_token = (tg_env.get('TELEGRAM_BOT_TOKEN') or tg_cfg.get('bot_token') or '').strip()
+        tg_chat = (tg_env.get('TELEGRAM_CHAT_ID') or tg_cfg.get('chat_id') or '').strip()
+        self.telegram_settings = {'token': tg_token, 'chat_id': tg_chat}
+        self.telegram_enabled = bool(tg_token and tg_chat and cfg.get('telegram_enabled', True))
         self.log = log or AlertLog()
         self._transport = transport or _smtp_transport
         self._background = background
@@ -249,3 +255,57 @@ class EmailAlerter:
             self.last_error = f"{type(e).__name__}: {e}"[:200]
             logger.error(f"Could not email alert '{entry.get('subject')}': {self.last_error}")
             self.log.add({**entry, 'status': 'failed', 'why': self.last_error})
+
+    def _deliver_telegram(self, text: str) -> bool:
+        if not self.telegram_enabled:
+            return False
+        token = self.telegram_settings['token']
+        chat_id = self.telegram_settings['chat_id']
+        try:
+            import requests
+            resp = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+                timeout=10.0
+            )
+            return resp.status_code == 200
+        except Exception as e:
+            logger.warning(f"Could not deliver Telegram alert: {e}")
+            return False
+
+    def notify_nse_ticket(self, ticket: Dict[str, Any]) -> None:
+        """Dispatch a formatted ticket card for the operator via Telegram and email."""
+        tid = ticket.get('id', '?')
+        sym = ticket.get('symbol', 'UNKNOWN')
+        side = str(ticket.get('side', 'buy')).upper()
+        qty = ticket.get('quantity', 0)
+        price = ticket.get('suggested_limit_price', 0.0) or 0.0
+        book = ticket.get('book', 'trading')
+        conf = float(ticket.get('ensemble_confidence', 0.0) or 0.0)
+        rationale = ticket.get('rationale', '')
+        llm = ticket.get('llm_reasoning', '')
+
+        est_val = qty * price
+        card = (
+            f"🇰🇪 <b>NSE Order Ticket #{tid}</b>\n"
+            f"<b>Action:</b> {side} {qty:,} {sym}\n"
+            f"<b>Suggested Limit:</b> KES {price:.2f} (Tick-compliant)\n"
+            f"<b>Est. Notional:</b> KES {est_val:,.2f}\n"
+            f"<b>Book:</b> {book}\n"
+            f"<b>Confidence:</b> {conf * 100:.1f}%\n"
+            f"<b>Rationale:</b> {rationale}\n"
+        )
+        if llm:
+            card += f"<b>Analysis:</b> {llm[:300]}\n"
+        card += "<i>Status: Ready for placement on broker desk/portal</i>"
+
+        subject = f"NSE Order Ticket #{tid}: {side} {qty} {sym} @ KES {price:.2f}"
+        body = f"{side} {qty} {sym} at KES {price:.2f} (Est: KES {est_val:,.2f})\nRationale: {rationale}\n{llm}"
+
+        if self.telegram_enabled:
+            if self._background:
+                threading.Thread(target=self._deliver_telegram, args=(card,), daemon=True, name='alert-tg').start()
+            else:
+                self._deliver_telegram(card)
+
+        self.send(f"nse:ticket:{tid}", subject, body, severity='info', cooldown_s=0)

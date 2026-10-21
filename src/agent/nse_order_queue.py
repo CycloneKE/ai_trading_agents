@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.utils.paths import DATA_DIR
+from src.connectors.nse_universe import quantize_nse_price
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,9 @@ CREATE TABLE IF NOT EXISTS nse_paper_equity (
 
 
 class NseOrderQueue:
-    def __init__(self, db_path: str = str(DATA_DIR / 'escalations.db')):
+    def __init__(self, db_path: str = str(DATA_DIR / 'escalations.db'),
+                 alerter: Optional[Any] = None):
+        self.alerter = alerter
         self._lock = threading.Lock()
         self.db_path = db_path
         self._conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
@@ -116,6 +119,9 @@ class NseOrderQueue:
         side = side.lower()
         if side not in ('buy', 'sell') or quantity <= 0:
             return None
+        if suggested_limit_price is not None:
+            suggested_limit_price = quantize_nse_price(suggested_limit_price)
+
         with self._lock:
             dup = self._conn.execute(
                 "SELECT id FROM nse_order_tickets WHERE symbol = ? AND side = ?"
@@ -131,7 +137,20 @@ class NseOrderQueue:
                  suggested_limit_price, rationale, ensemble_confidence, llm_reasoning, book,
                  strategy, json.dumps(strategy_weights) if strategy_weights else None))
             self._conn.commit()
-            return cur.lastrowid
+            ticket_id = cur.lastrowid
+
+        if self.alerter is not None and ticket_id is not None:
+            try:
+                self.alerter.notify_nse_ticket({
+                    'id': ticket_id, 'symbol': symbol, 'side': side,
+                    'quantity': int(quantity), 'suggested_limit_price': suggested_limit_price,
+                    'rationale': rationale, 'ensemble_confidence': ensemble_confidence,
+                    'llm_reasoning': llm_reasoning, 'book': book, 'strategy': strategy,
+                })
+            except Exception as e:
+                logger.debug(f"Alerter failed to notify NSE ticket #{ticket_id}: {e}")
+
+        return ticket_id
 
     def get_pending(self, limit: int = 50) -> List[Dict[str, Any]]:
         with self._lock:

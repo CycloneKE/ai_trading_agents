@@ -50,6 +50,7 @@ from src.agent.nse_paper_account import (HOLDING_RULE_REASONS, NsePaperAccount,
                                          execute_stop, order_size)
 from src.agent.strategy_attribution import credit_weights
 from src.connectors.nse_scraper import REAL_NSE_SOURCES
+from src.connectors.nse_universe import quantize_nse_price
 from src.agent.position_rules import (LIVE_ADD_DEFAULTS, LIVE_EXIT_DEFAULTS, plan_add,
                                       plan_exit, rule, state_from_journal)
 from src.agent.cost_model import classify, costs_for
@@ -272,7 +273,7 @@ class TradingAgent:
             # NSE order-ticket queue: NSE has no broker API, so NSE trade
             # decisions become tickets a human keys into the AIB-AXYS portal.
             from src.agent.nse_order_queue import NseOrderQueue
-            self.components['nse_order_queue'] = NseOrderQueue()
+            self.components['nse_order_queue'] = NseOrderQueue(alerter=getattr(self, 'alerter', None))
             self.components['nse_paper_account'] = NsePaperAccount(
                 self.components['nse_order_queue'], self.config)
             if self.config.get('nse_auto_paper_trade', True) and \
@@ -737,6 +738,8 @@ class TradingAgent:
             from src.agent.self_healing import SelfHealing
             self.alerter = EmailAlerter(self.config)
             self.self_healing = SelfHealing(self, self.alerter, self.config)
+            if 'nse_order_queue' in self.components and self.alerter is not None:
+                self.components['nse_order_queue'].alerter = self.alerter
         except Exception as e:
             logger.error(f"Alerts and self-healing unavailable: {e}")
             self.alerter = None
@@ -1768,7 +1771,7 @@ class TradingAgent:
                         dec['skip_reason'] = reason
                     else:
                         ticket_id = queue.create_ticket(
-                            symbol, action, qty, suggested_limit_price=round(price, 2),
+                            symbol, action, qty, suggested_limit_price=quantize_nse_price(price),
                             rationale=f"{action.upper()} signal (ensemble conf {confidence:.2f})",
                             ensemble_confidence=confidence,
                             llm_reasoning=(validated.get('reasoning') if validated else '') or '',

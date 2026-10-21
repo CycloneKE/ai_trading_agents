@@ -181,3 +181,40 @@ def market_symbols(csv_dir: Path, watched: Iterable[str] = ()) -> List[str]:
     """What Market Watch lists: every stock with real data, plus the ones
     the agent trades even before their first real bar."""
     return sorted(set(symbols_with_real_data(csv_dir)) | {s.upper() for s in watched})
+
+
+def nse_tick_size(price: float) -> float:
+    """Official tick size band for equities on the Nairobi Securities Exchange (NSE ATS).
+
+    Rules:
+        Under KES 20.00:      0.05 KES
+        KES 20.00 to 49.75:   0.25 KES
+        KES 50.00 to 99.50:   0.50 KES
+        KES 100.00 and above: 1.00 KES
+    """
+    try:
+        p = float(price)
+    except (TypeError, ValueError):
+        return 0.05
+    if p < 20.0:
+        return 0.05
+    elif p < 50.0:
+        return 0.25
+    elif p < 100.0:
+        return 0.50
+    else:
+        return 1.00
+
+
+def quantize_nse_price(price: float) -> float:
+    """Quantize an NSE equity price in KES to its official tick band."""
+    try:
+        p = float(price)
+    except (TypeError, ValueError):
+        return 0.0
+    if p <= 0:
+        return 0.0
+    tick = nse_tick_size(p)
+    ticks = round(p / tick)
+    quantized = round(ticks * tick, 2)
+    return max(quantized, tick)
