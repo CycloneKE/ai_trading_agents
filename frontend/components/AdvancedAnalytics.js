@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import TradingViewDrawer from './TradingViewDrawer';
 import { theme } from './DashboardStyles';
 
 const AdvancedAnalytics = ({ data, mobile }) => {
@@ -113,23 +113,31 @@ const AdvancedAnalytics = ({ data, mobile }) => {
             Drawdown / Underwater Analysis (%)
           </h4>
           {drawdownAnalysis.length > 0 ? (
-            <ResponsiveContainer width="100%" height={210}>
-              <LineChart data={drawdownAnalysis}>
-                <CartesianGrid strokeDasharray="3 3" stroke={`${theme.colors.border}30`} />
-                <XAxis dataKey="date" stroke={theme.colors.textMuted} fontSize={10} minTickGap={40} />
-                <YAxis stroke={theme.colors.textMuted} fontSize={10} unit="%" />
-                <Tooltip 
-                  contentStyle={{
-                    backgroundColor: theme.colors.bgSecondary,
-                    border: `1px solid ${theme.colors.border}`,
-                    borderRadius: '8px',
-                    color: theme.colors.text
-                  }}
-                />
-                <Line type="monotone" dataKey="drawdown" stroke={theme.colors.danger} strokeWidth={2} name="Drawdown" dot={false} />
-                <Line type="monotone" dataKey="underwater" stroke={theme.colors.warning} strokeWidth={1} name="Max Tail DD" dot={false} strokeDasharray="4 4" />
-              </LineChart>
-            </ResponsiveContainer>
+            <TradingViewDrawer
+              data={drawdownAnalysis}
+              height={210}
+              timeKey="date"
+              formatValue={(v) => `${v.toFixed(2)}%`}
+              series={[
+                {
+                  key: 'drawdown',
+                  name: 'Drawdown',
+                  type: 'area',
+                  color: theme.colors.danger,
+                  topColor: 'rgba(244,63,94,0.0)',
+                  bottomColor: 'rgba(244,63,94,0.25)',
+                },
+                {
+                  key: 'underwater',
+                  name: 'Max Tail DD',
+                  type: 'line',
+                  color: theme.colors.warning,
+                  lineStyle: 'dashed',
+                }
+              ]}
+              removeWeekendGaps={true}
+              emptyMessage="Insufficient history for drawdown chart."
+            />
           ) : (
             <div style={{ height: '210px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: theme.colors.textMuted, fontSize: '13px' }}>
               Insufficient portfolio history for drawdown chart. Run trading cycles to populate metrics.

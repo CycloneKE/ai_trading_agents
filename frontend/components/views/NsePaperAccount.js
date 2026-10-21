@@ -1,7 +1,7 @@
 // The agent's NSE paper account: KES cash, holdings with their stops, the
 // trade history and a daily equity curve. Nothing here is real money; the
 // account replays the agent's paper fills from /api/nse/paper.
-import { ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } from 'recharts';
+import TradingViewDrawer from '../TradingViewDrawer';
 import { Wallet, PiggyBank, Briefcase, TrendingUp, Receipt, Activity, ShieldAlert, History, BookOpen } from 'lucide-react';
 import { theme } from '../DashboardStyles';
 import {
@@ -60,35 +60,24 @@ function EquityCurve({ points, start, mobile }) {
       </Empty>
     );
   }
-  const all = points.flatMap((p) => [p.equity_kes, p.tbill_kes, p.basket_kes]).filter((v) => typeof v === 'number');
-  const lo = Math.min(start, ...all);
-  const hi = Math.max(start, ...all);
-  const pad = Math.max((hi - lo) * 0.15, start * 0.005);
   const vs = versus(points, start);
   return (
     <>
-      <ResponsiveContainer width="100%" height={mobile ? 220 : 280}>
-        <ComposedChart data={points} margin={{ left: 0, right: 8, top: 8, bottom: 0 }}>
-          <defs>
-            <linearGradient id="paperEq" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor={theme.colors.primary} stopOpacity={0.3} />
-              <stop offset="95%" stopColor={theme.colors.primary} stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke={theme.colors.border} vertical={false} />
-          <XAxis dataKey="day" stroke={theme.colors.textMuted} fontSize={10} tickFormatter={(d) => d.slice(5)} minTickGap={24} />
-          <YAxis stroke={theme.colors.textMuted} fontSize={10} width={mobile ? 44 : 60}
-                 domain={[Math.floor(lo - pad), Math.ceil(hi + pad)]}
-                 tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(0)}k` : v)} />
-          <Tooltip contentStyle={{ backgroundColor: theme.colors.bgSecondary, border: `1px solid ${theme.colors.border}`, color: '#fff', fontSize: '12px' }}
-                   formatter={(v, name) => [money(v, 'KES'), SERIES_NAME[name] || name]} />
-          <Legend formatter={(name) => SERIES_NAME[name] || name} wrapperStyle={{ fontSize: '11px' }} />
-          <ReferenceLine y={start} stroke={theme.colors.textMuted} strokeDasharray="4 4" />
-          <Area type="monotone" dataKey="equity_kes" stroke={theme.colors.primary} fill="url(#paperEq)" strokeWidth={2} />
-          <Line type="monotone" dataKey="tbill_kes" stroke={theme.colors.warning} strokeDasharray="5 4" dot={false} strokeWidth={1.5} />
-          <Line type="monotone" dataKey="basket_kes" stroke={theme.colors.secondary} dot={false} strokeWidth={1.5} connectNulls />
-        </ComposedChart>
-      </ResponsiveContainer>
+      <TradingViewDrawer
+        data={points}
+        height={mobile ? 220 : 280}
+        currency="KES"
+        timeKey="day"
+        referenceLine={start}
+        referenceTitle="Starting KES"
+        series={[
+          { key: 'equity_kes', name: 'Account value', type: 'area', color: theme.colors.primary },
+          { key: 'tbill_kes', name: 'Treasury bills (after tax)', type: 'line', color: theme.colors.warning, lineStyle: 'dashed' },
+          { key: 'basket_kes', name: 'NSE basket (buy and hold)', type: 'line', color: theme.colors.secondary }
+        ]}
+        removeWeekendGaps={true}
+        emptyMessage="No NSE paper equity data recorded yet."
+      />
       {vs.account != null && (
         <div style={{ fontSize: '12px', color: theme.colors.textSecondary, marginTop: '8px' }}>
           Since the start: account <strong style={{ color: gainColor(vs.account) }}>{pct(vs.account)}</strong>

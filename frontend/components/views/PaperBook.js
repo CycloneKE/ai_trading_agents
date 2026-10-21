@@ -3,7 +3,7 @@
 // with the price each would be stopped out at, trades, results on closed
 // trades and what the trades cost. Nothing here is real money; the figures
 // come from /api/paper/<us|forex>.
-import { ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } from 'recharts';
+import TradingViewDrawer from '../TradingViewDrawer';
 import { Wallet, PiggyBank, Briefcase, TrendingUp, Receipt, Activity, ShieldAlert, History, BookOpen, Clock } from 'lucide-react';
 import { theme } from '../DashboardStyles';
 import {
@@ -56,35 +56,23 @@ function EquityCurve({ points, start, benchmarkName, mobile }) {
       </Empty>
     );
   }
-  const values = points.flatMap((p) => [p.equity, p.benchmark]).filter((v) => typeof v === 'number');
-  const lo = Math.min(start, ...values);
-  const hi = Math.max(start, ...values);
-  const pad = Math.max((hi - lo) * 0.15, start * 0.002);
   const vs = versus(points, start);
-  const names = { equity: 'Account value', benchmark: benchmarkName || 'Benchmark' };
   return (
     <>
-      <ResponsiveContainer width="100%" height={mobile ? 220 : 280}>
-        <ComposedChart data={points} margin={{ left: 0, right: 8, top: 8, bottom: 0 }}>
-          <defs>
-            <linearGradient id="paperBookEq" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor={theme.colors.primary} stopOpacity={0.3} />
-              <stop offset="95%" stopColor={theme.colors.primary} stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke={theme.colors.border} vertical={false} />
-          <XAxis dataKey="day" stroke={theme.colors.textMuted} fontSize={10} tickFormatter={(d) => d.slice(5)} minTickGap={24} />
-          <YAxis stroke={theme.colors.textMuted} fontSize={10} width={mobile ? 52 : 66}
-                 domain={[Math.floor(lo - pad), Math.ceil(hi + pad)]}
-                 tickFormatter={(v) => (hi - lo < 5000 ? Math.round(v).toLocaleString() : `${(v / 1000).toFixed(1)}k`)} />
-          <Tooltip contentStyle={{ backgroundColor: theme.colors.bgSecondary, border: `1px solid ${theme.colors.border}`, color: '#fff', fontSize: '12px' }}
-                   formatter={(v, name) => [money(v, 'USD'), names[name] || name]} />
-          <Legend formatter={(name) => names[name] || name} wrapperStyle={{ fontSize: '11px' }} />
-          <ReferenceLine y={start} stroke={theme.colors.textMuted} strokeDasharray="4 4" />
-          <Area type="monotone" dataKey="equity" stroke={theme.colors.primary} fill="url(#paperBookEq)" strokeWidth={2} />
-          {benchmarkName && <Line type="monotone" dataKey="benchmark" stroke={theme.colors.secondary} dot={false} strokeWidth={1.5} connectNulls />}
-        </ComposedChart>
-      </ResponsiveContainer>
+      <TradingViewDrawer
+        data={points}
+        height={mobile ? 220 : 280}
+        currency="USD"
+        timeKey="day"
+        referenceLine={start}
+        referenceTitle="Starting USD"
+        series={[
+          { key: 'equity', name: 'Account value', type: 'area', color: theme.colors.primary },
+          ...(benchmarkName ? [{ key: 'benchmark', name: benchmarkName, type: 'line', color: theme.colors.secondary }] : [])
+        ]}
+        removeWeekendGaps={true}
+        emptyMessage="No paper account equity data recorded yet."
+      />
       {vs.account != null && (
         <div style={{ fontSize: '12px', color: theme.colors.textSecondary, marginTop: '8px' }}>
           Since the start: account <strong style={{ color: gainColor(vs.account) }}>{pct(vs.account)}</strong>

@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { 
-  PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend,
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, BarChart, Bar
+  PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend
 } from 'recharts';
 import { 
   Globe, Shield, TrendingUp, TrendingDown, DollarSign, Activity, 
   Layers, RefreshCw, CheckCircle, Clock, Filter, ArrowUpRight, ArrowDownRight,
   Zap, Lightbulb, Compass, Award, Percent, Layers3, Cpu
 } from 'lucide-react';
+import TradingViewDrawer from './TradingViewDrawer';
 import { theme, glassCard } from './DashboardStyles';
 import { getApiBase } from '../utils/apiBase';
 import { fxSourceNote } from './ui';
@@ -343,16 +343,18 @@ export default function UnifiedPortfolio({ onDrill }) {
             </span>
           </div>
 
-          <div style={{ height: '220px' }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={equityCurve}>
-                <CartesianGrid strokeDasharray="3 3" stroke={`${theme.colors.border}40`} />
-                <XAxis dataKey="time" tick={{ fontSize: 10, fill: theme.colors.textMuted }} />
-                <YAxis tick={{ fontSize: 10, fill: theme.colors.textMuted }} width={55} />
-                <Tooltip contentStyle={{ background: theme.colors.bgSecondary, border: `1px solid ${theme.colors.border}`, borderRadius: '8px', fontSize: '12px' }} />
-                <Area type="monotone" dataKey="value" stroke={theme.colors.primary} fill="rgba(16,185,129,0.15)" strokeWidth={2} name="Account equity ($)" />
-              </AreaChart>
-            </ResponsiveContainer>
+          <div style={{ height: '230px' }}>
+            <TradingViewDrawer
+              data={perf?.portfolio_chart || []}
+              height={230}
+              currency="USD"
+              timeKey="timestamp"
+              series={[
+                { key: 'value', name: 'Account Equity', type: 'area', color: theme.colors.primary }
+              ]}
+              removeWeekendGaps={true}
+              emptyMessage="No portfolio performance data recorded yet."
+            />
           </div>
         </div>
 

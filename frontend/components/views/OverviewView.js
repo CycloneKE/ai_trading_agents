@@ -1,12 +1,14 @@
 // Overview: the headline figures, performance curve, what the agent is
 // watching, top positions, allocation and strategy attribution.
+import React from 'react';
 import {
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area, Line, PieChart, Pie, Cell,
+  ResponsiveContainer, Tooltip, PieChart, Pie, Cell,
 } from 'recharts';
 import { TrendingUp, Activity, Shield, Zap, Layers, RefreshCw, Globe } from 'lucide-react';
 import AgentActivity from '../AgentActivity';
 import AgentFocus from '../AgentFocus';
 import SleeveDashboard from '../SleeveDashboard';
+import TradingViewDrawer from '../TradingViewDrawer';
 import { theme } from '../DashboardStyles';
 import { card, columns, SectionHeader, HUDCard, HudRow } from '../ui';
 
@@ -36,36 +38,29 @@ const OverviewView = ({ data, isConnected, onDrill, mobile }) => {
       <div style={{ display: 'flex', flexDirection: 'column', gap: mobile ? '16px' : '24px', minWidth: 0 }}>
         <div style={card(mobile)}>
           <SectionHeader title="Performance Curve" icon={Activity} />
-          <ResponsiveContainer width="100%" height={mobile ? 220 : 300}>
-            <ComposedChart data={data.performance.portfolio_chart || []}>
-              <defs><linearGradient id="colorVal" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={theme.colors.primary} stopOpacity={0.3}/><stop offset="95%" stopColor={theme.colors.primary} stopOpacity={0}/></linearGradient></defs>
-              <CartesianGrid strokeDasharray="3 3" stroke={theme.colors.border} vertical={false} />
-              <XAxis 
-                dataKey="timestamp" 
-                stroke={theme.colors.textMuted} 
-                fontSize={10} 
-                tickFormatter={(t) => {
-                  try {
-                    const d = new Date(t);
-                    const isToday = d.toDateString() === new Date().toDateString();
-                    return isToday 
-                      ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
-                      : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
-                  } catch (e) {
-                    return t;
-                  }
-                }} 
-              />
-              <YAxis stroke={theme.colors.textMuted} fontSize={10} domain={['dataMin - (dataMin * 0.01)', 'dataMax + (dataMax * 0.01)']} />
-              <Tooltip contentStyle={{ backgroundColor: theme.colors.bgSecondary, border: `1px solid ${theme.colors.border}`, color: '#fff' }} />
-              <Area type="monotone" dataKey="value" name="Account value" stroke={theme.colors.primary} fill="url(#colorVal)" />
-              {data.performance.benchmark_name && (
-                <Line type="monotone" dataKey="benchmark" name={data.performance.benchmark_name}
-                      stroke={theme.colors.secondary} dot={false} strokeWidth={1.5} strokeDasharray="5 4" connectNulls />
-              )}
-              {data.performance.benchmark_name && <Legend wrapperStyle={{ fontSize: '11px' }} />}
-            </ComposedChart>
-          </ResponsiveContainer>
+          <TradingViewDrawer
+            data={data.performance.portfolio_chart || []}
+            height={mobile ? 240 : 300}
+            currency="USD"
+            timeKey="timestamp"
+            series={[
+              {
+                key: 'value',
+                name: 'Account value',
+                type: 'area',
+                color: theme.colors.primary,
+              },
+              ...(data.performance.benchmark_name ? [{
+                key: 'benchmark',
+                name: data.performance.benchmark_name,
+                type: 'line',
+                color: theme.colors.secondary,
+                lineStyle: 'dashed',
+              }] : [])
+            ]}
+            removeWeekendGaps={true}
+            emptyMessage="No portfolio performance curve recorded yet."
+          />
         </div>
         <AgentFocus onDrill={onDrill} />
         <SleeveDashboard />
