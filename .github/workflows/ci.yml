@@ -269,7 +269,7 @@ jobs:
     - name: Deploy to Cloud Run (requires GCP + DockerHub secrets)
       id: deploy
       if: needs.preflight.outputs.has_gcp == 'true'
-      uses: 'google-github-actions/deploy-cloudrun@v2'
+      uses: 'google-github-actions/deploy-cloudrun@v3'
       with:
         service: 'ai-trading-agent'
         region: 'us-central1'
