@@ -58,7 +58,7 @@ pypdf>=4.0
 pandas_ta==0.4.71b0; python_version >= "3.12"
 
 # Price feed used by src/utils/real_price_feed.py (was imported but undeclared)
-yfinance>=0.2.60
+yfinance>=1.7.0
 
 # NLP / sentiment. All were imported by src/agent/sentiment_analyzer.py and
 # src/agent/text_processor.py without appearing here, so a clean install could

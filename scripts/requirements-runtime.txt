@@ -68,7 +68,7 @@ scipy>=1.9.0
 # requirements-ci.txt but not in the image, so the tests passed, the image
 # built, and the container crash-looped on the server with
 # ModuleNotFoundError. Exactly the failure PyJWT and bcrypt caused before it.
-yfinance>=0.2.60
+yfinance>=1.7.0
 
 # --- Paid AI tier ---------------------------------------------------------
 # Claude, via the official SDK. Imported only when ANTHROPIC_API_KEY is set
