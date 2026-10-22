@@ -21,7 +21,7 @@ bcrypt>=4.0.0
 yfinance>=0.2.60
 
 # Broker research ingest: tests/test_pdf_parser.py
-pdfplumber>=0.11.0
+pdfplumber>=0.11.10
 
 # Used by supervised_learning and the portfolio optimiser
 scikit-learn>=1.5.0
