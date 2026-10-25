@@ -177,12 +177,21 @@ class BrokerResearchIngest:
         # tell a Market Pulse or a bond note (read exactly, below) from a
         # research note. A file that cannot be read fails inside the try.
         from src.agent import market_pulse
+        extracted = None
         try:
             texts = market_pulse.page_texts(file_path)
         except Exception as e:
             logger.warning(f"Could not read the pages of {file_path}: {e}")
             texts = []
-        resolved_source = detect_research_source("\n".join(texts), os.path.basename(file_path), source)
+        sample = "\n".join(texts)
+        if not sample.strip():
+            # The cheap reader found nothing: try the full parser, and keep its result.
+            try:
+                extracted = pdf_parser.extract_all(file_path)
+                sample = extracted.get("text", "")
+            except Exception as e:
+                logger.warning(f"Could not parse {file_path} to name its publisher: {e}")
+        resolved_source = detect_research_source(sample, os.path.basename(file_path), source)
         logger.info(f"Research publisher resolved: {resolved_source}")
         
         # Record upload in DB
@@ -214,8 +223,9 @@ class BrokerResearchIngest:
                     "document_type": "bond_auction", "status": "completed", "signals_processed": 0,
                     "auto_followed": [], "escalated": [], "note": note})
 
-            # 1. Parse PDF with full table & page structure
-            extracted = pdf_parser.extract_all(file_path)
+            # 1. Parse PDF with full table & page structure (once)
+            if extracted is None:
+                extracted = pdf_parser.extract_all(file_path)
             text = extracted.get("text", "")
             
             if not text:
