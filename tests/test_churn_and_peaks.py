@@ -116,6 +116,9 @@ def test_the_agents_own_stop_out_does_not_leave_a_peak_for_the_next_position(dat
     cycle(83000, 83134)                                                  # the stop fires, once
     assert [(o.side, o.symbol) for o in broker.placed] == [('sell', 'BTC-USD')]
     broker.positions = []
+    for row in agent.order_journal.unresolved():                         # the broker fills the stop order,
+        agent.order_journal.mark_final(row['client_order_id'], 'filled', 1.0, 83000.0)
+    TradingAgent._settle_peak_forgets(agent)                             # and only then does the peak go
     risk.sync_broker_positions([])                                       # it is sold
     clock['t'] += 6 * 60                                                 # the next five-minute window
     for _ in range(4):
@@ -324,3 +327,52 @@ def test_recent_can_be_limited_to_trips_closed_after_a_given_time():
     now = datetime.now(timezone.utc)
     assert churn.recent(f, CONFIG, since=now - timedelta(hours=2))['BTC-USD']['n'] == 6
     assert churn.recent(f, CONFIG, since=now + timedelta(minutes=1)) == {}
+
+
+# ----------------------------------------- a peak goes only when the exit has filled
+
+def _agent_with_journal(tmp_path):
+    forgotten = []
+    j = OrderJournal(str(tmp_path / 'peaks.db'))
+    agent = SimpleNamespace(risk_manager=SimpleNamespace(forget_peak=forgotten.append), order_journal=j)
+    return agent, j, forgotten
+
+
+def _sell(j, coid, symbol='BTC-USD'):
+    j.record_intent(coid, symbol, 'sell', 1.0, 'market', None, 'ensemble')
+    j.mark_submitted(coid, 'b-' + coid, 'accepted')
+
+
+def test_the_peak_is_kept_while_the_exit_is_only_accepted(tmp_path):
+    agent, j, forgotten = _agent_with_journal(tmp_path)
+    _sell(j, 'c1')
+    TradingAgent._forget_peak_on_fill(agent, 'BTC-USD', 'c1')
+    TradingAgent._settle_peak_forgets(agent)
+    assert forgotten == []                                    # accepted is not filled
+
+
+def test_the_peak_goes_once_the_exit_fills(tmp_path):
+    agent, j, forgotten = _agent_with_journal(tmp_path)
+    _sell(j, 'c1')
+    TradingAgent._forget_peak_on_fill(agent, 'BTC-USD', 'c1')
+    j.mark_final('c1', 'filled', 1.0, 100.0)
+    TradingAgent._settle_peak_forgets(agent)
+    TradingAgent._settle_peak_forgets(agent)                  # a second pass does nothing more
+    assert forgotten == ['BTC-USD']
+
+
+@pytest.mark.parametrize('final', ['rejected', 'canceled', 'expired', 'failed'])
+def test_a_rejected_exit_keeps_the_peak_and_stops_waiting(tmp_path, final):
+    agent, j, forgotten = _agent_with_journal(tmp_path)
+    _sell(j, 'c1')
+    TradingAgent._forget_peak_on_fill(agent, 'BTC-USD', 'c1')
+    j.mark_final('c1', final, 0.0, None)
+    TradingAgent._settle_peak_forgets(agent)
+    assert forgotten == [] and agent._pending_peak_forgets == {}
+
+
+def test_without_a_journal_the_peak_goes_at_once():
+    forgotten = []
+    agent = SimpleNamespace(risk_manager=SimpleNamespace(forget_peak=forgotten.append), order_journal=None)
+    TradingAgent._forget_peak_on_fill(agent, 'ETH-USD', 'c9')
+    assert forgotten == ['ETH-USD']

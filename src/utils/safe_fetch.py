@@ -9,7 +9,8 @@ document written by someone else, so it is treated as hostile until checked:
   which is where a cloud provider's secrets and the agent's own services sit);
 * a redirect is followed by hand and every hop is checked the same way, so a
   public page cannot send the server on to a private one;
-* at most a few seconds and a few megabytes, and only a web page, plain text
+* at most 30 seconds in all (a server that trickles bytes cannot hold the
+  request open) and a few megabytes, and only a web page, plain text
   or a PDF;
 * what comes back is text only: scripts and styles are dropped, and nothing in
   it is ever run.
@@ -24,6 +25,7 @@ import ipaddress
 import os
 import socket
 import tempfile
+import time
 from html.parser import HTMLParser
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urljoin, urlsplit
@@ -31,6 +33,7 @@ from urllib.parse import urljoin, urlsplit
 MAX_BYTES = 3_000_000
 MAX_TEXT_CHARS = 200_000
 TIMEOUT_SECONDS = 15
+DEADLINE_SECONDS = 30            # the whole download, redirects included
 MAX_REDIRECTS = 3
 MIN_TEXT_CHARS = 200
 ACCEPTED = ('text/html', 'application/xhtml+xml', 'text/plain', 'application/pdf')
@@ -136,13 +139,15 @@ def _pdf_text(data: bytes) -> str:
 
 
 def fetch(url: str, session: Any = None, resolver: Optional[Callable[[str], List[str]]] = None,
-          max_bytes: int = MAX_BYTES) -> Dict[str, Any]:
+          max_bytes: int = MAX_BYTES, deadline_s: float = DEADLINE_SECONDS,
+          clock: Callable[[], float] = time.monotonic) -> Dict[str, Any]:
     """The readable text at `url`: {'url' (where it ended up), 'title', 'text', 'content_type'}.
     Raises FetchError with a plain reason."""
     if session is None:
         import requests
         session = requests.Session()
     current = check_url(url, resolver)
+    started = clock()
     for _ in range(MAX_REDIRECTS + 1):
         try:
             resp = session.get(current, stream=True, timeout=TIMEOUT_SECONDS, allow_redirects=False,
@@ -154,6 +159,8 @@ def fetch(url: str, session: Any = None, resolver: Optional[Callable[[str], List
                 target = resp.headers.get('Location')
                 if not target:
                     raise FetchError('the page redirected nowhere')
+                if clock() - started > deadline_s:
+                    raise FetchError('the page took too long to download')
                 current = check_url(urljoin(current, target), resolver)
                 continue
             if resp.status_code != 200:
@@ -166,6 +173,8 @@ def fetch(url: str, session: Any = None, resolver: Optional[Callable[[str], List
                 raise FetchError('the page is too large to read')
             chunks, size = [], 0
             for chunk in resp.iter_content(65536):
+                if clock() - started > deadline_s:
+                    raise FetchError('the page took too long to download')
                 size += len(chunk)
                 if size > max_bytes:
                     raise FetchError('the page is too large to read')
