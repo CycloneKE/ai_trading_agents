@@ -105,13 +105,13 @@ def test_with_the_cap_reached_claude_is_not_called(tmp_path):
 
 # ------------------------------------------------------------ orchestrator
 
-def _orchestrator(monkeypatch, tmp_path, client, free=True, cap=20.0):
+def _orchestrator(monkeypatch, tmp_path, client, free=True, cap=20.0, consensus=False):
     from src.agent import llm_orchestrator as lo
     monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
     monkeypatch.setenv('GEMINI_API_KEY', 'g') if free else monkeypatch.delenv('GEMINI_API_KEY', raising=False)
     monkeypatch.delenv('OPENROUTER_API_KEY', raising=False)
     monkeypatch.delenv('GROQ_API_KEY', raising=False)
-    orch = lo.LLMOrchestrator({'primary_llm_provider': 'gemini'})
+    orch = lo.LLMOrchestrator({'primary_llm_provider': 'gemini', 'llm_consensus_enabled': consensus})
     orch.claude = ClaudeProvider('key', AiBudget(tmp_path / 'spend.json', cap), {}, client=client)
     orch.enabled = True
     orch._call_gemini = lambda s, u, fb, model_override=None: {
@@ -128,6 +128,13 @@ def test_claude_reviews_first_while_it_has_budget(monkeypatch, tmp_path):
     assert orch._provider_order() == ['anthropic', 'gemini']
     verdict = orch.validate_trade('AAPL', SIGNAL, {'close': 100.0})
     assert verdict['reasoning'] == 'ok' and verdict['strategy'] == 'llm_orchestrated'
+
+
+def test_a_second_model_that_says_hold_vetoes_the_first_models_trade(monkeypatch, tmp_path):
+    orch = _orchestrator(monkeypatch, tmp_path, _Client(), consensus=True)
+    verdict = orch.validate_trade('AAPL', SIGNAL, {'close': 100.0})
+    assert verdict['action'] == 'hold' and verdict['consensus_verified'] is False
+    assert 'Consensus Veto' in verdict['reasoning']
 
 
 def test_the_free_model_takes_over_when_claude_fails_or_the_cap_is_reached(monkeypatch, tmp_path):

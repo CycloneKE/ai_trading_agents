@@ -228,10 +228,10 @@ def test_the_trade_review_prompt_carries_the_documents_as_background(monkeypatch
     monkeypatch.setattr(orch, '_complete', fake)
     orch.validate_trade('ACME', {'action': 'buy', 'confidence': 0.7}, {'close': 20.0},
                         research_context={'documents': 'IPO briefing of 2026-10-14: Acme sells shares at KES 20.00'})
-    assert 'Documents on file: IPO briefing of 2026-10-14' in seen['user'] and 'Broker research' not in seen['user']
+    assert 'Documents on file: IPO briefing of 2026-10-14' in seen['user'] and 'Broker Research Context' not in seen['user']
     orch.validate_trade('ACME', {'action': 'sell', 'confidence': 0.7}, {'close': 20.0},
                         research_context={'recommendation': 'BUY', 'target_price': 25, 'rationale': 'cheap'})
-    assert 'Broker research: BUY' in seen['user'] and 'Documents on file' not in seen['user']
+    assert 'Broker Research Context' in seen['user'] and 'recommendation BUY' in seen['user'] and 'Documents on file' not in seen['user']
 
 
 # --------------------------------------------- through the upload pipeline

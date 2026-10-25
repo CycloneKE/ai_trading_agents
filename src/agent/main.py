@@ -1373,7 +1373,7 @@ class TradingAgent:
                                     from src.agent.verdict_scoreboard import summary_line
 
                                     # Build episodic memory for this asset
-                                    symbol_memory = self._build_symbol_episodic_memory(symbol)
+                                    symbol_memory = TradingAgent._build_symbol_episodic_memory(self, symbol)
 
                                     # Validate with LLM Orchestrator
                                     validated_signal = self.components['llm_orchestrator'].validate_trade(
@@ -1774,7 +1774,7 @@ class TradingAgent:
                     dec['skip_reason'] = blocked
                     validated = {'action': 'hold', 'confidence': 0.0}
                 elif signals and proposed != 'hold' and llm:
-                    symbol_memory = self._build_symbol_episodic_memory(symbol)
+                    symbol_memory = TradingAgent._build_symbol_episodic_memory(self, symbol)
                     validated = llm.validate_trade(symbol, signals, symbol_data, None,
                                                    research_context=TradingAgent._nse_research(self, symbol),
                                                    episodic_memory=symbol_memory)

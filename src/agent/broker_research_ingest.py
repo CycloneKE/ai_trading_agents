@@ -173,10 +173,16 @@ class BrokerResearchIngest:
         """
         logger.info(f"Starting ingest of research PDF: {file_path}")
         
-        # 1. Parse PDF with full table & page structure
-        extracted = pdf_parser.extract_all(file_path)
-        text = extracted.get("text", "")
-        resolved_source = detect_research_source(text, os.path.basename(file_path), source)
+        # The page texts are read once, cheaply, to name the publisher and to
+        # tell a Market Pulse or a bond note (read exactly, below) from a
+        # research note. A file that cannot be read fails inside the try.
+        from src.agent import market_pulse
+        try:
+            texts = market_pulse.page_texts(file_path)
+        except Exception as e:
+            logger.warning(f"Could not read the pages of {file_path}: {e}")
+            texts = []
+        resolved_source = detect_research_source("\n".join(texts), os.path.basename(file_path), source)
         logger.info(f"Research publisher resolved: {resolved_source}")
         
         # Record upload in DB
@@ -186,8 +192,6 @@ class BrokerResearchIngest:
             # 0. AIB-AXYS's daily Market Pulse is market data, not a note
             #    with ratings: read its tables exactly (market_pulse.py)
             #    rather than asking for recommendations it does not contain.
-            from src.agent import market_pulse
-            texts = market_pulse.page_texts(file_path)
             if market_pulse.is_market_pulse(texts):
                 summary = market_pulse.ingest(file_path, texts)
                 self.escalation_manager.update_upload_status(

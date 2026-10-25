@@ -88,6 +88,7 @@ def test_an_agent_without_self_healing_still_answers(tmp_path, monkeypatch):
     users.write_text(json.dumps({'operator': {'password': bcrypt.hashpw(b'x', bcrypt.gensalt()).decode(), 'role': 'operator'}}))
     monkeypatch.setattr(auth, 'USERS_FILE', str(users))
     monkeypatch.setattr('src.utils.paths.DATA_DIR', tmp_path)
+    monkeypatch.setattr('src.agent.alerts.DATA_DIR', tmp_path)       # the alert log is read from here
     client = TradingAPI(SimpleNamespace(components={}, config={'test_mode': True}), {}).app.test_client()
     data = client.get('/api/agent-alerts', headers={'Authorization': f"Bearer {create_token('operator', 'operator')}"}).get_json()
     assert data['alerts'] == [] and data['live']['workers_down'] == []
