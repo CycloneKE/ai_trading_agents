@@ -1891,14 +1891,14 @@ class TradingAPI:
                         }]
                     else:
                         last_day = curve[-1].get('day')
-                        if last_day != today:
+                        if str(last_day) < today:
                             curve.append({
                                 'day': today,
                                 'cash_kes': float(acct_summary.get('cash_kes') or 0),
                                 'holdings_kes': float(acct_summary.get('holdings_kes') or 0),
                                 'equity_kes': cur_eq
                             })
-                        else:
+                        elif last_day == today:          # a later-dated point is left alone: the curve never runs backwards
                             curve[-1]['equity_kes'] = cur_eq
                             curve[-1]['cash_kes'] = float(acct_summary.get('cash_kes') or 0)
                             curve[-1]['holdings_kes'] = float(acct_summary.get('holdings_kes') or 0)

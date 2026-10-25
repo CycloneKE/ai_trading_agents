@@ -134,8 +134,10 @@ def test_a_live_price_already_stored_is_never_overwritten(data_dir):
     assert 'aib_market_pulse' not in (data_dir / 'nse_historical' / 'KCB.csv').read_text()
 
 
-def test_the_agent_uses_what_the_report_says(data_dir):
+def test_the_agent_uses_what_the_report_says(data_dir, monkeypatch):
     mp.ingest('report.pdf', TEXTS)
+    real = mp.latest_rates                                       # a report counts for 30 days: read it as of the report's week
+    monkeypatch.setattr(mp, 'latest_rates', lambda *a, **k: real(today=date(2026, 9, 24)))
     today = date(2026, 9, 24)
     ctx = mp.research_context('ABSA', today=today)
     assert 'P/E 8.23x' in ctx['rationale'] and 'Appointment of Managing Director' in ctx['rationale']

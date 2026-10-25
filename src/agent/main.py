@@ -442,6 +442,44 @@ class TradingAgent:
             except Exception as e:
                 logger.debug(f"Could not forget the peak for {symbol}: {e}")
 
+    def _forget_peak_on_fill(self, symbol: str, coid: str) -> None:
+        """Forget `symbol`'s trailing-stop peak once the closing order `coid` has
+        filled, not when it is merely accepted. A broker can still reject or
+        cancel an order it accepted; the position is then still held, and
+        wiping its peak would put the trailing stop closer to the market than
+        it should be. With no journal to confirm a fill there is nothing to
+        wait for, so the peak goes at once."""
+        journal = getattr(self, 'order_journal', None)
+        if journal is None or not coid:
+            TradingAgent._forget_peak(self, symbol)
+            return
+        pending = getattr(self, '_pending_peak_forgets', None)
+        if pending is None:
+            pending = self._pending_peak_forgets = {}
+        pending[symbol] = (coid, time.time())
+
+    def _settle_peak_forgets(self, max_age_s: float = 2 * 86400) -> None:
+        """Called after the journal's fills are synced: forget the peak of each
+        symbol whose closing order filled, and stop waiting on one that was
+        rejected, cancelled, failed or has been open too long."""
+        from src.agent.order_journal import FINAL_STATUSES
+        pending = getattr(self, '_pending_peak_forgets', None)
+        journal = getattr(self, 'order_journal', None)
+        if not pending or journal is None:
+            return
+        for symbol, (coid, since) in list(pending.items()):
+            try:
+                row = journal.get(coid)
+            except Exception as e:
+                logger.debug(f"Could not look up {coid} for {symbol}'s peak: {e}")
+                continue
+            status = str((row or {}).get('status') or '')
+            if status == 'filled':
+                TradingAgent._forget_peak(self, symbol)
+                pending.pop(symbol, None)
+            elif row is None or status in FINAL_STATUSES or time.time() - since > max_age_s:
+                pending.pop(symbol, None)
+
     def _books(self):
         """Every connected book the loop trades: the primary broker's, then
         the forex paper book when there is one."""
@@ -1041,6 +1079,7 @@ class TradingAgent:
                         books = TradingAgent._books(self)
                         for book in books:
                             self.order_journal.sync_fills(book)
+                        TradingAgent._settle_peak_forgets(self)
                         # Feed real broker positions into the risk manager
                         # so trailing stops fire and /api/risk-metrics
                         # reflects actual exposure; the forex book's too,
@@ -1334,7 +1373,7 @@ class TradingAgent:
                                     from src.agent.verdict_scoreboard import summary_line
 
                                     # Build episodic memory for this asset
-                                    symbol_memory = self._build_symbol_episodic_memory(symbol)
+                                    symbol_memory = TradingAgent._build_symbol_episodic_memory(self, symbol)
 
                                     # Validate with LLM Orchestrator
                                     validated_signal = self.components['llm_orchestrator'].validate_trade(
@@ -1735,7 +1774,7 @@ class TradingAgent:
                     dec['skip_reason'] = blocked
                     validated = {'action': 'hold', 'confidence': 0.0}
                 elif signals and proposed != 'hold' and llm:
-                    symbol_memory = self._build_symbol_episodic_memory(symbol)
+                    symbol_memory = TradingAgent._build_symbol_episodic_memory(self, symbol)
                     validated = llm.validate_trade(symbol, signals, symbol_data, None,
                                                    research_context=TradingAgent._nse_research(self, symbol),
                                                    episodic_memory=symbol_memory)
@@ -2621,7 +2660,7 @@ class TradingAgent:
                             # PLACE THE REAL ORDER
                             order_result = broker.place_order(order)
                             if order_result and action == 'sell' and sell_qty >= held_qty * 0.999:
-                                TradingAgent._forget_peak(self, symbol)           # a full exit: the peak goes with it
+                                TradingAgent._forget_peak_on_fill(self, symbol, client_order_id)   # a full exit: the peak goes with it once it fills
                             if self.order_journal:
                                 if order_result:
                                     self.order_journal.mark_submitted(
@@ -2740,7 +2779,7 @@ class TradingAgent:
                         self.order_journal.mark_failed(coid, 'flatten order got no response')
                 if resp:
                     result['close_orders'] += 1
-                    TradingAgent._forget_peak(self, p.symbol)
+                    TradingAgent._forget_peak_on_fill(self, p.symbol, coid)
                     logger.warning(f"Kill switch: closing {p.quantity} {p.symbol} ({coid})")
                 else:
                     result['errors'].append(f'close {p.symbol}: no response')
@@ -2936,7 +2975,7 @@ class TradingAgent:
                                 self.order_journal.mark_failed(coid, 'place_order returned no response')
                         if result:
                             logger.info(f"Stop-loss order placed for {position.symbol}: {result.order_id}")
-                            TradingAgent._forget_peak(self, position.symbol)
+                            TradingAgent._forget_peak_on_fill(self, position.symbol, coid)
                             if self.monitoring_service:
                                 self.monitoring_service.record_trade(
                                     action='stop_loss_sell',
@@ -2982,7 +3021,7 @@ class TradingAgent:
                                         self.order_journal.mark_failed(coid, 'place_order returned no response')
                                 if result:
                                     logger.info(f"Trailing stop-loss order placed for {position.symbol}: {result.order_id}")
-                                    TradingAgent._forget_peak(self, position.symbol)
+                                    TradingAgent._forget_peak_on_fill(self, position.symbol, coid)
                                     if self.monitoring_service:
                                         self.monitoring_service.record_trade(
                                             action='trailing_stop_sell',

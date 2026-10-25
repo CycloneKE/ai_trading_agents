@@ -125,3 +125,21 @@ def test_plain_text_is_accepted():
     text = ('Dividend of KES 1.50 per share was declared. ' * 8).encode()
     out = sf.fetch('https://a.example/x.txt', Session(Resp(body=text, ctype='text/plain')), PUBLIC)
     assert 'KES 1.50' in out['text']
+
+
+def test_a_server_that_trickles_bytes_is_cut_off_at_the_overall_deadline():
+    ticks = iter(range(0, 1000, 10))                      # each look at the clock is 10 s later
+
+    class Slow(Resp):
+        def iter_content(self, n):
+            for _ in range(50):
+                yield b'x' * 10
+
+    with pytest.raises(sf.FetchError, match='too long'):
+        sf.fetch('https://example.com/a', Session(Slow(body=b'')), PUBLIC, deadline_s=30,
+                 clock=lambda: next(ticks))
+
+
+def test_a_normal_download_is_unaffected_by_the_deadline():
+    page = sf.fetch('https://example.com/a', Session(Resp(body=PAGE.encode())), PUBLIC)
+    assert 'Acme grew profit' in page['text']

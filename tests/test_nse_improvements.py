@@ -1,7 +1,7 @@
 import pytest
 from src.connectors.nse_universe import nse_tick_size, quantize_nse_price
 from src.agent.nse_order_queue import NseOrderQueue
-from src.agent.alerts import EmailAlerter
+from src.agent.alerts import AlertLog, EmailAlerter
 
 
 def test_nse_tick_size_bands():
@@ -79,7 +79,7 @@ def test_order_queue_triggers_alerter(tmp_path, monkeypatch):
     assert dispatched[0]['quantity'] == 1000
 
 
-def test_telegram_alert_delivery(monkeypatch):
+def test_telegram_alert_delivery(monkeypatch, tmp_path):
     sent_payloads = []
 
     class FakeResponse:
@@ -95,7 +95,8 @@ def test_telegram_alert_delivery(monkeypatch):
         'TELEGRAM_BOT_TOKEN': 'test-bot-token-12345',
         'TELEGRAM_CHAT_ID': '12345678'
     }
-    alerter = EmailAlerter(config={}, env=env, background=False)
+    alerter = EmailAlerter(config={}, env=env, background=False,
+                           log=AlertLog(str(tmp_path / 'alerts.jsonl')))   # never the real alert log
     assert alerter.telegram_enabled is True
 
     alerter.notify_nse_ticket({
