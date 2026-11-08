@@ -388,3 +388,56 @@ def test_a_market_with_its_own_settings_is_left_out_of_tuning_the_base_settings(
     assert all(s == ['AAPL'] for s in seen)
     plain = tuner.tune_one('mean_reversion', series)                        # no override: forex stays in
     assert 'left_out' not in plain and plain['symbols'] == 2
+
+
+# ------------------------------------------------- net of cost (the settle log)
+
+def test_every_settled_outcome_carries_its_cost_and_the_move_after_it():
+    vals = [100.0] * 10 + [110.0] * 10
+    sigs = [{'symbol': 'AAPL', 'day': START + timedelta(days=6), 'source': 'ensemble', 'action': 'buy',
+             'market': 'us_equity', 'version': 'v1'}]
+    [r] = sl.outcomes_for(sigs, lambda s: closes(vals), horizons=(5,), config=CONFIG)
+    from src.agent.cost_model import round_trip_pct
+    assert r['cost'] == pytest.approx(round_trip_pct('AAPL', CONFIG)) and r['cost'] > 0
+    assert r['net_ret'] == pytest.approx(r['ret'] - r['cost'])
+
+
+def test_the_cost_and_net_move_are_stored_and_final(tmp_path):
+    ledger = sl.SignalLedger(tmp_path / 'l.db')
+    ledger.record([{**outcome(ret=0.02), 'cost': 0.003, 'net_ret': 0.017}])
+    ledger.record([{**outcome(ret=0.02), 'cost': 0.5, 'net_ret': -0.48}])      # same key: ignored
+    [r] = ledger.rows()
+    assert r['cost'] == 0.003 and r['net_ret'] == pytest.approx(0.017)
+    ledger.close()
+
+
+def test_a_ledger_from_before_costs_were_kept_still_opens_and_reads(tmp_path):
+    import sqlite3
+    path = str(tmp_path / 'old.db')
+    conn = sqlite3.connect(path)
+    conn.executescript("""CREATE TABLE signal_outcomes (symbol TEXT NOT NULL, day TEXT NOT NULL,
+        source TEXT NOT NULL, action TEXT NOT NULL, horizon INTEGER NOT NULL, market TEXT, ret REAL NOT NULL,
+        chance REAL NOT NULL, version TEXT, computed_at TEXT NOT NULL,
+        PRIMARY KEY (symbol, day, source, action, horizon));
+        INSERT INTO signal_outcomes VALUES ('AAPL','2026-01-06','momentum','buy',5,'us_equity',0.01,0.5,'v1','t');""")
+    conn.commit(); conn.close()
+    ledger = sl.SignalLedger(path)
+    [r] = ledger.rows()
+    assert r['net_ret'] is None and r['cost'] is None                         # old rows are not guessed at
+    ledger.record([{**outcome(day=9), 'cost': 0.004, 'net_ret': 0.016}])
+    assert len(ledger.rows()) == 2
+    ledger.close()
+
+
+def test_skill_reports_the_move_after_costs_so_a_gain_that_costs_eat_shows():
+    rows = [{**outcome(ret=0.002, chance=0.5, day=d), 'cost': 0.004, 'net_ret': -0.002} for d in range(80)]
+    [s] = sl.skill(rows, 5, 50)
+    assert s['avg_move_pct'] == 0.2 and s['net_move_pct'] == -0.2 and s['net_n'] == 80
+
+
+def test_net_move_counts_only_outcomes_whose_cost_is_known():
+    rows = [outcome(ret=0.01, day=1), {**outcome(ret=0.01, day=2), 'cost': 0.004, 'net_ret': 0.006}]
+    [s] = sl.skill(rows, 5, 1)
+    assert s['net_n'] == 1 and s['net_move_pct'] == 0.6
+    [none] = sl.skill([outcome(ret=0.01)], 5, 1)
+    assert none['net_move_pct'] is None and none['net_n'] == 0

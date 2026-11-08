@@ -24,13 +24,21 @@ export function useIsMobile() {
 }
 
 // A card, with less padding on a phone.
-export const card = (mobile, extra) => ({ ...glassCard, padding: mobile ? '16px' : '24px', ...extra });
+export const card = (mobile, extra) => ({
+  ...glassCard,
+  padding: mobile ? '16px' : '22px',
+  borderRadius: '16px',
+  border: '1px solid rgba(255, 255, 255, 0.08)',
+  background: 'rgba(11, 17, 32, 0.75)',
+  backdropFilter: 'blur(16px)',
+  ...extra,
+});
 
 // Columns on a wide screen, one column on a phone.
 export const columns = (template, mobile, gap) => ({
   display: 'grid',
   gridTemplateColumns: mobile ? 'minmax(0, 1fr)' : template,
-  gap: gap ?? (mobile ? '16px' : '24px'),
+  gap: gap ?? (mobile ? '14px' : '20px'),
 });
 
 // A GET against the trading API with the saved login.
@@ -91,46 +99,118 @@ export const gainColor = (v) => ((num(v) ?? 0) >= 0 ? theme.colors.primary : the
 
 // ------------------------------------------------------------- components
 
-export const SectionHeader = ({ title, icon: Icon, right }) => (
-  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '16px', flexWrap: 'wrap' }}>
-    {Icon && <Icon size={18} color={theme.colors.secondary} />}
-    <h3 style={{ fontSize: '16px', fontWeight: '700', margin: 0, color: '#fff' }}>{title}</h3>
-    <div style={{ height: '1px', flex: 1, minWidth: '20px', background: `linear-gradient(90deg, ${theme.colors.border}, transparent)` }} />
-    {right}
+export const SectionHeader = ({ title, icon: Icon, badge, desc, right }) => (
+  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '16px', flexWrap: 'wrap' }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+      {Icon && (
+        <div style={{
+          width: '32px', height: '32px', borderRadius: '10px',
+          background: 'rgba(14, 165, 233, 0.1)', border: '1px solid rgba(14, 165, 233, 0.25)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <Icon size={16} color={theme.colors.secondary} />
+        </div>
+      )}
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <h3 style={{ fontSize: '15px', fontWeight: '800', margin: 0, color: '#fff', letterSpacing: '0.2px' }}>{title}</h3>
+          {badge && (
+            <span style={{ fontSize: '10px', fontWeight: 800, padding: '2px 7px', borderRadius: '6px', background: 'rgba(255,255,255,0.06)', color: theme.colors.textSecondary, border: `1px solid ${theme.colors.border}` }}>
+              {badge}
+            </span>
+          )}
+        </div>
+        {desc && <p style={{ margin: '2px 0 0', fontSize: '11px', color: theme.colors.textMuted }}>{desc}</p>}
+      </div>
+    </div>
+    {right && <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>{right}</div>}
   </div>
 );
 
 export const StatCard = ({ label, value, icon: Icon, color }) => (
-  <div style={{ ...glassCard, padding: '16px', minWidth: 0 }}>
+  <div style={{
+    ...glassCard,
+    padding: '18px 20px',
+    borderRadius: '14px',
+    border: '1px solid rgba(255, 255, 255, 0.08)',
+    background: 'rgba(11, 17, 32, 0.75)',
+    position: 'relative',
+    overflow: 'hidden',
+  }}>
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-      <span style={{ fontSize: '11px', fontWeight: '800', color: theme.colors.textMuted, textTransform: 'uppercase' }}>{label}</span>
-      {Icon && <Icon size={16} color={color} />}
+      <span style={{ fontSize: '11px', fontWeight: '800', color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.6px' }}>{label}</span>
+      {Icon && (
+        <div style={{ width: '28px', height: '28px', borderRadius: '8px', background: `${color}15`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Icon size={15} color={color} />
+        </div>
+      )}
     </div>
-    <div style={{ fontSize: '22px', fontWeight: '800', color: '#fff', overflowWrap: 'anywhere' }}>{value}</div>
+    <div style={{ fontSize: '24px', fontWeight: '800', color: '#fff', fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.5px' }}>{value}</div>
   </div>
 );
 
 // A headline figure. `tone` colours the second line; by default a leading
 // minus or a falling arrow reads as bad news.
 export const HUDCard = ({ title, value, subValue, icon: Icon, color, footer, tone, onClick }) => {
-  const subColor = tone || (String(subValue || '').match(/^-|↘/) ? theme.colors.danger : theme.colors.primary);
+  const isLoss = String(subValue || '').match(/^-|↘/);
+  const subColor = tone || (isLoss ? theme.colors.danger : theme.colors.primary);
   return (
-    <div onClick={onClick} style={{ ...glassCard, padding: '16px 18px', position: 'relative', overflow: 'hidden', minWidth: 0, cursor: onClick ? 'pointer' : 'default' }}>
-      <div style={{ position: 'absolute', right: '-10px', bottom: '-10px', opacity: 0.05 }}>
-        <Icon size={90} color={color} />
+    <div onClick={onClick} style={{
+      ...glassCard,
+      padding: '18px 20px',
+      position: 'relative',
+      overflow: 'hidden',
+      borderRadius: '16px',
+      background: 'linear-gradient(180deg, rgba(15, 23, 42, 0.8) 0%, rgba(11, 17, 32, 0.9) 100%)',
+      border: '1px solid rgba(255, 255, 255, 0.08)',
+      minWidth: 0,
+      cursor: onClick ? 'pointer' : 'default',
+      transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+    }}>
+      <div style={{ position: 'absolute', right: '-8px', bottom: '-8px', opacity: 0.04, pointerEvents: 'none' }}>
+        <Icon size={96} color={color} />
       </div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '6px', gap: '8px' }}>
-        <p style={{ fontSize: '11px', color: theme.colors.textSecondary, margin: 0, fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.8px' }}>{title}</p>
-        <div style={{ backgroundColor: `${color}20`, padding: '5px', borderRadius: '8px', color, display: 'flex' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px', gap: '8px' }}>
+        <span style={{ fontSize: '11px', color: theme.colors.textMuted, margin: 0, fontWeight: '800', textTransform: 'uppercase', letterSpacing: '0.8px' }}>{title}</span>
+        <div style={{
+          backgroundColor: `${color}18`,
+          border: `1px solid ${color}35`,
+          width: '30px', height: '30px',
+          borderRadius: '10px',
+          color,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
           <Icon size={16} />
         </div>
       </div>
-      <h2 style={{ fontSize: 'clamp(18px, 4.5vw, 26px)', fontWeight: '800', margin: 0, color: '#fff', overflowWrap: 'anywhere' }}>{value}</h2>
+      <h2 style={{
+        fontSize: 'clamp(20px, 4.5vw, 26px)',
+        fontWeight: '900',
+        margin: '2px 0 0 0',
+        color: '#fff',
+        fontVariantNumeric: 'tabular-nums',
+        letterSpacing: '-0.5px',
+        overflowWrap: 'anywhere',
+      }}>{value}</h2>
       {subValue != null && (
-        <p style={{ fontSize: '12px', margin: '4px 0 0 0', color: subColor }}>{subValue}</p>
+        <div style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '4px',
+          fontSize: '12px',
+          fontWeight: '700',
+          marginTop: '6px',
+          padding: '2px 8px',
+          borderRadius: '6px',
+          background: `${subColor}15`,
+          color: subColor,
+          fontVariantNumeric: 'tabular-nums',
+        }}>
+          {subValue}
+        </div>
       )}
       {footer && (
-        <p style={{ fontSize: '11px', margin: '6px 0 0 0', color: theme.colors.textMuted, position: 'relative', zIndex: 1 }}>{footer}</p>
+        <p style={{ fontSize: '11px', margin: '8px 0 0 0', color: theme.colors.textMuted, position: 'relative', zIndex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{footer}</p>
       )}
     </div>
   );
@@ -140,7 +220,7 @@ export const HUDCard = ({ title, value, subValue, icon: Icon, color, footer, ton
 export const HudRow = ({ mobile, children }) => (
   <div style={{
     display: 'grid', gap: mobile ? '10px' : '16px',
-    gridTemplateColumns: mobile ? 'repeat(2, minmax(0, 1fr))' : 'repeat(auto-fit, minmax(200px, 1fr))',
+    gridTemplateColumns: mobile ? 'repeat(2, minmax(0, 1fr))' : 'repeat(auto-fit, minmax(210px, 1fr))',
   }}>
     {children}
   </div>
@@ -149,19 +229,31 @@ export const HudRow = ({ mobile, children }) => (
 // Section tabs inside a page (for example NSE: Market Watch, Paper Account,
 // Order Tickets). Scrolls sideways on a narrow screen instead of wrapping.
 export const SubTabs = ({ tabs, active, onChange }) => (
-  <div style={{ display: 'flex', gap: '6px', overflowX: 'auto', paddingBottom: '2px', marginBottom: '18px', WebkitOverflowScrolling: 'touch' }}>
+  <div style={{
+    display: 'flex', gap: '6px', overflowX: 'auto', padding: '4px', marginBottom: '18px',
+    WebkitOverflowScrolling: 'touch', background: 'rgba(15, 23, 42, 0.65)',
+    borderRadius: '12px', border: '1px solid rgba(255, 255, 255, 0.07)', width: 'fit-content',
+    maxWidth: '100%',
+  }}>
     {tabs.map(({ id, label, badge }) => {
       const on = id === active;
       return (
         <button key={id} onClick={() => onChange(id)} style={{
-          flexShrink: 0, background: on ? `${theme.colors.primary}22` : 'rgba(255,255,255,0.04)',
-          border: `1px solid ${on ? theme.colors.primary + '80' : theme.colors.border}`,
-          color: on ? '#fff' : theme.colors.textSecondary, borderRadius: '999px',
-          padding: '8px 14px', fontSize: '12px', fontWeight: 800, cursor: 'pointer', letterSpacing: '0.3px',
+          flexShrink: 0,
+          background: on ? 'linear-gradient(135deg, rgba(16, 185, 129, 0.22) 0%, rgba(14, 165, 233, 0.15) 100%)' : 'transparent',
+          border: `1px solid ${on ? theme.colors.primary + '70' : 'transparent'}`,
+          color: on ? '#fff' : theme.colors.textSecondary,
+          borderRadius: '9px',
+          padding: '8px 16px',
+          fontSize: '12px',
+          fontWeight: 800,
+          cursor: 'pointer',
+          letterSpacing: '0.3px',
+          transition: 'all 0.15s ease',
         }}>
           {label}
           {badge ? (
-            <span style={{ marginLeft: '6px', background: theme.colors.warning, color: '#000', borderRadius: '999px', padding: '0 6px', fontSize: '10px' }}>{badge}</span>
+            <span style={{ marginLeft: '6px', background: theme.colors.warning, color: '#000', borderRadius: '999px', padding: '1px 7px', fontSize: '10px', fontWeight: 800 }}>{badge}</span>
           ) : null}
         </button>
       );
@@ -170,20 +262,37 @@ export const SubTabs = ({ tabs, active, onChange }) => (
 );
 
 export const Empty = ({ children }) => (
-  <div style={{ padding: '20px', textAlign: 'center', color: theme.colors.textMuted, fontSize: '13px' }}>{children}</div>
+  <div style={{ padding: '32px 20px', textAlign: 'center', color: theme.colors.textMuted, fontSize: '13px', border: '1px dashed rgba(255, 255, 255, 0.08)', borderRadius: '12px' }}>{children}</div>
 );
 
 export const Note = ({ children, tone }) => (
   <div style={{
-    padding: '10px 12px', borderRadius: '8px', fontSize: '12px', lineHeight: 1.5,
+    padding: '12px 14px', borderRadius: '10px', fontSize: '12px', lineHeight: 1.5,
     background: tone ? `${tone}15` : 'rgba(255,255,255,0.03)',
-    border: `1px solid ${tone ? tone + '55' : theme.colors.border}`,
+    border: `1px solid ${tone ? tone + '45' : 'rgba(255, 255, 255, 0.08)'}`,
     color: tone || theme.colors.textSecondary,
   }}>
     {children}
   </div>
 );
 
-export const th = { padding: '10px 8px', fontWeight: 700, whiteSpace: 'nowrap' };
-export const td = { padding: '10px 8px' };
-export const tableHeadRow = { textAlign: 'left', color: theme.colors.textMuted, fontSize: '11px', borderBottom: `1px solid ${theme.colors.border}` };
+export const th = {
+  padding: '12px 10px',
+  fontWeight: 800,
+  fontSize: '11px',
+  textTransform: 'uppercase',
+  letterSpacing: '0.6px',
+  color: theme.colors.textMuted,
+  whiteSpace: 'nowrap',
+};
+
+export const td = {
+  padding: '12px 10px',
+  fontSize: '13px',
+  fontVariantNumeric: 'tabular-nums',
+};
+
+export const tableHeadRow = {
+  textAlign: 'left',
+  borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+};

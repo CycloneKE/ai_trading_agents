@@ -309,3 +309,42 @@ def describe(review: Dict[str, Any]) -> str:
     made = [f"{s['target']} {s['current']} -> {s['proposed']}" for s in review.get('suggestions') or []]
     return (f"{len(made)} suggestion(s) {'; '.join(made)}" if made else 'no changes suggested') + \
         (f"; {len(review.get('rejected') or [])} set aside" if review.get('rejected') else '')
+
+
+def apply_overlay(config: Dict[str, Any], overlay_path: str) -> Dict[str, Any]:
+    """Apply dotted key overrides from config_overlay.json to config dict in place."""
+    if not os.path.exists(overlay_path):
+        return config
+    try:
+        with open(overlay_path, 'r', encoding='utf-8') as f:
+            overlay = json.load(f)
+        for key, val in overlay.items():
+            if str(key).startswith('_'):
+                continue
+            parts = key.split('.')
+            target = config
+            for p in parts[:-1]:
+                target = target.setdefault(p, {})
+            target[parts[-1]] = val
+    except Exception as e:
+        logger.warning(f"Failed to apply config overlay from {overlay_path}: {e}")
+    return config
+
+
+def _write_overlay_key(key: str, value: Any, overlay_path: str) -> None:
+    """Write or update a key in config_overlay.json."""
+    data = {}
+    if os.path.exists(overlay_path):
+        try:
+            with open(overlay_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    data[key] = value
+    data['_updated_at'] = datetime.now(timezone.utc).isoformat()
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(overlay_path)), exist_ok=True)
+        with open(overlay_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to write overlay key {key} to {overlay_path}: {e}")

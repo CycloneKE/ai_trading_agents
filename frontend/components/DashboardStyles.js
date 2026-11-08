@@ -1,44 +1,59 @@
 /**
  * Premium Dashboard Design System
- * Focuses on Glassmorphism, Sophisticated Dark Tones, and High-Contrast Accents.
+ * Focuses on Glassmorphism, Sophisticated Slate Tones, and High-Contrast Accents.
  */
 
 export const theme = {
   colors: {
-    bg: '#020617',                   // Deepest Slate
-    bgSecondary: '#0f172a',          // Slate-900 
-    surface: 'rgba(30, 41, 59, 0.5)', // Slate-800 with transparency
-    border: 'rgba(51, 65, 85, 0.5)',  // Slate-700 with transparency
+    bg: '#030712',                     // Deepest Obsidian Slate
+    bgSecondary: '#0b1120',            // Slate-950
+    surface: 'rgba(15, 23, 42, 0.65)',  // Slate-900 with glass transparency
+    surfaceElevated: 'rgba(30, 41, 59, 0.8)', // Slate-800 elevated glass
+    border: 'rgba(255, 255, 255, 0.08)', // Crisp translucent border
+    borderHover: 'rgba(255, 255, 255, 0.18)',
+    borderActive: 'rgba(16, 185, 129, 0.5)',
     
     // Semantic Accents
-    primary: '#10b981',   // Emerald (Growth/Success)
-    secondary: '#0ea5e9', // Sky (Info/System)
-    accent: '#8b5cf6',    // Violet (AI/Intelligence)
-    warning: '#f59e0b',   // Amber
-    danger: '#f43f5e',    // Rose
+    primary: '#10b981',   // Emerald (Growth / Profit / Healthy)
+    primaryLight: '#34d399',
+    secondary: '#0ea5e9', // Sky (System / Telemetry)
+    accent: '#8b5cf6',    // Violet (AI Models / Intelligence)
+    warning: '#f59e0b',   // Amber (Pre-market / Warnings)
+    danger: '#f43f5e',    // Rose (Loss / Risk / Halted)
     
     text: '#f8fafc',          // Slate-50
     textSecondary: '#94a3b8', // Slate-400
     textMuted: '#64748b',     // Slate-500
   },
   
+  radius: {
+    xs: '4px',
+    sm: '8px',
+    md: '12px',
+    lg: '16px',
+    xl: '20px',
+    full: '9999px',
+  },
+
   glass: {
-    backdropFilter: 'blur(12px) saturate(180%)',
-    WebkitBackdropFilter: 'blur(12px) saturate(180%)',
-    backgroundColor: 'rgba(17, 25, 40, 0.75)',
-    border: '1px solid rgba(255, 255, 255, 0.125)',
+    backdropFilter: 'blur(16px) saturate(180%)',
+    WebkitBackdropFilter: 'blur(16px) saturate(180%)',
+    backgroundColor: 'rgba(11, 17, 32, 0.75)',
+    border: '1px solid rgba(255, 255, 255, 0.08)',
     borderRadius: '16px',
-    boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.37)',
+    boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.45), inset 0 1px 0 0 rgba(255, 255, 255, 0.05)',
   },
   
   animations: {
-    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-    hover: 'translateY(-2px) scale(1.01)',
+    transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+    hover: 'translateY(-2px)',
   },
   
   shadows: {
-    glow: '0 0 15px rgba(16, 185, 129, 0.2)',
-    inner: 'inset 0 2px 4px 0 rgba(0, 0, 0, 0.06)',
+    glowEmerald: '0 0 20px rgba(16, 185, 129, 0.25)',
+    glowCyan: '0 0 20px rgba(14, 165, 233, 0.25)',
+    glowRose: '0 0 20px rgba(244, 63, 94, 0.25)',
+    inner: 'inset 0 1px 2px 0 rgba(0, 0, 0, 0.25)',
   }
 };
 
@@ -52,8 +67,8 @@ export const interactiveGlassCard = {
   ...glassCard,
   cursor: 'pointer',
   ':hover': {
-    backgroundColor: 'rgba(30, 41, 59, 0.8)',
+    backgroundColor: 'rgba(30, 41, 59, 0.85)',
     transform: theme.animations.hover,
-    borderColor: theme.colors.primary,
+    borderColor: theme.colors.borderHover,
   }
 };

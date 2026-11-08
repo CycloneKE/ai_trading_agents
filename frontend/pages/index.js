@@ -32,11 +32,11 @@ export default function App() {
         {/* Lay the page out at the phone's own width, using the full screen
             on phones with rounded corners or a notch. */}
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-        <meta name="theme-color" content="#020617" />
-        <meta name="description" content="Premium AI-driven trading terminal with real-time market intelligence and risk management." />
+        <meta name="theme-color" content="#030712" />
+        <meta name="description" content="Institutional AI-driven trading terminal with multi-region intelligence, real-time risk management, and automated order routing." />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
+        <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
       </Head>
       {!authToken ? (
         <Login onLoginSuccess={handleLoginSuccess} />
@@ -47,23 +47,28 @@ export default function App() {
         body {
           margin: 0;
           padding: 0;
-          background-color: #020617;
+          background-color: #030712;
           color: #f8fafc;
+          font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
           -webkit-font-smoothing: antialiased;
           -moz-osx-font-smoothing: grayscale;
+          background-image: radial-gradient(circle at 50% 0%, rgba(16, 185, 129, 0.04) 0%, transparent 45%),
+                            radial-gradient(circle at 100% 100%, rgba(14, 165, 233, 0.03) 0%, transparent 45%);
+          background-attachment: fixed;
         }
         * {
           box-sizing: border-box;
         }
         @keyframes pulse {
           0%, 100% { opacity: 1; }
-          50% { opacity: 0.4; }
+          50% { opacity: 0.35; }
         }
         ::-webkit-scrollbar {
-          width: 8px;
+          width: 6px;
+          height: 6px;
         }
         ::-webkit-scrollbar-track {
-          background: #020617;
+          background: #030712;
         }
         ::-webkit-scrollbar-thumb {
           background: #1e293b;

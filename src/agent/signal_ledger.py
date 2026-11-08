@@ -24,9 +24,14 @@ strategy's vote in each market by that evidence, inside the same guardrails as
 every other adjustment (guardrails.signal_tilt): nothing under 50 signals,
 never more than 0.5x to 1.5x, never switching a strategy off.
 
+Each outcome also records the round-trip cost assumed at the time (cost_model)
+and the move after it (`net_ret`), so a signal whose gain is smaller than its
+cost shows as the loss it would have been. Rows recorded before this was kept
+have no cost and are not guessed at.
+
 What it does not do: it measures a strategy's raw signal, before the regime
-filter and the ensemble vote, and it ignores costs. It is evidence of
-direction, not of profit.
+filter and the ensemble vote. `hit_rate` and `lift` are about direction only;
+`net_move_pct` is the one that speaks of profit.
 """
 import json
 import logging
@@ -62,6 +67,8 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
     market      TEXT,
     ret         REAL NOT NULL,      -- move in the signal's direction
     chance      REAL NOT NULL,      -- how often that direction happened anyway
+    cost        REAL,               -- round-trip cost then assumed (fraction); NULL on older rows
+    net_ret     REAL,               -- ret less cost; NULL on older rows
     version     TEXT,               -- code version that made the signal
     computed_at TEXT NOT NULL,
     PRIMARY KEY (symbol, day, source, action, horizon)
@@ -125,9 +132,12 @@ def signals_from(decisions: Iterable[Dict[str, Any]], config: Optional[Dict[str,
 
 
 def outcomes_for(sigs: Iterable[Dict[str, Any]], closes_for: Callable[[str], Dict[date, float]],
-                 horizons: Iterable[int] = HORIZONS) -> List[Dict[str, Any]]:
-    """What each signal did over each horizon, for those whose outcome is known."""
+                 horizons: Iterable[int] = HORIZONS, config: Optional[Dict[str, Any]] = None
+                 ) -> List[Dict[str, Any]]:
+    """What each signal did over each horizon, for those whose outcome is known,
+    with the round-trip cost of acting on it and the move after that cost."""
     from src.agent.ai_scorecard import forward_return
+    from src.agent.cost_model import round_trip_pct
     from src.agent.scorecard import _base_rate
     cache: Dict[str, Tuple[Dict[date, float], List[date]]] = {}
     base: Dict[Tuple[str, int], Optional[float]] = {}
@@ -151,7 +161,13 @@ def outcomes_for(sigs: Iterable[Dict[str, Any]], closes_for: Callable[[str], Dic
             if up is None:
                 continue
             buy = s['action'] == 'buy'
-            rows.append({**s, 'horizon': int(h), 'ret': r if buy else -r, 'chance': up if buy else 1 - up})
+            ret = r if buy else -r
+            try:
+                cost = float(round_trip_pct(sym, config))
+            except Exception:
+                cost = None
+            rows.append({**s, 'horizon': int(h), 'ret': ret, 'chance': up if buy else 1 - up,
+                         'cost': cost, 'net_ret': None if cost is None else ret - cost})
     return rows
 
 
@@ -167,6 +183,10 @@ class SignalLedger:
         self._conn = sqlite3.connect(self.path, check_same_thread=False, timeout=30.0)
         self._conn.execute('PRAGMA journal_mode=WAL')
         self._conn.executescript(_SCHEMA)
+        have = {r[1] for r in self._conn.execute("PRAGMA table_info(signal_outcomes)")}
+        for col in ('cost', 'net_ret'):               # a ledger from before costs were kept
+            if col not in have:
+                self._conn.execute(f"ALTER TABLE signal_outcomes ADD COLUMN {col} REAL")
         self._conn.commit()
 
     def record(self, rows: Iterable[Dict[str, Any]], now: Optional[datetime] = None) -> int:
@@ -174,12 +194,13 @@ class SignalLedger:
         how many were new."""
         stamp = (now or datetime.now(timezone.utc)).isoformat(timespec='seconds')
         data = [(r['symbol'], str(r['day']), r['source'], r['action'], int(r['horizon']), r.get('market'),
-                 float(r['ret']), float(r['chance']), r.get('version'), stamp) for r in rows]
+                 float(r['ret']), float(r['chance']), r.get('cost'), r.get('net_ret'), r.get('version'), stamp)
+                for r in rows]
         with self._lock:
             before = self._conn.total_changes
             self._conn.executemany(
                 "INSERT OR IGNORE INTO signal_outcomes (symbol, day, source, action, horizon, market, ret,"
-                " chance, version, computed_at) VALUES (?,?,?,?,?,?,?,?,?,?)", data)
+                " chance, cost, net_ret, version, computed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", data)
             self._conn.commit()
             return self._conn.total_changes - before
 
@@ -190,7 +211,7 @@ class SignalLedger:
                config: Optional[Dict[str, Any]] = None, horizons: Iterable[int] = HORIZONS,
                now: Optional[datetime] = None) -> int:
         """Record the outcomes now known for the signals in `decisions`."""
-        return self.record(outcomes_for(signals_from(decisions, config), closes_for, horizons), now)
+        return self.record(outcomes_for(signals_from(decisions, config), closes_for, horizons, config), now)
 
     def close(self) -> None:
         with self._lock:
@@ -208,7 +229,9 @@ def read_ledger(path: str, since_day: Optional[str] = None) -> List[Dict[str, An
         return []
     try:
         conn.row_factory = sqlite3.Row
-        sql = "SELECT symbol, day, source, action, horizon, market, ret, chance, version FROM signal_outcomes"
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(signal_outcomes)")}
+        extra = ", ".join(c if c in cols else f"NULL AS {c}" for c in ('cost', 'net_ret'))
+        sql = f"SELECT symbol, day, source, action, horizon, market, ret, chance, {extra}, version FROM signal_outcomes"
         rows = conn.execute(sql + (" WHERE day >= ?" if since_day else "") + " ORDER BY day",
                             (since_day,) if since_day else ()).fetchall()
         return [dict(r) for r in rows]
@@ -268,11 +291,14 @@ def skill(rows: Iterable[Dict[str, Any]], horizon: int = 5, min_signals: int = 3
         rate, chance = hits / n, mean(r['chance'] for r in g)
         se = (chance * (1 - chance) / n) ** 0.5 if 0 < chance < 1 else 0.0
         lo, hi = wilson(hits, n)
+        net = [r['net_ret'] for r in g if r.get('net_ret') is not None]
         out.append({'source': source, 'market': market, 'n': n, 'hit_rate': round(rate, 3),
                     'chance': round(chance, 3), 'lift': round(rate - chance, 3),
                     'z': round((rate - chance) / se, 2) if se else 0.0,
                     'low': round(lo, 3), 'high': round(hi, 3),
                     'avg_move_pct': round(mean(r['ret'] for r in g) * 100, 2),
+                    'net_move_pct': round(mean(net) * 100, 2) if net else None,
+                    'net_n': len(net),
                     'enough': n >= int(min_signals)})
     return out
 

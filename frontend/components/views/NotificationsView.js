@@ -103,21 +103,41 @@ export function notificationItems({ anomalies = [], pendingApprovals = 0, status
 
 function Item({ item, onDrill, onGo }) {
   const act = item.symbol ? () => onDrill(item.symbol) : item.go ? () => onGo(item.go) : null;
+  const dotColor = DOT[item.severity] || theme.colors.textMuted;
   return (
-    <div onClick={act || undefined} style={{
-      display: 'flex', gap: '12px', padding: '12px 4px', borderBottom: `1px solid ${theme.colors.border}`,
-      cursor: act ? 'pointer' : 'default', alignItems: 'flex-start',
-    }}>
-      <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: DOT[item.severity] || theme.colors.textMuted,
-                     flexShrink: 0, marginTop: '5px' }} />
+    <div
+      onClick={act || undefined}
+      style={{
+        display: 'flex', gap: '12px', padding: '12px 14px', borderRadius: '10px',
+        background: 'rgba(255, 255, 255, 0.02)', border: '1px solid rgba(255, 255, 255, 0.04)',
+        marginBottom: '8px', cursor: act ? 'pointer' : 'default', alignItems: 'flex-start',
+        transition: 'all 0.15s ease',
+      }}
+      onMouseEnter={(e) => {
+        if (act) {
+          e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.05)';
+          e.currentTarget.style.borderColor = theme.colors.primary + '50';
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (act) {
+          e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.02)';
+          e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.04)';
+        }
+      }}
+    >
+      <span style={{
+        width: '8px', height: '8px', borderRadius: '50%', background: dotColor,
+        boxShadow: `0 0 6px ${dotColor}`, flexShrink: 0, marginTop: '6px',
+      }} />
       <div style={{ minWidth: 0, flex: 1 }}>
-        <div style={{ fontSize: '13px', color: theme.colors.text }}>{item.message}</div>
-        {item.hint && <div style={{ fontSize: '12px', color: theme.colors.textMuted, marginTop: '3px', whiteSpace: 'pre-line' }}>{item.hint}</div>}
-        {item.lastAt && <div style={{ fontSize: '11px', color: theme.colors.textMuted, marginTop: '2px' }}>{item.lastLabel || 'Last seen'} {localTime(item.lastAt)}</div>}
+        <div style={{ fontSize: '13px', fontWeight: 600, color: theme.colors.text, lineHeight: 1.4 }}>{item.message}</div>
+        {item.hint && <div style={{ fontSize: '12px', color: theme.colors.textMuted, marginTop: '4px', whiteSpace: 'pre-line', lineHeight: 1.4 }}>{item.hint}</div>}
+        {item.lastAt && <div style={{ fontSize: '11px', color: theme.colors.textMuted, marginTop: '3px' }}>{item.lastLabel || 'Last seen'} {localTime(item.lastAt)}</div>}
       </div>
       {act && (
-        <span style={{ fontSize: '11px', color: theme.colors.textSecondary, whiteSpace: 'nowrap' }}>
-          {item.symbol ? 'Open chart ↗' : 'Open ↗'}
+        <span style={{ fontSize: '11px', fontWeight: 700, color: theme.colors.secondary, whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '4px' }}>
+          {item.symbol ? 'Chart ↗' : 'View ↗'}
         </span>
       )}
     </div>
@@ -128,10 +148,11 @@ const LEVELS = [['all', 'All'], ['critical', 'Critical'], ['warning', 'Warning']
 const LEVEL_DOT = { critical: theme.colors.danger, warning: theme.colors.warning, info: theme.colors.accent };
 
 const chip = (on) => ({
-  background: on ? `${theme.colors.primary}22` : 'rgba(255,255,255,0.04)',
-  border: `1px solid ${on ? `${theme.colors.primary}80` : theme.colors.border}`,
+  background: on ? 'linear-gradient(135deg, rgba(16, 185, 129, 0.25) 0%, rgba(14, 165, 233, 0.15) 100%)' : 'rgba(255,255,255,0.04)',
+  border: `1px solid ${on ? theme.colors.primary + '80' : 'rgba(255, 255, 255, 0.08)'}`,
   color: on ? '#fff' : theme.colors.textSecondary, borderRadius: '999px',
-  padding: '5px 12px', fontSize: '11px', fontWeight: 800, cursor: 'pointer',
+  padding: '6px 14px', fontSize: '11px', fontWeight: 800, cursor: 'pointer',
+  transition: 'all 0.15s ease',
 });
 
 // Everything the agent has raised in the last week, newest first, whether or

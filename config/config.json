@@ -225,7 +225,7 @@
       ],
       "sma_period": 200,
       "band": 0.02,
-      "weight": 1.0,
+      "weight": 0.2,
       "max_position_size": 0.05
     },
     "forex_trend": {
@@ -644,5 +644,7 @@
     "min_momentum": 0.0,
     "absolute_filter": true,
     "max_weight": 0.5
-  }
+  },
+  "heartbeat_timeout_seconds": 300,
+  "llm_veto_enabled": false
 }

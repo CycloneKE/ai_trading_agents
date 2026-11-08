@@ -60,16 +60,21 @@ const MarketClock = () => {
 
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', gap: '10px',
-      border: `1px solid ${theme.colors.border}`, borderRadius: '8px', padding: '6px 12px',
-      fontFamily: 'JetBrains Mono, monospace', fontSize: '12px',
+      display: 'flex', alignItems: 'center', gap: '8px',
+      background: 'rgba(15, 23, 42, 0.65)',
+      border: '1px solid rgba(255, 255, 255, 0.08)', borderRadius: '10px', padding: '6px 12px',
+      fontFamily: 'JetBrains Mono, monospace', fontSize: '11px', fontVariantNumeric: 'tabular-nums',
+      whiteSpace: 'nowrap',
     }}>
-      <Clock size={14} color={session.color} />
+      <Clock size={13} color={session.color} />
       <span style={{ color: theme.colors.textSecondary }}>{clock} ET</span>
-      <span style={{ color: session.color, fontWeight: 700 }}>{session.label}</span>
+      <span style={{
+        color: session.color, fontWeight: 800, padding: '2px 6px',
+        borderRadius: '4px', background: `${session.color}15`, fontSize: '10px'
+      }}>{session.label}</span>
       {session.next && (
-        <span style={{ color: theme.colors.textMuted }}>
-          {session.next.label} in {countdown(et, session.next.at)}
+        <span style={{ color: theme.colors.textMuted, fontSize: '10px' }}>
+          {session.next.label} {countdown(et, session.next.at)}
         </span>
       )}
     </div>

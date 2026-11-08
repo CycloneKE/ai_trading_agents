@@ -130,25 +130,30 @@ function MarketWatch({ nseData, holdings, mobile, onDrill }) {
           chosen weekly by the screener (see Market Scan). Highlighted rows are held in the paper account. Tap a row for its chart.
         </div>
         <ProvenanceBanner nseData={nseData} />
-        <div style={{ display: 'flex', gap: '8px', marginBottom: '10px', flexWrap: 'wrap' }}>
-          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search symbol or company"
-                 style={{ flex: '1 1 180px', minWidth: 0, background: 'rgba(255,255,255,0.05)', color: '#fff',
-                          border: `1px solid ${theme.colors.border}`, borderRadius: '6px', padding: '7px 10px', fontSize: '12px' }} />
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search symbol or company..."
+                 style={{ flex: '1 1 180px', minWidth: 0, background: 'rgba(255,255,255,0.04)', color: '#fff',
+                          border: '1px solid rgba(255, 255, 255, 0.08)', borderRadius: '8px', padding: '8px 12px', fontSize: '12px', outline: 'none' }} />
           <select value={sector} onChange={(e) => setSector(e.target.value)}
-                  style={{ flex: '0 1 200px', background: theme.colors.bgSecondary, color: '#fff',
-                           border: `1px solid ${theme.colors.border}`, borderRadius: '6px', padding: '7px 10px', fontSize: '12px' }}>
+                  style={{ flex: '0 1 200px', background: 'rgba(15, 23, 42, 0.9)', color: '#fff',
+                           border: '1px solid rgba(255, 255, 255, 0.08)', borderRadius: '8px', padding: '8px 12px', fontSize: '12px', outline: 'none' }}>
             <option value="">All sectors</option>
             {sectors.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
         </div>
-        <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
-          {[['all', 'ALL'], ['traded', 'TRADED'], ['held', 'HELD'], ['movers', 'MOVERS ±1%']].map(([id, label]) => (
-            <button key={id} onClick={() => setFilter(id)} style={{
-              backgroundColor: filter === id ? theme.colors.primary : 'rgba(255,255,255,0.05)',
-              color: filter === id ? '#000' : theme.colors.textSecondary,
-              border: 'none', padding: '6px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: 800, cursor: 'pointer',
-            }}>{label}</button>
-          ))}
+        <div style={{ display: 'flex', gap: '6px', marginBottom: '14px', flexWrap: 'wrap' }}>
+          {[['all', 'ALL'], ['traded', 'TRADED'], ['held', 'HELD'], ['movers', 'MOVERS ±1%']].map(([id, label]) => {
+            const on = filter === id;
+            return (
+              <button key={id} onClick={() => setFilter(id)} style={{
+                background: on ? 'linear-gradient(135deg, rgba(16, 185, 129, 0.25) 0%, rgba(14, 165, 233, 0.15) 100%)' : 'rgba(255,255,255,0.04)',
+                color: on ? '#fff' : theme.colors.textSecondary,
+                border: `1px solid ${on ? theme.colors.primary + '70' : 'rgba(255, 255, 255, 0.06)'}`,
+                padding: '6px 14px', borderRadius: '8px', fontSize: '11px', fontWeight: 800, cursor: 'pointer',
+                transition: 'all 0.15s ease',
+              }}>{label}</button>
+            );
+          })}
         </div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>

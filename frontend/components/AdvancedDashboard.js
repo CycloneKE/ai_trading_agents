@@ -1,9 +1,10 @@
 // The dashboard shell: header, navigation, the shared data it polls, and
 // the section pages under components/views/. On a phone the navigation moves
 // to a bar along the bottom of the screen and every page drops to one column.
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   LayoutDashboard, Wallet, Flag, FileText, ChartLine, Shield, LogOut, Search, Bell,
+  X, AlertTriangle, HelpCircle, CheckCircle2, ChevronRight, Activity, Zap
 } from 'lucide-react';
 import MarketClock from './MarketClock';
 import HelpPanel from './HelpPanel';
@@ -51,12 +52,13 @@ const Heartbeat = ({ heartbeat }) => {
   const color = bad ? '#f43f5e' : (heartbeat.healthy ? theme.colors.primary : '#fbbf24');
   return (
     <div title={bad ? 'Heartbeat timeout: the kill switch has activated' : `Agent loop alive (${heartbeat.elapsed_seconds}s ago)`} style={{
-      display: 'flex', alignItems: 'center', gap: '6px', padding: '5px 10px', borderRadius: '8px', fontSize: '10px', fontWeight: '800',
+      display: 'flex', alignItems: 'center', gap: '6px', padding: '5px 10px', borderRadius: '10px', fontSize: '10px', fontWeight: '800',
       background: bad ? 'rgba(244,63,94,0.15)' : (heartbeat.healthy ? 'rgba(16,185,129,0.1)' : 'rgba(251,191,36,0.15)'),
       border: `1px solid ${color}40`, color, whiteSpace: 'nowrap',
+      fontFamily: 'JetBrains Mono, monospace',
     }}>
       <span style={{
-        width: '8px', height: '8px', borderRadius: '50%', display: 'inline-block', background: color,
+        width: '7px', height: '7px', borderRadius: '50%', display: 'inline-block', background: color,
         animation: ok ? 'pulse 2s infinite' : 'none', boxShadow: ok ? `0 0 6px ${color}` : 'none',
       }} />
       {bad ? 'TIMEOUT' : (heartbeat.healthy ? `${Math.round(heartbeat.elapsed_seconds)}s` : 'STALE')}
@@ -64,10 +66,209 @@ const Heartbeat = ({ heartbeat }) => {
   );
 };
 
-const iconButton = {
-  background: 'transparent', border: `1px solid ${theme.colors.border}`, color: theme.colors.textSecondary,
-  height: '34px', minWidth: '34px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', fontWeight: 800,
+const iconButtonStyle = {
+  background: 'rgba(15, 23, 42, 0.65)', border: '1px solid rgba(255, 255, 255, 0.08)', color: theme.colors.textSecondary,
+  height: '34px', minWidth: '34px', borderRadius: '10px', cursor: 'pointer', fontSize: '12px', fontWeight: 800,
   display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', padding: '0 10px',
+  transition: 'all 0.15s ease',
+};
+
+// Global Command / Symbol Quick-Search Palette
+const SymbolSearchPalette = ({ isOpen, onClose, onSelect, nseQuotes = [] }) => {
+  const [query, setQuery] = useState('');
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setTimeout(() => inputRef.current?.focus(), 50);
+    } else {
+      setQuery('');
+    }
+  }, [isOpen]);
+
+  if (!isOpen) return null;
+
+  const popularNse = [
+    { symbol: 'SCOM', name: 'Safaricom Plc' },
+    { symbol: 'EQTY', name: 'Equity Group' },
+    { symbol: 'KCB', name: 'KCB Group' },
+    { symbol: 'EABL', name: 'East African Breweries' },
+    { symbol: 'BAT', name: 'British American Tobacco' },
+    { symbol: 'ABSA', name: 'Absa Bank Kenya' },
+  ];
+
+  const popularGlobal = [
+    { symbol: 'NVDA', name: 'NVIDIA Corp' },
+    { symbol: 'AAPL', name: 'Apple Inc' },
+    { symbol: 'MSFT', name: 'Microsoft' },
+    { symbol: 'TSLA', name: 'Tesla Inc' },
+    { symbol: 'BTC/USD', name: 'Bitcoin / USD' },
+    { symbol: 'EUR/USD', name: 'Euro / US Dollar' },
+  ];
+
+  const cleanQ = query.trim().toUpperCase().replace(/[\/\s]/g, '');
+
+  const filteredQuotes = cleanQ
+    ? (nseQuotes || []).filter((q) =>
+        q.symbol.toUpperCase().includes(cleanQ) || (q.name && q.name.toUpperCase().includes(cleanQ))
+      ).slice(0, 6)
+    : [];
+
+  const handleSelect = (sym) => {
+    if (!sym) return;
+    onSelect(sym.trim().toUpperCase().replace(/[\/\s]/g, ''));
+    onClose();
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 1200,
+        backgroundColor: 'rgba(2, 6, 23, 0.75)',
+        backdropFilter: 'blur(8px)',
+        display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+        padding: '12vh 16px 20px',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: '100%', maxWidth: '540px',
+          background: 'rgba(11, 17, 32, 0.95)',
+          border: '1px solid rgba(255, 255, 255, 0.12)',
+          borderRadius: '16px',
+          boxShadow: '0 20px 50px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.08)',
+          overflow: 'hidden',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', padding: '14px 16px', borderBottom: '1px solid rgba(255, 255, 255, 0.08)', gap: '10px' }}>
+          <Search size={18} color={theme.colors.secondary} />
+          <input
+            ref={inputRef}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search symbol (e.g. SCOM, NVDA, BTC/USD)..."
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && query.trim()) {
+                handleSelect(query);
+              } else if (e.key === 'Escape') {
+                onClose();
+              }
+            }}
+            style={{
+              flex: 1, background: 'transparent', border: 'none', color: '#fff',
+              fontSize: '15px', outline: 'none', fontWeight: 600,
+            }}
+          />
+          {query ? (
+            <button onClick={() => setQuery('')} style={{ background: 'transparent', border: 'none', color: theme.colors.textMuted, cursor: 'pointer' }}>
+              <X size={16} />
+            </button>
+          ) : (
+            <span style={{ fontSize: '10px', background: 'rgba(255,255,255,0.06)', color: theme.colors.textMuted, padding: '2px 6px', borderRadius: '4px', fontWeight: 700 }}>
+              ESC
+            </span>
+          )}
+        </div>
+
+        {filteredQuotes.length > 0 && (
+          <div style={{ padding: '8px 12px', borderBottom: '1px solid rgba(255, 255, 255, 0.06)' }}>
+            <div style={{ fontSize: '10px', fontWeight: 800, color: theme.colors.textMuted, textTransform: 'uppercase', padding: '4px 6px' }}>Market Matches</div>
+            {filteredQuotes.map((q) => (
+              <div
+                key={q.symbol}
+                onClick={() => handleSelect(q.symbol)}
+                style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  padding: '8px 10px', borderRadius: '8px', cursor: 'pointer',
+                  transition: 'background 0.15s ease',
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.05)')}
+                onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+              >
+                <div>
+                  <span style={{ fontWeight: 800, color: '#fff', marginRight: '8px' }}>{q.symbol}</span>
+                  <span style={{ fontSize: '12px', color: theme.colors.textSecondary }}>{q.name}</span>
+                </div>
+                <div style={{ fontSize: '12px', fontWeight: 700, color: (q.change_pct || 0) >= 0 ? theme.colors.primary : theme.colors.danger }}>
+                  {q.price ? `KES ${q.price.toFixed(2)}` : ''}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ padding: '12px 16px', display: 'grid', gap: '12px' }}>
+          <div>
+            <div style={{ fontSize: '10px', fontWeight: 800, color: theme.colors.textMuted, textTransform: 'uppercase', marginBottom: '8px', letterSpacing: '0.6px' }}>
+              NSE Kenya Equities
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+              {popularNse.map((item) => (
+                <button
+                  key={item.symbol}
+                  onClick={() => handleSelect(item.symbol)}
+                  style={{
+                    background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(255, 255, 255, 0.08)',
+                    color: '#fff', borderRadius: '8px', padding: '5px 10px', fontSize: '11px',
+                    fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.borderColor = theme.colors.primary;
+                    e.currentTarget.style.backgroundColor = 'rgba(16, 185, 129, 0.1)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)';
+                    e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.04)';
+                  }}
+                >
+                  <span style={{ color: theme.colors.primary }}>●</span>
+                  {item.symbol}
+                  <span style={{ color: theme.colors.textMuted, fontSize: '10px' }}>{item.name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <div style={{ fontSize: '10px', fontWeight: 800, color: theme.colors.textMuted, textTransform: 'uppercase', marginBottom: '8px', letterSpacing: '0.6px' }}>
+              US Equities & Crypto/FX
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+              {popularGlobal.map((item) => (
+                <button
+                  key={item.symbol}
+                  onClick={() => handleSelect(item.symbol)}
+                  style={{
+                    background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(255, 255, 255, 0.08)',
+                    color: '#fff', borderRadius: '8px', padding: '5px 10px', fontSize: '11px',
+                    fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.borderColor = theme.colors.secondary;
+                    e.currentTarget.style.backgroundColor = 'rgba(14, 165, 233, 0.1)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)';
+                    e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.04)';
+                  }}
+                >
+                  <span style={{ color: theme.colors.secondary }}>●</span>
+                  {item.symbol}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ padding: '8px 16px', background: 'rgba(0, 0, 0, 0.25)', borderTop: '1px solid rgba(255, 255, 255, 0.06)', fontSize: '11px', color: theme.colors.textMuted, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>Press <strong style={{ color: '#fff' }}>Enter</strong> to view live chart</span>
+          <span><strong style={{ color: '#fff' }}>Esc</strong> to close</span>
+        </div>
+      </div>
+    </div>
+  );
 };
 
 const AdvancedDashboard = ({ onLogout }) => {
@@ -105,6 +306,18 @@ const AdvancedDashboard = ({ onLogout }) => {
     const onHash = () => { setRoute(readRoute()); window.scrollTo(0, 0); };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  // Keyboard shortcut for quick search: Ctrl+K or Cmd+K
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSearchOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
   const go = useCallback((section, sub) => {
@@ -177,7 +390,6 @@ const AdvancedDashboard = ({ onLogout }) => {
   }, []);
 
   // The agent's own alerts and what is wrong right now (src/agent/alerts.py).
-  // What has been read is remembered in this browser only.
   useEffect(() => {
     try { setAlertsSeenAt(localStorage.getItem(SEEN_KEY)); } catch (e) { /* storage blocked */ }
     let alive = true;
@@ -201,8 +413,7 @@ const AdvancedDashboard = ({ onLogout }) => {
     setAlertsSeenAt(seen);
   }, [agentAlerts]);
 
-  // Built from different code than the server: an old copy of the page, or
-  // only one of the two images rebuilt.
+  // Built from different code than the server
   const serverBuilt = data.status.dashboard_source;
   const staleDashboard = !!(serverBuilt && BUILT_FROM && serverBuilt !== BUILT_FROM);
   const notices = notificationItems({ anomalies, pendingApprovals, status: data.status, staleDashboard, ai: aiHealth,
@@ -249,7 +460,6 @@ const AdvancedDashboard = ({ onLogout }) => {
     }));
     if (unauthorized) { onLogout(); return; }
 
-    // A response only replaces cached state when it parsed and isn't an error envelope.
     const ok = (r) => r != null && !(typeof r === 'object' && !Array.isArray(r) && r.error);
 
     setData((prev) => ({
@@ -333,51 +543,51 @@ const AdvancedDashboard = ({ onLogout }) => {
     }
   };
 
-  const searchBox = (
-    <input
-      autoFocus={mobile && searchOpen}
-      placeholder="Symbol…"
-      aria-label="Open a symbol's chart"
-      title="Type a ticker and press Enter to open its chart"
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' && e.target.value.trim()) {
-          // EUR/USD and EURUSD both find the pair the agent calls EUR_USD (the server matches it).
-          setDrilldownSymbol(e.target.value.trim().toUpperCase().replace(/[\/\s]/g, ''));
-          e.target.value = '';
-          setSearchOpen(false);
-        }
-      }}
-      style={{
-        background: 'rgba(255,255,255,0.05)', border: `1px solid ${theme.colors.border}`, color: theme.colors.text,
-        padding: '7px 12px', borderRadius: '8px', outline: 'none',
-        // 16px stops phones zooming the page when the box is focused.
-        fontSize: mobile ? '16px' : '11px', width: mobile ? '100%' : '110px',
-      }}
-    />
-  );
-
   const haltButton = isOperator && (
-    <button onClick={toggleHalt} title={isHalted ? 'Resume automated trading' : 'Stop all new orders immediately'} style={{
-      background: isHalted ? theme.colors.warning : 'rgba(244, 63, 94, 0.12)',
-      border: `1px solid ${isHalted ? theme.colors.warning : theme.colors.danger}`,
-      color: isHalted ? '#000' : theme.colors.danger, height: '34px',
-      padding: '0 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '11px', fontWeight: 800, letterSpacing: '0.5px',
-    }}>
+    <button
+      onClick={toggleHalt}
+      title={isHalted ? 'Resume automated trading' : 'Stop all new orders immediately'}
+      style={{
+        background: isHalted ? theme.colors.warning : 'rgba(244, 63, 94, 0.12)',
+        border: `1px solid ${isHalted ? theme.colors.warning : theme.colors.danger}`,
+        color: isHalted ? '#000' : theme.colors.danger,
+        height: '34px',
+        padding: '0 14px',
+        borderRadius: '10px',
+        cursor: 'pointer',
+        fontSize: '11px',
+        fontWeight: 800,
+        letterSpacing: '0.5px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '6px',
+        transition: 'all 0.15s ease',
+      }}
+    >
+      {isHalted ? <AlertTriangle size={14} color="#000" /> : <Shield size={14} color={theme.colors.danger} />}
       {isHalted ? 'RESUME' : 'HALT'}
     </button>
   );
 
   const bell = (
-    <button onClick={() => go('notifications')} aria-label={`Notifications: ${needsYou} need your attention`}
-            title={needsYou ? `${needsYou} notification${needsYou > 1 ? 's' : ''} need your attention` : 'Notifications'}
-            style={{ ...iconButton, position: 'relative',
-                     borderColor: section === 'notifications' ? theme.colors.primary : theme.colors.border }}>
-      <Bell size={16} color={needsYou ? theme.colors.warning : theme.colors.textSecondary} />
+    <button
+      onClick={() => go('notifications')}
+      aria-label={`Notifications: ${needsYou} need your attention`}
+      title={needsYou ? `${needsYou} notification${needsYou > 1 ? 's' : ''} need your attention` : 'Notifications'}
+      style={{
+        ...iconButtonStyle,
+        position: 'relative',
+        borderColor: section === 'notifications' ? theme.colors.primary : 'rgba(255, 255, 255, 0.08)',
+        background: section === 'notifications' ? 'rgba(16, 185, 129, 0.15)' : 'rgba(15, 23, 42, 0.65)',
+      }}
+    >
+      <Bell size={15} color={needsYou ? theme.colors.warning : theme.colors.textSecondary} />
       {needsYou > 0 && (
         <span style={{
-          position: 'absolute', top: '-6px', right: '-6px', minWidth: '18px', height: '18px', borderRadius: '9px',
+          position: 'absolute', top: '-5px', right: '-5px', minWidth: '18px', height: '18px', borderRadius: '9px',
           background: theme.colors.danger, color: '#fff', fontSize: '10px', fontWeight: 800,
           display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 4px',
+          boxShadow: '0 0 8px rgba(244, 63, 94, 0.6)',
         }}>{needsYou > 99 ? '99+' : needsYou}</span>
       )}
     </button>
@@ -386,22 +596,35 @@ const AdvancedDashboard = ({ onLogout }) => {
   const brand = (
     <div style={{ display: 'flex', alignItems: 'center', gap: mobile ? '10px' : '14px', minWidth: 0 }}>
       <div style={{
-        background: 'linear-gradient(135deg, #10b981 0%, #3b82f6 100%)', padding: mobile ? '7px' : '10px 12px',
-        borderRadius: '12px', boxShadow: '0 0 15px rgba(16, 185, 129, 0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: 'linear-gradient(135deg, #10b981 0%, #0ea5e9 100%)',
+        padding: mobile ? '7px' : '8px 10px',
+        borderRadius: '12px',
+        boxShadow: '0 0 16px rgba(16, 185, 129, 0.25)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        flexShrink: 0,
       }}>
-        <Shield color="#000" size={mobile ? 18 : 22} strokeWidth={2.5} />
+        <Shield color="#020617" size={mobile ? 18 : 22} strokeWidth={2.5} />
       </div>
       <div style={{ minWidth: 0 }}>
-        <h1 style={{ fontSize: mobile ? '15px' : '20px', fontWeight: '900', margin: 0, letterSpacing: mobile ? '1px' : '1.5px', color: '#fff', display: 'flex', alignItems: 'center', gap: '8px', whiteSpace: 'nowrap' }}>
-          EMPIRE SLY VAULT
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <h1 style={{
+            fontSize: mobile ? '15px' : '18px', fontWeight: '900', margin: 0,
+            letterSpacing: '0.8px', color: '#fff', whiteSpace: 'nowrap',
+          }}>
+            EMPIRE SLY VAULT
+          </h1>
           {!mobile && (
-            <span style={{ fontSize: '10px', backgroundColor: 'rgba(16,185,129,0.15)', color: theme.colors.primary, padding: '2px 8px', borderRadius: '4px', border: `1px solid ${theme.colors.primary}40`, fontWeight: '800' }}>
+            <span style={{
+              fontSize: '10px', backgroundColor: 'rgba(16,185,129,0.12)', color: theme.colors.primary,
+              padding: '2px 8px', borderRadius: '6px', border: `1px solid ${theme.colors.primary}35`, fontWeight: '800',
+              letterSpacing: '0.5px',
+            }}>
               QUANTUM AI
             </span>
           )}
-        </h1>
+        </div>
         {!mobile && (
-          <div style={{ fontSize: '11px', color: theme.colors.textMuted, fontWeight: '700', letterSpacing: '0.5px' }}>
+          <div style={{ fontSize: '11px', color: theme.colors.textMuted, fontWeight: '700', letterSpacing: '0.4px', marginTop: '1px' }}>
             MULTI-REGION WEALTH & AUTONOMOUS DESK
           </div>
         )}
@@ -412,8 +635,11 @@ const AdvancedDashboard = ({ onLogout }) => {
   return (
     <div style={{ minHeight: '100vh', backgroundColor: theme.colors.bg, color: theme.colors.text, fontFamily: 'Outfit, sans-serif', overflowX: 'hidden' }}>
       <header style={{
-        ...theme.glass, borderRadius: 0, padding: mobile ? '10px 12px' : '16px 32px',
-        borderBottom: `1px solid ${theme.colors.border}`, background: 'rgba(2, 6, 23, 0.95)', backdropFilter: 'blur(16px)',
+        borderRadius: 0, padding: mobile ? '10px 12px' : '14px 28px',
+        borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+        background: 'rgba(3, 7, 18, 0.88)',
+        backdropFilter: 'blur(16px)',
+        position: 'sticky', top: 0, zIndex: 100,
       }}>
         {mobile ? (
           <>
@@ -421,30 +647,37 @@ const AdvancedDashboard = ({ onLogout }) => {
               {brand}
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
                 {bell}
-                <button onClick={() => setSearchOpen((o) => !o)} aria-label="Find a symbol" style={iconButton}><Search size={16} /></button>
-                <button onClick={() => setShowHelp(true)} aria-label="Getting started guide" style={iconButton}>?</button>
-                <button onClick={onLogout} aria-label="Log out" style={iconButton}><LogOut size={16} /></button>
+                <button onClick={() => setSearchOpen(true)} aria-label="Find a symbol" style={iconButtonStyle}><Search size={15} /></button>
+                <button onClick={() => setShowHelp(true)} aria-label="Getting started guide" style={iconButtonStyle}>?</button>
+                <button onClick={onLogout} aria-label="Log out" style={iconButtonStyle}><LogOut size={15} /></button>
               </div>
             </div>
-            <div style={{ display: 'flex', gap: '8px', marginTop: '10px', alignItems: 'center' }}>
-              <Heartbeat heartbeat={heartbeat} />
-              <div style={{ flex: 1, minWidth: 0 }}>{searchOpen && searchBox}</div>
+            <div style={{ display: 'flex', gap: '8px', marginTop: '8px', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <Heartbeat heartbeat={heartbeat} />
+                <MarketClock />
+              </div>
               {haltButton}
             </div>
           </>
         ) : (
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '16px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '16px' }}>
             {brand}
-            <nav style={{ display: 'flex', gap: '4px', backgroundColor: 'rgba(0, 0, 0, 0.4)', padding: '5px', borderRadius: '12px', border: `1px solid ${theme.colors.border}60`, flexWrap: 'wrap' }}>
+
+            {/* Streamlined Desktop Navigation Pill Bar */}
+            <nav style={{
+              display: 'flex', gap: '4px', backgroundColor: 'rgba(15, 23, 42, 0.65)',
+              padding: '4px', borderRadius: '12px', border: '1px solid rgba(255, 255, 255, 0.08)',
+            }}>
               {SECTIONS.map(({ id, label, icon: Icon }) => {
                 const on = section === id;
                 return (
                   <button key={id} onClick={() => go(id)} style={{
-                    background: on ? 'linear-gradient(135deg, rgba(16,185,129,0.2) 0%, rgba(59,130,246,0.2) 100%)' : 'transparent',
-                    border: on ? `1px solid ${theme.colors.primary}60` : '1px solid transparent',
+                    background: on ? 'linear-gradient(135deg, rgba(16,185,129,0.22) 0%, rgba(14,165,233,0.15) 100%)' : 'transparent',
+                    border: `1px solid ${on ? theme.colors.primary + '65' : 'transparent'}`,
                     color: on ? '#fff' : theme.colors.textSecondary, fontSize: '11px', fontWeight: '800', cursor: 'pointer',
-                    borderRadius: '8px', padding: '8px 14px', display: 'flex', alignItems: 'center', gap: '6px',
-                    transition: 'all 0.2s ease', letterSpacing: '0.5px', textTransform: 'uppercase',
+                    borderRadius: '9px', padding: '7px 13px', display: 'flex', alignItems: 'center', gap: '6px',
+                    transition: 'all 0.15s ease', letterSpacing: '0.4px', textTransform: 'uppercase',
                   }}>
                     <Icon size={14} color={on ? theme.colors.primary : theme.colors.textMuted} />
                     {label}
@@ -452,32 +685,63 @@ const AdvancedDashboard = ({ onLogout }) => {
                 );
               })}
             </nav>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+
+            {/* Quick Actions & System Telemetry */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <Heartbeat heartbeat={heartbeat} />
               <MarketClock />
-              {searchBox}
+              
+              {/* Quick Search trigger */}
+              <button
+                onClick={() => setSearchOpen(true)}
+                title="Search symbols (Ctrl+K)"
+                style={{
+                  ...iconButtonStyle,
+                  padding: '0 12px',
+                  display: 'flex', alignItems: 'center', gap: '8px',
+                  color: theme.colors.textSecondary,
+                }}
+              >
+                <Search size={14} color={theme.colors.textMuted} />
+                <span style={{ fontSize: '11px', fontWeight: 600 }}>Search...</span>
+                <span style={{
+                  fontSize: '9px', fontWeight: 800, padding: '1px 5px', borderRadius: '4px',
+                  background: 'rgba(255,255,255,0.08)', color: theme.colors.textMuted,
+                  fontFamily: 'JetBrains Mono, monospace',
+                }}>⌘K</span>
+              </button>
+
               {bell}
               {haltButton}
-              <button onClick={() => setShowHelp(true)} title="Getting started guide" style={iconButton}>?</button>
-              <button onClick={onLogout} style={{ ...iconButton, fontSize: '11px' }}><LogOut size={14} /> EXIT</button>
+              <button onClick={() => setShowHelp(true)} title="Getting started guide" style={iconButtonStyle}>?</button>
+              <button onClick={onLogout} style={{ ...iconButtonStyle, fontSize: '11px' }} title="Log out">
+                <LogOut size={14} /> EXIT
+              </button>
             </div>
           </div>
         )}
       </header>
 
       {isHalted && (
-        <div style={{ backgroundColor: theme.colors.warning, color: '#000', textAlign: 'center', padding: '8px 12px', fontSize: mobile ? '12px' : '13px', fontWeight: 800, letterSpacing: '0.5px' }}>
-          ⚠ TRADING HALTED{data.status.halt_reason ? ` (${data.status.halt_reason})` : ''}: the agent is not submitting new orders.
-          Protective stop-losses remain active.{isOperator ? ' Press RESUME to trade again.' : ''}
+        <div style={{
+          backgroundColor: 'rgba(245, 158, 11, 0.18)',
+          borderBottom: `1px solid ${theme.colors.warning}`,
+          color: '#fbbf24', textAlign: 'center', padding: '10px 16px',
+          fontSize: mobile ? '12px' : '13px', fontWeight: 800, letterSpacing: '0.5px',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', flexWrap: 'wrap',
+        }}>
+          <AlertTriangle size={16} color="#fbbf24" />
+          <span>TRADING HALTED{data.status.halt_reason ? ` (${data.status.halt_reason})` : ''}: agent order submission is paused. Protective stop-losses remain active.</span>
+          {isOperator && <span style={{ color: '#fff', textDecoration: 'underline', cursor: 'pointer' }} onClick={toggleHalt}>Click to RESUME</span>}
           {data.status.halted_at && (
-            <span style={{ fontWeight: 600, marginLeft: '6px' }}>
-              Since {new Date(data.status.halted_at.endsWith('Z') ? data.status.halted_at : `${data.status.halted_at}Z`).toLocaleString()}.
+            <span style={{ fontWeight: 600, color: theme.colors.textMuted }}>
+              (Halted: {new Date(data.status.halted_at.endsWith('Z') ? data.status.halted_at : `${data.status.halted_at}Z`).toLocaleTimeString()})
             </span>
           )}
         </div>
       )}
 
-      <main style={{ padding: mobile ? '14px 12px calc(84px + env(safe-area-inset-bottom))' : '32px 40px' }}>
+      <main style={{ padding: mobile ? '14px 12px calc(84px + env(safe-area-inset-bottom))' : '28px 32px' }}>
         {page()}
       </main>
 
@@ -485,7 +749,7 @@ const AdvancedDashboard = ({ onLogout }) => {
         <nav style={{
           position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 900,
           display: 'grid', gridTemplateColumns: `repeat(${SECTIONS.length}, 1fr)`,
-          background: 'rgba(2, 6, 23, 0.97)', borderTop: `1px solid ${theme.colors.border}`,
+          background: 'rgba(3, 7, 18, 0.95)', borderTop: '1px solid rgba(255, 255, 255, 0.08)',
           backdropFilter: 'blur(16px)', paddingBottom: 'env(safe-area-inset-bottom)',
         }}>
           {SECTIONS.map(({ id, short, icon: Icon }) => {
@@ -494,16 +758,24 @@ const AdvancedDashboard = ({ onLogout }) => {
               <button key={id} onClick={() => go(id)} aria-current={on ? 'page' : undefined} style={{
                 background: 'transparent', border: 'none', cursor: 'pointer', padding: '9px 0 8px',
                 display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '3px',
-                color: on ? theme.colors.primary : theme.colors.textMuted, fontSize: '10px', fontWeight: 700,
+                color: on ? theme.colors.primary : theme.colors.textMuted, fontSize: '10px', fontWeight: 800,
                 borderTop: `2px solid ${on ? theme.colors.primary : 'transparent'}`,
               }}>
-                <Icon size={20} />
+                <Icon size={19} />
                 {short}
               </button>
             );
           })}
         </nav>
       )}
+
+      {/* Global Command Palette / Symbol Quick Search Modal */}
+      <SymbolSearchPalette
+        isOpen={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        onSelect={drill}
+        nseQuotes={nseData.quotes}
+      />
 
       {showHelp && <HelpPanel onClose={() => setShowHelp(false)} />}
       {drilldownSymbol && <SymbolDrilldown symbol={drilldownSymbol} onClose={() => setDrilldownSymbol(null)} />}

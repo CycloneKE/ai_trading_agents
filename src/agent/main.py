@@ -1181,6 +1181,8 @@ class TradingAgent:
 
                     for symbol in symbols:
                         try:
+                            if getattr(self, 'heartbeat_monitor', None):
+                                self.heartbeat_monitor.ping()
                             # Extract symbol-specific data
                             symbol_data = self._extract_symbol_data(market_data, symbol)
                             if isinstance(symbol_data, dict):
@@ -1355,7 +1357,11 @@ class TradingAgent:
                                         dec['llm_verdict']['secondary_verdict'] = validated_signal['secondary_verdict']
 
                                     if validated_signal.get('action') == 'hold':
-                                        if validated_signal.get('consensus_verified') is False:
+                                        if not self.config.get('llm_veto_enabled', True):
+                                            logger.info(f"LLM veto advisory only for {symbol} (llm_veto_enabled=False). Signal preserved.")
+                                            validated_signal['action'] = symbol_signals['action']
+                                            dec['llm_advisory_veto'] = True
+                                        elif validated_signal.get('consensus_verified') is False:
                                             dec['skip_reason'] = 'consensus_disagreement'
                                         else:
                                             dec['skip_reason'] = 'llm_veto'
@@ -1520,6 +1526,8 @@ class TradingAgent:
                 # (NSE prices only refresh on the ~30-min scrape). Internally
                 # rate-limited and guarded by market hours + price freshness.
                 try:
+                    if getattr(self, 'heartbeat_monitor', None):
+                        self.heartbeat_monitor.ping()
                     self._evaluate_nse_symbols()
                 except Exception as e:
                     logger.error(f"NSE evaluation error: {e}")
@@ -1527,6 +1535,8 @@ class TradingAgent:
                 # Long-term dividend sleeve — separate cadence again (at most
                 # once per calendar month; SleeveManager gates itself).
                 try:
+                    if getattr(self, 'heartbeat_monitor', None):
+                        self.heartbeat_monitor.ping()
                     self._run_sleeve_cycle()
                 except Exception as e:
                     logger.error(f"Sleeve cycle error: {e}")
@@ -1534,6 +1544,8 @@ class TradingAgent:
                 # Core of the core-satellite split: index funds, rebalanced
                 # monthly (core_portfolio.py). Checked every 15 minutes.
                 try:
+                    if getattr(self, 'heartbeat_monitor', None):
+                        self.heartbeat_monitor.ping()
                     self._run_core_cycle()
                 except Exception as e:
                     logger.error(f"Core portfolio error: {e}")
@@ -1751,7 +1763,11 @@ class TradingAgent:
                         dec['llm_verdict']['secondary_verdict'] = validated['secondary_verdict']
 
                     if validated.get('action') == 'hold':
-                        if validated.get('consensus_verified') is False:
+                        if not self.config.get('llm_veto_enabled', True):
+                            logger.info(f"NSE LLM veto advisory only for {symbol} (llm_veto_enabled=False). Signal preserved.")
+                            validated['action'] = signals.get('action', 'hold')
+                            dec['llm_advisory_veto'] = True
+                        elif validated.get('consensus_verified') is False:
                             dec['skip_reason'] = 'consensus_disagreement'
                         else:
                             dec['skip_reason'] = 'llm_veto'

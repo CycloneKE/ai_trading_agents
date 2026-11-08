@@ -40,29 +40,52 @@ function usePolled(path, active, seconds = 30) {
 function AccountsStrip({ accounts, onOpen, mobile }) {
   if (!accounts.length) return null;
   return (
-    <div style={{ display: 'grid', gap: mobile ? '10px' : '16px', marginBottom: mobile ? '16px' : '24px',
-                  gridTemplateColumns: mobile ? 'minmax(0, 1fr)' : 'repeat(auto-fit, minmax(220px, 1fr))' }}>
+    <div style={{
+      display: 'grid', gap: mobile ? '10px' : '14px', marginBottom: mobile ? '16px' : '20px',
+      gridTemplateColumns: mobile ? 'minmax(0, 1fr)' : 'repeat(auto-fit, minmax(220px, 1fr))',
+    }}>
       {accounts.map((a) => {
         const cur = a.currency === 'KES' ? 'KES' : 'USD';
         return (
-          <button key={a.id} onClick={() => onOpen(a.id)} disabled={!a.enabled}
-                  style={{ ...card(mobile, { padding: '14px 16px' }), textAlign: 'left', cursor: a.enabled ? 'pointer' : 'default',
-                           border: `1px solid ${theme.colors.border}`, color: 'inherit', opacity: a.enabled ? 1 : 0.6 }}>
-            <div style={{ fontSize: '11px', fontWeight: 800, color: theme.colors.textMuted, textTransform: 'uppercase' }}>
-              {a.title} paper account
+          <button
+            key={a.id}
+            onClick={() => onOpen(a.id)}
+            disabled={!a.enabled}
+            style={{
+              ...card(mobile, { padding: '16px 18px' }),
+              textAlign: 'left',
+              cursor: a.enabled ? 'pointer' : 'default',
+              border: '1px solid rgba(255, 255, 255, 0.08)',
+              color: 'inherit',
+              opacity: a.enabled ? 1 : 0.6,
+              borderRadius: '14px',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: '10px', fontWeight: 800, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.6px' }}>
+                {a.title} Book
+              </span>
+              <span style={{ fontSize: '10px', fontWeight: 700, padding: '2px 6px', borderRadius: '4px', background: 'rgba(255, 255, 255, 0.06)', color: theme.colors.textSecondary }}>
+                {cur}
+              </span>
             </div>
             {a.enabled ? (
               <>
-                <div style={{ fontSize: '20px', fontWeight: 800, color: '#fff', marginTop: '4px' }}>{money(a.equity, cur, 0)}</div>
-                <div style={{ fontSize: '12px', marginTop: '2px' }}>
-                  <span style={{ color: gainColor(a.return_pct), fontWeight: 700 }}>{a.return_pct == null ? '—' : pct(a.return_pct)}</span>
-                  <span style={{ color: theme.colors.textMuted }}>
-                    {' '}since the start of {money(a.starting_capital, cur, 0)} · {a.holdings} holding{a.holdings === 1 ? '' : 's'}
+                <div style={{ fontSize: '22px', fontWeight: 900, color: '#fff', marginTop: '6px', fontVariantNumeric: 'tabular-nums' }}>
+                  {money(a.equity, cur, 0)}
+                </div>
+                <div style={{ fontSize: '12px', marginTop: '4px' }}>
+                  <span style={{ color: gainColor(a.return_pct), fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
+                    {a.return_pct == null ? '—' : pct(a.return_pct)}
+                  </span>
+                  <span style={{ color: theme.colors.textMuted, fontSize: '11px' }}>
+                    {' '}from {money(a.starting_capital, cur, 0)} · {a.holdings} pos
                   </span>
                 </div>
               </>
             ) : (
-              <div style={{ fontSize: '12px', color: theme.colors.textMuted, marginTop: '6px' }}>{a.reason || 'Off'}</div>
+              <div style={{ fontSize: '12px', color: theme.colors.textMuted, marginTop: '8px' }}>{a.reason || 'Off'}</div>
             )}
           </button>
         );

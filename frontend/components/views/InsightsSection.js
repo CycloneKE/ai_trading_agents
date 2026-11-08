@@ -9,7 +9,7 @@ import { theme } from '../DashboardStyles';
 import { card, columns, SectionHeader, SubTabs } from '../ui';
 
 const NewsFeed = ({ news = [], mobile }) => (
-  <div style={card({ padding: '16px' })}>
+  <div style={card(mobile, { padding: '18px' })}>
     <SectionHeader
       icon={Globe}
       title="Global Market Feeds"
@@ -28,12 +28,21 @@ const NewsFeed = ({ news = [], mobile }) => (
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
-            padding: '10px 12px',
+            padding: '10px 14px',
             background: 'rgba(255,255,255,0.02)',
-            borderRadius: theme.radius.sm,
-            border: `1px solid ${theme.colors.border}20`,
+            borderRadius: '10px',
+            border: '1px solid rgba(255,255,255,0.05)',
             textDecoration: 'none',
             color: 'inherit',
+            transition: 'all 0.15s ease',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.05)';
+            e.currentTarget.style.borderColor = theme.colors.secondary + '50';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.02)';
+            e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.05)';
           }}
         >
           <div style={{ flex: 1, minWidth: 0, marginRight: '12px' }}>
@@ -50,9 +59,9 @@ const NewsFeed = ({ news = [], mobile }) => (
 );
 
 const MarketFeeds = ({ data, mobile, onSector }) => (
-  <div style={columns(mobile ? '1fr' : '1.2fr 0.8fr', '16px')}>
+  <div style={columns('1.2fr 0.8fr', mobile, '16px')}>
     <NewsFeed news={data.news} mobile={mobile} />
-    <div style={card({ padding: '16px' })}>
+    <div style={card(mobile, { padding: '18px' })}>
       <SectionHeader
         icon={Layers}
         title="Sector Breakdown"
@@ -68,15 +77,29 @@ const MarketFeeds = ({ data, mobile, onSector }) => (
               display: 'flex',
               justifyContent: 'space-between',
               alignItems: 'center',
-              padding: '8px 10px',
+              padding: '10px 12px',
               background: 'rgba(255,255,255,0.02)',
-              borderRadius: theme.radius.sm,
+              borderRadius: '8px',
+              border: '1px solid rgba(255,255,255,0.04)',
               fontSize: '12px',
               cursor: onSector ? 'pointer' : 'default',
+              transition: 'all 0.15s ease',
+            }}
+            onMouseEnter={(e) => {
+              if (onSector) {
+                e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.05)';
+                e.currentTarget.style.borderColor = theme.colors.primary + '50';
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (onSector) {
+                e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.02)';
+                e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.04)';
+              }
             }}
           >
-            <span style={{ color: theme.colors.text, fontWeight: 500 }}>{sector}</span>
-            <span style={{ color: theme.colors.primary, fontWeight: 700 }}>{count}</span>
+            <span style={{ color: theme.colors.text, fontWeight: 600 }}>{sector}</span>
+            <span style={{ color: theme.colors.primary, fontWeight: 800 }}>{count}</span>
           </div>
         ))}
         {Object.keys(data.sectors || {}).length === 0 && (
