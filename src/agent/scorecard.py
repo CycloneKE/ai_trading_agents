@@ -485,6 +485,13 @@ def _forecast(sigs: List[Dict[str, Any]], closes_for: Optional[Callable[[str], D
 
 # ----------------------------------------------------------------- learning
 
+def _net_note(row: Dict[str, Any]) -> str:
+    """, average move after costs, when the ledger holds the costs."""
+    if row.get('net_move_pct') is None:
+        return ''
+    return f", {row['net_move_pct']:+.2f}% per signal after costs"
+
+
 def _skill(ledger: Optional[List[Dict[str, Any]]], config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Which strategies' signals beat chance, in which market, over the whole
     ledger (every version of the agent, since a strategy's raw signal has not
@@ -515,7 +522,8 @@ def _skill(ledger: Optional[List[Dict[str, Any]]], config: Optional[Dict[str, An
     worst = min(judged, key=lambda r: r['z'])
     return _m('strategy_skill', label, len(judged), f"{len(judged)} of {len(table)} pairs judged", INFO, target,
               f"Best: {best['source']} in {best['market']} ({best['hit_rate']:.0%} against {best['chance']:.0%} chance, "
-              f"z {best['z']:+.1f}). Worst: {worst['source']} in {worst['market']} (z {worst['z']:+.1f}). " + mode,
+              f"z {best['z']:+.1f}{_net_note(best)}). Worst: {worst['source']} in {worst['market']} "
+              f"(z {worst['z']:+.1f}{_net_note(worst)}). " + mode,
               detail=table)
 
 
