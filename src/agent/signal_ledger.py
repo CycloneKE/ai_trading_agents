@@ -164,7 +164,8 @@ def outcomes_for(sigs: Iterable[Dict[str, Any]], closes_for: Callable[[str], Dic
             ret = r if buy else -r
             try:
                 cost = float(round_trip_pct(sym, config))
-            except Exception:
+            except Exception as e:
+                logger.debug(f"cost model failed for {sym}: {e}")
                 cost = None
             rows.append({**s, 'horizon': int(h), 'ret': ret, 'chance': up if buy else 1 - up,
                          'cost': cost, 'net_ret': None if cost is None else ret - cost})

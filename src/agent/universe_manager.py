@@ -18,7 +18,7 @@ def effective_universe(config: Optional[Dict[str, Any]],
             if isinstance(item, dict):
                 sym = item.get('symbol')
                 mkt = (item.get('market') or '').lower()
-                if sym and (mkt in ('us', 'crypto', 'forex') or not mkt):
+                if sym and mkt in ('us', 'crypto', 'forex'):
                     if sym not in symbols:
                         symbols.append(sym)
     elif market in ('kenyan', 'nse'):
@@ -61,8 +61,8 @@ def compute_symbol_stats(fills: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any
         for pnl in reversed(s['recent_pnls']):
             if pnl < 0:
                 consec += 1
-            elif pnl > 0:
-                break
+            else:
+                break  # a win or a break-even trade ends the streak
         s['consecutive_losses'] = consec
         s['win_rate'] = (s['wins'] / s['trades']) if s['trades'] > 0 else 0.0
         
@@ -74,7 +74,11 @@ def propose_removals(tracked_symbols: Set[str],
                      config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Flags assets experiencing persistent consecutive losses or negative return regimes."""
     proposals: List[Dict[str, Any]] = []
-    
+    # Thresholds are in the book's currency; override under `universe_pruning`.
+    cfg = (config or {}).get('universe_pruning') or {}
+    streak_pnl = float(cfg.get('streak_loss_threshold', -100))
+    severe_pnl = float(cfg.get('severe_loss_threshold', -500))
+
     for sym in tracked_symbols:
         stat = symbol_stats.get(sym)
         if not stat:
@@ -83,7 +87,7 @@ def propose_removals(tracked_symbols: Set[str],
         pnl = stat.get('realized_pnl', 0.0)
         trades = stat.get('trades', 0)
         
-        if consec >= 4 and pnl < -100:
+        if consec >= 4 and pnl < streak_pnl:
             proposals.append({
                 'symbol': sym,
                 'reason': f"Persistent drawdowns: {consec} consecutive losses with realized PnL of ${pnl:,.2f}",
@@ -91,7 +95,7 @@ def propose_removals(tracked_symbols: Set[str],
                 'realized_pnl': pnl,
                 'trades': trades
             })
-        elif trades >= 10 and stat.get('win_rate', 0.0) < 0.20 and pnl < -500:
+        elif trades >= 10 and stat.get('win_rate', 0.0) < 0.20 and pnl < severe_pnl:
             proposals.append({
                 'symbol': sym,
                 'reason': f"Severe underperformance: {stat.get('win_rate', 0.0):.1%} win rate over {trades} trades (${pnl:,.2f} PnL)",

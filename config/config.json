@@ -224,8 +224,8 @@
         "crypto"
       ],
       "sma_period": 200,
-      "band": 0.02,
-      "weight": 0.2,
+      "band": 0.05,
+      "weight": 1.0,
       "max_position_size": 0.05
     },
     "forex_trend": {

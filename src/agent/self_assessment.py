@@ -27,6 +27,7 @@ import os
 import json
 import sqlite3
 import logging
+import re
 import threading
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
@@ -311,40 +312,89 @@ def describe(review: Dict[str, Any]) -> str:
         (f"; {len(review.get('rejected') or [])} set aside" if review.get('rejected') else '')
 
 
+_OVERLAY_LOCK = threading.Lock()
+# Only these settings may be changed through the overlay: a strategy's weight
+# and the tracked symbol lists. Anything else (risk limits, halts, the
+# llm_veto flag, credentials) is ignored.
+_OVERLAY_ALLOWED = (
+    re.compile(r'^strategies\.[A-Za-z0-9_]+\.weight$'),
+    re.compile(r'^data_manager\.(symbols|crypto_symbols|forex_symbols)$'),
+)
+
+
+def _overlay_key_allowed(key: str) -> bool:
+    return any(p.match(key) for p in _OVERLAY_ALLOWED)
+
+
+def _read_overlay(overlay_path: str) -> Dict[str, Any]:
+    with open(overlay_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError('overlay is not a JSON object')
+    return data
+
+
 def apply_overlay(config: Dict[str, Any], overlay_path: str) -> Dict[str, Any]:
-    """Apply dotted key overrides from config_overlay.json to config dict in place."""
+    """Apply allow-listed dotted key overrides from config_overlay.json to config in place."""
     if not os.path.exists(overlay_path):
         return config
     try:
-        with open(overlay_path, 'r', encoding='utf-8') as f:
-            overlay = json.load(f)
-        for key, val in overlay.items():
-            if str(key).startswith('_'):
-                continue
-            parts = key.split('.')
-            target = config
-            for p in parts[:-1]:
-                target = target.setdefault(p, {})
-            target[parts[-1]] = val
+        overlay = _read_overlay(overlay_path)
     except Exception as e:
-        logger.warning(f"Failed to apply config overlay from {overlay_path}: {e}")
+        logger.warning(f"Failed to read config overlay from {overlay_path}: {e}")
+        return config
+    for key, val in overlay.items():
+        key = str(key)
+        if key.startswith('_'):
+            continue
+        if not _overlay_key_allowed(key):
+            logger.warning(f"Config overlay key {key!r} is not overridable; ignored")
+            continue
+        parts = key.split('.')
+        target = config
+        ok = True
+        for p in parts[:-1]:
+            nxt = target.get(p)
+            if nxt is None:
+                nxt = target[p] = {}
+            if not isinstance(nxt, dict):
+                ok = False
+                break
+            target = nxt
+        if ok:
+            target[parts[-1]] = val
+        else:
+            logger.warning(f"Config overlay key {key!r} skipped: {p!r} is not a section")
     return config
 
 
 def _write_overlay_key(key: str, value: Any, overlay_path: str) -> None:
-    """Write or update a key in config_overlay.json."""
-    data = {}
-    if os.path.exists(overlay_path):
+    """Write or update an allow-listed key in config_overlay.json (atomic, locked)."""
+    if not _overlay_key_allowed(key):
+        logger.error(f"Refusing to write overlay key {key!r}: not an overridable setting")
+        return
+    with _OVERLAY_LOCK:
+        data: Dict[str, Any] = {}
+        if os.path.exists(overlay_path):
+            try:
+                data = _read_overlay(overlay_path)
+            except Exception as e:
+                # Keep the unreadable file for inspection rather than wiping
+                # every earlier override.
+                backup = overlay_path + '.corrupt'
+                try:
+                    os.replace(overlay_path, backup)
+                except OSError:
+                    pass
+                logger.error(f"Overlay {overlay_path} unreadable ({e}); moved to {backup}")
+                data = {}
+        data[key] = value
+        data['_updated_at'] = datetime.now(timezone.utc).isoformat()
+        tmp = overlay_path + '.tmp'
         try:
-            with open(overlay_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        except Exception:
-            data = {}
-    data[key] = value
-    data['_updated_at'] = datetime.now(timezone.utc).isoformat()
-    try:
-        os.makedirs(os.path.dirname(os.path.abspath(overlay_path)), exist_ok=True)
-        with open(overlay_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        logger.error(f"Failed to write overlay key {key} to {overlay_path}: {e}")
+            os.makedirs(os.path.dirname(os.path.abspath(overlay_path)), exist_ok=True)
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, overlay_path)
+        except Exception as e:
+            logger.error(f"Failed to write overlay key {key} to {overlay_path}: {e}")

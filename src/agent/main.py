@@ -1034,6 +1034,8 @@ class TradingAgent:
                     except Exception as e:
                         logger.error(f"Commodity watch error: {e}")
 
+                if getattr(self, 'heartbeat_monitor', None):
+                    self.heartbeat_monitor.ping()
                 # Pull fill results for submitted orders into the journal so
                 # attribution and duplicate-close checks see current state.
                 if self.order_journal:
@@ -1099,6 +1101,8 @@ class TradingAgent:
                 if market_data:
                     # --- Stop-loss enforcement ---
                     self._enforce_stop_losses(stop_loss_pct, trailing_stop_pct)
+                    if getattr(self, 'heartbeat_monitor', None):
+                        self.heartbeat_monitor.ping()
                     
                     # Swarm: Run parallel Sector Specialists before the symbol loop.
                     # Rate-limited: sector outlooks change slowly and each pass
@@ -1149,7 +1153,10 @@ class TradingAgent:
                                     ttl_seconds=int(2 * sector_interval_s))
                                 return sect, res
                                 
-                            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                            # No `with`: its exit waits for every thread, so one hung
+                            # LLM call froze the loop past the heartbeat timeout.
+                            executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
+                            try:
                                 futures = {
                                     executor.submit(run_sector_analysis_task, sect, syms): sect
                                     for sect, syms in symbols_by_sector.items()
@@ -1163,6 +1170,10 @@ class TradingAgent:
                                             logger.error(f"Failed parallel sector specialist for {sect}: {e}")
                                 except concurrent.futures.TimeoutError:
                                     logger.warning("Parallel sector specialist analysis timed out after 25s. Continuing cycle.")
+                            finally:
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                if getattr(self, 'heartbeat_monitor', None):
+                                    self.heartbeat_monitor.ping()
                         except Exception as e:
                             logger.error(f"Error in parallel swarm sector execution: {e}")
 
@@ -1357,9 +1368,12 @@ class TradingAgent:
                                         dec['llm_verdict']['secondary_verdict'] = validated_signal['secondary_verdict']
 
                                     if validated_signal.get('action') == 'hold':
-                                        if not self.config.get('llm_veto_enabled', True):
+                                        if TradingAgent._veto_is_advisory(self, symbol, validated_signal):
                                             logger.info(f"LLM veto advisory only for {symbol} (llm_veto_enabled=False). Signal preserved.")
                                             validated_signal['action'] = symbol_signals['action']
+                                            validated_signal['confidence'] = symbol_signals.get('confidence', validated_signal.get('confidence'))
+                                            if 'position_size' in symbol_signals:
+                                                validated_signal['position_size'] = symbol_signals['position_size']
                                             dec['llm_advisory_veto'] = True
                                         elif validated_signal.get('consensus_verified') is False:
                                             dec['skip_reason'] = 'consensus_disagreement'
@@ -1529,6 +1543,8 @@ class TradingAgent:
                     if getattr(self, 'heartbeat_monitor', None):
                         self.heartbeat_monitor.ping()
                     self._evaluate_nse_symbols()
+                    if getattr(self, 'heartbeat_monitor', None):
+                        self.heartbeat_monitor.ping()
                 except Exception as e:
                     logger.error(f"NSE evaluation error: {e}")
 
@@ -1538,6 +1554,8 @@ class TradingAgent:
                     if getattr(self, 'heartbeat_monitor', None):
                         self.heartbeat_monitor.ping()
                     self._run_sleeve_cycle()
+                    if getattr(self, 'heartbeat_monitor', None):
+                        self.heartbeat_monitor.ping()
                 except Exception as e:
                     logger.error(f"Sleeve cycle error: {e}")
 
@@ -1547,6 +1565,8 @@ class TradingAgent:
                     if getattr(self, 'heartbeat_monitor', None):
                         self.heartbeat_monitor.ping()
                     self._run_core_cycle()
+                    if getattr(self, 'heartbeat_monitor', None):
+                        self.heartbeat_monitor.ping()
                 except Exception as e:
                     logger.error(f"Core portfolio error: {e}")
 
@@ -1567,6 +1587,24 @@ class TradingAgent:
                 if getattr(self, 'self_healing', None):
                     self.self_healing.loop_failed(e)
                 time.sleep(loop_interval)  # Wait before retrying
+
+    def _veto_is_advisory(self, symbol, verdict) -> bool:
+        """True when an LLM 'hold' should be advisory only.
+
+        Only when llm_veto_enabled is false, and never for crypto (the 18%-win
+        strategy has no other gate) nor when the consensus check disagreed.
+        """
+        if self.config.get('llm_veto_enabled', True):
+            return False
+        if verdict.get('consensus_verified') is False:
+            return False
+        try:
+            from src.connectors.alpaca_broker import is_crypto_symbol
+            if is_crypto_symbol(symbol):
+                return False
+        except Exception:
+            pass
+        return True
 
     def _evaluate_nse_symbols(self):
         """Run the standard decision pipeline over NSE symbols and turn
@@ -1763,9 +1801,12 @@ class TradingAgent:
                         dec['llm_verdict']['secondary_verdict'] = validated['secondary_verdict']
 
                     if validated.get('action') == 'hold':
-                        if not self.config.get('llm_veto_enabled', True):
+                        if TradingAgent._veto_is_advisory(self, symbol, validated):
                             logger.info(f"NSE LLM veto advisory only for {symbol} (llm_veto_enabled=False). Signal preserved.")
                             validated['action'] = signals.get('action', 'hold')
+                            validated['confidence'] = signals.get('confidence', validated.get('confidence'))
+                            if 'position_size' in signals:
+                                validated['position_size'] = signals['position_size']
                             dec['llm_advisory_veto'] = True
                         elif validated.get('consensus_verified') is False:
                             dec['skip_reason'] = 'consensus_disagreement'
