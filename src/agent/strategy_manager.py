@@ -112,6 +112,9 @@ class StrategyManager:
         self.performance_window = config.get('performance_window', 30)  # Days
         self.rebalance_frequency = config.get('rebalance_frequency', 7)  # Days
         self.min_trade_confidence = config.get('min_trade_confidence', 0.50)
+        # Judge sells among the strategies with a view (see
+        # _adaptive_confidence_ensemble). False restores the old rule.
+        self.exit_ignores_hold_votes = bool(config.get('exit_ignores_hold_votes', True))
         # (strategy, market) -> weight scale from what its signals did next
         # (signal_ledger.py). Empty unless learning.signal_skill_tilt is on.
         self.signal_skill: Dict[tuple, float] = {}
@@ -450,6 +453,11 @@ class StrategyManager:
                 except Exception as e:
                     logger.debug(f"Regime filter failed for {symbol}: {e}")
                     regime = UNKNOWN
+                if not strategy_signals:
+                    # Only volatile chop can silence everyone: stand aside.
+                    return {'symbol': symbol, 'action': 'hold', 'confidence': 0.0,
+                            'position_size': 0.0, 'regime': regime,
+                            'timestamp': datetime.utcnow().isoformat()}
 
             if self.ensemble_method == 'weighted_average':
                 result = self._weighted_average_ensemble(strategy_signals, symbol)
@@ -654,7 +662,10 @@ class StrategyManager:
         total_weight = 0.0
         total_confidence = 0.0
         total_position_size = 0.0
-        
+        raw_weights: Dict[str, float] = {}
+        sell_weighted = 0.0
+        buy_weighted = 0.0
+
         # Calculate volatility from market data if available. `data` here is
         # already the per-symbol-extracted flat dict (close/open/... at the
         # top level, not nested under a 'data'/symbol wrapper) — read it
@@ -698,12 +709,17 @@ class StrategyManager:
             action = signals.get('action', 'hold')
             confidence = signals.get('confidence', 0.0)
             position_size = signals.get('position_size', 0.0)
-            
+
             action_scores[action] += base_weight * confidence
             total_weight += base_weight
             total_confidence += base_weight * confidence
             total_position_size += base_weight * position_size
-            
+            raw_weights[name] = base_weight
+            if action == 'sell':
+                sell_weighted += base_weight * confidence
+            elif action == 'buy':
+                buy_weighted += base_weight * confidence
+
         if total_weight > 0:
             for action in action_scores:
                 action_scores[action] /= total_weight
@@ -712,12 +728,36 @@ class StrategyManager:
             
         final_action = max(action_scores, key=action_scores.get)
         final_confidence = action_scores[final_action]
-        
+
         # Require a minimum adaptive confidence to actually enter a trade
         if final_action != 'hold' and final_confidence < self.min_trade_confidence:
             final_action = 'hold'
             total_position_size = 0.0
-            
+
+        # Exits are judged among the strategies that have a view. A "hold"
+        # vote means "no opinion", and counted in the denominator it diluted
+        # every sell: a mean-reversion sell needed 0.95 confidence to pass in
+        # a range, and an overbought RSI sell could never pass in an uptrend
+        # (0.40 at most). So positions were almost only ever closed by their
+        # stops, which turned bounces that worked and then faded into losses.
+        # Entries keep the stricter rule above. The agent is long-only, so a
+        # sell can only close or trim a holding; with nothing held it is
+        # dropped before any order (main._position_gate).
+        # Every sell is scored this way, including one that already passed
+        # the diluted rule, so confidence (which decides a full exit against
+        # a trim, position_rules.plan_exit) never falls as the sell strengthens.
+        if final_action in ('hold', 'sell') and self.exit_ignores_hold_votes:
+            opinion_weight = sum(raw_weights[n] for n, s in strategy_signals.items()
+                                 if s.get('action') in ('buy', 'sell'))
+            if opinion_weight > 0:
+                sell_view = sell_weighted / opinion_weight
+                buy_view = buy_weighted / opinion_weight
+                if sell_view > buy_view and sell_view >= self.min_trade_confidence:
+                    final_action = 'sell'
+                    final_confidence = sell_view
+                    total_position_size = 0.0
+                    action_scores['sell_among_views'] = sell_view
+
         return {
             'symbol': symbol,
             'action': final_action,

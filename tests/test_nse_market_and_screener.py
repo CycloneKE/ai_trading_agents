@@ -474,9 +474,9 @@ def test_the_learning_endpoint_shows_where_each_strategy_votes(_api_user):
     data = client.get('/api/strategies/learning', headers=_api_user).get_json()
     by = {s['name']: s for s in data['strategies']}
     assert by['crypto_trend']['markets'] == ['crypto']
-    assert by['momentum']['markets'] == ['us_equity', 'nse']
+    assert by['momentum']['markets'] == ['us_equity']
     assert by['nse_rotation']['history_days'] == 141
-    assert data['strategy_markets'] == {'crypto': ['crypto_trend']}
+    assert data['strategy_markets'] == {'crypto': ['crypto_trend'], 'nse': ['nse_rotation']}
     assert data['tuner']['log'][0]['outcome'] == 'adopted'
     import src.api.auth as auth
     users = json.loads(open(auth.USERS_FILE).read())

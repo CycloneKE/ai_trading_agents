@@ -154,7 +154,29 @@ class VolatilityTracker:
         return (a / last) if last > 0 else None
 
 
-def stop_distances(cfg: Dict[str, Any], atr_pct: Optional[float] = None) -> Dict[str, float]:
+# Keys a market may override in risk_limits.market_overrides.<market>.
+MARKET_STOP_KEYS = ('stop_loss_pct', 'trailing_stop_pct', 'stop_loss_atr_mult',
+                    'trailing_stop_atr_mult', 'min_stop_pct', 'max_stop_pct',
+                    'trailing_stop')
+
+
+def risk_limits_for(cfg: Dict[str, Any], market: Optional[str] = None) -> Dict[str, Any]:
+    """risk_limits with `market`'s overrides applied, when it has any.
+
+    A trend strategy that holds through pullbacks (crypto's 200-day trend)
+    cannot live with the same trailing stop as a strategy that trades
+    bounces: the stop sells the dip, the still-valid trend signal buys it
+    back a day later, and every cycle locks in the drawdown and pays the fees.
+    """
+    risk = cfg.get('risk_limits', cfg) if isinstance(cfg, dict) else {}
+    overrides = ((risk.get('market_overrides') or {}).get(market) or {}) if market else {}
+    if not overrides:
+        return risk
+    return {**risk, **{k: v for k, v in overrides.items() if k in MARKET_STOP_KEYS}}
+
+
+def stop_distances(cfg: Dict[str, Any], atr_pct: Optional[float] = None,
+                   market: Optional[str] = None) -> Dict[str, float]:
     """Resolve (hard stop, trailing stop) as fractions of price.
 
     With an ATR reading, each is `<n> * ATR%` clamped into [min_stop_pct,
@@ -164,10 +186,15 @@ def stop_distances(cfg: Dict[str, Any], atr_pct: Optional[float] = None) -> Dict
     The clamp matters in both directions: a very quiet instrument would
     otherwise get a stop so tight that the spread alone trips it, and a very
     volatile one a stop so wide it is no longer a stop.
+
+    `market` applies risk_limits.market_overrides for that market. With
+    `trailing_stop: false` there the trailing distance is 0.0, which every
+    caller reads as "no trailing stop"; the hard stop always remains.
     """
-    risk = cfg.get('risk_limits', cfg) if isinstance(cfg, dict) else {}
+    risk = risk_limits_for(cfg, market)
+    trailing_on = risk.get('trailing_stop', True) is not False
     fixed_stop = float(risk.get('stop_loss_pct', 0.05))
-    fixed_trail = float(risk.get('trailing_stop_pct', 0.03))
+    fixed_trail = float(risk.get('trailing_stop_pct', 0.03)) if trailing_on else 0.0
     if atr_pct is None or atr_pct <= 0:
         return {'stop_loss_pct': fixed_stop, 'trailing_stop_pct': fixed_trail,
                 'source': 'fixed'}
@@ -183,5 +210,5 @@ def stop_distances(cfg: Dict[str, Any], atr_pct: Optional[float] = None) -> Dict
         return max(lo, min(hi, x))
 
     return {'stop_loss_pct': clamp(stop_mult * atr_pct),
-            'trailing_stop_pct': clamp(trail_mult * atr_pct),
+            'trailing_stop_pct': clamp(trail_mult * atr_pct) if trailing_on else 0.0,
             'source': 'atr'}

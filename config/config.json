@@ -352,7 +352,17 @@
     "trailing_stop_atr_mult": 3.0,
     "min_stop_pct": 0.02,
     "max_stop_pct": 0.25,
-    "atr_length": 14
+    "atr_length": 14,
+    "market_overrides": {
+      "_comment": "Per-market stop rules (src/agent/volatility.py risk_limits_for). Crypto trades only crypto_trend, which holds a coin while it is above its 200-day average and exits when it falls 5% below it. A 3x ATR trailing stop (about 10% on a coin moving 3.5% a day) sold every ordinary pullback, the still-valid trend signal bought it back a day later, and each cycle locked in the dip and paid about 0.7% in fees. Crypto therefore has no trailing stop, only a wide emergency stop of 6x ATR (between 20% and 30%), and positions are sized off that wider stop so a stop-out still costs about risk_per_trade. Delete the crypto entry to restore the shared stops.",
+      "crypto": {
+        "trailing_stop": false,
+        "stop_loss_atr_mult": 6.0,
+        "stop_loss_pct": 0.2,
+        "min_stop_pct": 0.2,
+        "max_stop_pct": 0.3
+      }
+    }
   },
   "brokers": {
     "paper_broker": {
@@ -617,9 +627,12 @@
     "monthly_budget_usd": 20
   },
   "strategy_markets": {
-    "_comment": "For each market listed, only these strategies vote on its symbols; a market not listed is open to every strategy (a strategy's own `markets` still applies). Crypto trades on the 200-day trend alone, as the gap analysis recommends: the fast strategies' daily signals cost too much there. Delete the crypto line to let every strategy vote on crypto again.",
+    "_comment": "For each market listed, only these strategies vote on its symbols; a market not listed is open to every strategy (a strategy's own `markets` still applies). Crypto trades on the 200-day trend alone, as the gap analysis recommends: the fast strategies' daily signals cost too much there. Delete the crypto line to let every strategy vote on crypto again. NSE likewise trades on nse_rotation alone: a round trip there costs about 3.9% with slippage, more than the 2-4% moves momentum, mean reversion and RSI aim for, so their NSE trades lost to costs. Delete the nse line to let every strategy vote on NSE again.",
     "crypto": [
       "crypto_trend"
+    ],
+    "nse": [
+      "nse_rotation"
     ]
   },
   "core_satellite": {

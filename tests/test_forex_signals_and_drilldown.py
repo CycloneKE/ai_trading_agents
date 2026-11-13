@@ -92,14 +92,16 @@ def test_forex_trend_abstains_until_it_has_fifty_bars_then_buys_above_its_band(m
 def test_a_currency_sized_uptrend_reaches_a_buy_in_the_full_ensemble(manager):
     """End to end through the regime filter and the confidence gate: the same
     percentage move that was silent before is a buy on a pair, and still
-    silent on a stock."""
+    no buy on a stock. (The stock's RSI reads 100 on this perfectly smooth
+    rise while its momentum is quiet, so it is now an overbought sell: a
+    profit-take on a holding, dropped before any order when none is held.)"""
     up = _ramp(1.10, 0.008)
     fresh = StrategyManager(CONFIG)
     fresh.warm_start({'EUR_USD': up[:-1], 'AAPL': [p * 100 for p in up[:-1]]})
     fx = fresh.generate_signals({'symbol': 'EUR_USD', 'price': up[-1], 'bar_date': 'd1'})
     stock = fresh.generate_signals({'symbol': 'AAPL', 'price': up[-1] * 100, 'bar_date': 'd1'})
     assert fx['action'] == 'buy' and fx['confidence'] >= CONFIG.get('min_trade_confidence', 0.5)
-    assert stock['action'] == 'hold'
+    assert stock['action'] != 'buy'
 
 
 # ------------------------------------------------- charts and the drill-down

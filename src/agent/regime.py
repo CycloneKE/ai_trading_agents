@@ -146,6 +146,17 @@ def is_active(strategy_name: str, regime: str) -> bool:
     return regime in FAMILY_REGIMES[family]
 
 
+# The fast, daily-bar technical strategies. In volatile chop none of them may
+# open a position. RSI belongs here although it has no regime family: it is
+# the strategy that buys "oversold", which in a crash is exactly what not to do.
+FAST_STRATEGY_KEYS = ('momentum', 'reversion', 'rsi')
+
+
+def is_fast(strategy_name: str) -> bool:
+    name = (strategy_name or '').lower()
+    return any(key in name for key in FAST_STRATEGY_KEYS)
+
+
 def filter_signals(strategy_signals: Dict[str, Dict[str, Any]],
                    regime: str) -> Dict[str, Dict[str, Any]]:
     """Drop the votes of strategies that are out of regime.
@@ -154,10 +165,22 @@ def filter_signals(strategy_signals: Dict[str, Dict[str, Any]],
     still counts toward the denominator keeps the opposing strategy below the
     confidence gate, which is the failure this exists to remove.
 
-    Never returns empty: if the filter would silence everyone, the unfiltered
-    set is returned so the ensemble decides as it did before.
+    Never returns empty in the ordinary regimes: if the filter would silence
+    everyone, the unfiltered set is returned so the ensemble decides as it
+    did before.
+
+    Volatile chop is the exception: it stands aside from new buys. Every fast
+    strategy's buy and hold votes are dropped, their sells are kept (so a
+    holding can still be closed), and slow strategies vote as usual. This may
+    leave nobody, which means "no trade". It used to drop momentum and mean
+    reversion only, leaving RSI the sole voter; RSI's confidence starts at
+    0.5 on its first oversold reading, the same as the entry bar, so the
+    filter meant to stay out of wild markets bought every sell-off.
     """
     if not strategy_signals:
         return strategy_signals
+    if regime == VOLATILE_CHOP:
+        return {n: s for n, s in strategy_signals.items()
+                if not is_fast(n) or (isinstance(s, dict) and s.get('action') == 'sell')}
     kept = {n: s for n, s in strategy_signals.items() if is_active(n, regime)}
     return kept or strategy_signals
