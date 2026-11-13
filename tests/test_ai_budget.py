@@ -124,10 +124,19 @@ SIGNAL = {'action': 'buy', 'confidence': 0.8, 'position_size': 0.04}
 
 
 def test_claude_reviews_first_while_it_has_budget(monkeypatch, tmp_path):
-    orch = _orchestrator(monkeypatch, tmp_path, _Client())
+    client = _Client()
+    orch = _orchestrator(monkeypatch, tmp_path, client)
     assert orch._provider_order() == ['anthropic', 'gemini']
+    # Since the dual-model check (validate_trade's consensus step), the free
+    # model is asked to confirm Claude's actionable verdict. It must answer
+    # that question; the stand-in's plain "hold" verdict used to read as a
+    # veto, which this test does not exercise (see test_deep_memory_and_consensus).
+    orch._call_gemini = lambda s, u, fb, model_override=None: {
+        'agree': True, 'action': 'buy', 'confidence': 0.7, 'reasoning': 'agreed'}
     verdict = orch.validate_trade('AAPL', SIGNAL, {'close': 100.0})
+    assert len(client.requests) == 1                     # Claude reviewed it
     assert verdict['reasoning'] == 'ok' and verdict['strategy'] == 'llm_orchestrated'
+    assert verdict['action'] == 'buy' and verdict['consensus_verified'] is True
 
 
 def test_the_free_model_takes_over_when_claude_fails_or_the_cap_is_reached(monkeypatch, tmp_path):

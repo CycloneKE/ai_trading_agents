@@ -134,8 +134,14 @@ def test_a_live_price_already_stored_is_never_overwritten(data_dir):
     assert 'aib_market_pulse' not in (data_dir / 'nse_historical' / 'KCB.csv').read_text()
 
 
-def test_the_agent_uses_what_the_report_says(data_dir):
+def test_the_agent_uses_what_the_report_says(data_dir, monkeypatch):
     mp.ingest('report.pdf', TEXTS)
+    # The sample report is dated 23 September 2026 and a rate older than 30
+    # days is not used, so read the rates as of the day after the report:
+    # with the real clock this test began failing on its own a month later.
+    real_latest = mp.latest_rates
+    monkeypatch.setattr(mp, 'latest_rates',
+                        lambda max_age_days=30, today=None: real_latest(max_age_days, date(2026, 9, 24)))
     today = date(2026, 9, 24)
     ctx = mp.research_context('ABSA', today=today)
     assert 'P/E 8.23x' in ctx['rationale'] and 'Appointment of Managing Director' in ctx['rationale']

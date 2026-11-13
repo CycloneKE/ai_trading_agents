@@ -1356,7 +1356,7 @@ class TradingAgent:
                                     from src.agent.verdict_scoreboard import summary_line
 
                                     # Build episodic memory for this asset
-                                    symbol_memory = self._build_symbol_episodic_memory(symbol)
+                                    symbol_memory = TradingAgent._build_symbol_episodic_memory(self, symbol)
 
                                     # Validate with LLM Orchestrator
                                     validated_signal = self.components['llm_orchestrator'].validate_trade(
@@ -1794,7 +1794,7 @@ class TradingAgent:
                     dec['skip_reason'] = blocked
                     validated = {'action': 'hold', 'confidence': 0.0}
                 elif signals and proposed != 'hold' and llm:
-                    symbol_memory = self._build_symbol_episodic_memory(symbol)
+                    symbol_memory = TradingAgent._build_symbol_episodic_memory(self, symbol)
                     validated = llm.validate_trade(symbol, signals, symbol_data, None,
                                                    research_context=TradingAgent._nse_research(self, symbol),
                                                    episodic_memory=symbol_memory)
@@ -2062,7 +2062,7 @@ class TradingAgent:
                 logger.debug(f"Episodic memory decision retrieval error for {symbol}: {e}")
 
         # 2. Recent orders & fills on this symbol
-        oj = getattr(self, 'order_journal', None) or self.components.get('order_journal')
+        oj = getattr(self, 'order_journal', None) or (getattr(self, 'components', None) or {}).get('order_journal')
         if oj:
             try:
                 recent_orders = oj.orders_for_symbol(symbol, limit=3)
