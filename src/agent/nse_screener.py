@@ -86,8 +86,11 @@ class StockMetrics:
     rank: Optional[int] = None
 
 
-def real_rows(symbol: str, csv_dir: Path) -> List[Dict[str, Any]]:
-    """Real daily bars, one per date, oldest first."""
+def real_rows(symbol: str, csv_dir: Path, actions=None) -> List[Dict[str, Any]]:
+    """Real daily bars, one per date, oldest first, closes adjusted for bonus
+    issues, splits and dividends (nse_corporate_actions.py) so an event does
+    not read as a fall in the momentum the screen ranks on. `actions`
+    overrides the configured list (tests)."""
     from src.connectors.nse_scraper import REAL_NSE_SOURCES
     path = Path(csv_dir) / f"{symbol.upper()}.csv"
     by_date: Dict[str, Dict[str, Any]] = {}
@@ -109,7 +112,15 @@ def real_rows(symbol: str, csv_dir: Path) -> List[Dict[str, Any]]:
     except (OSError, csv.Error, UnicodeDecodeError) as e:
         logger.warning(f"Could not read the NSE history for {symbol}: {e}")
         return []
-    return [by_date[d] for d in sorted(by_date)]
+    rows = [by_date[d] for d in sorted(by_date)]
+    from src.agent import nse_corporate_actions as nca
+    mine = nca.for_symbol(nca.load_actions() if actions is None else actions, symbol)
+    if mine and rows:
+        adjusted = nca.adjust_rows([(date.fromisoformat(r['date']), r['close'], r['close'], r['close'])
+                                    for r in rows], mine)
+        for r, a in zip(rows, adjusted):
+            r['close'] = a[3]
+    return rows
 
 
 def metrics_for(symbol: str, rows: List[Dict[str, Any]], cfg: Dict[str, Any],

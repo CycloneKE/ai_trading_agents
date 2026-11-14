@@ -53,7 +53,10 @@ def _to_history(rows: Iterable[Row], today: date, bars: int) -> Optional[Dict[st
         return None
     return {'close': [r[3] for r in kept],
             'high': [r[1] for r in kept],
-            'low': [r[2] for r in kept]}
+            'low': [r[2] for r in kept],
+            # The day of the last bar: an NSE corporate action dated after it
+            # is not in these prices yet (main._apply_nse_actions).
+            'last_date': kept[-1][0].isoformat()}
 
 
 def _period_for(bars: int) -> str:
@@ -83,14 +86,23 @@ def fetch_daily_history(symbols: Iterable[str], bars: int = 60,
 
 
 def read_nse_history(symbols: Iterable[str], csv_dir: Path, bars: int = 60,
-                     today: Optional[date] = None) -> History:
+                     today: Optional[date] = None, actions=None) -> History:
     """Real daily bars per NSE symbol from the scraper's CSVs.
 
     Synthetic rows are dropped, as are rows with no recorded source, since a
     price of unknown origin must not set a moving average that decides a
     real-money order ticket.
+
+    Prices are adjusted for bonus issues, splits and dividends
+    (nse_corporate_actions.py), as Yahoo's US history already is: read raw,
+    a bonus issue or an ex-dividend day looked like a fall to the rotation
+    strategy, the regime filter and the volatility behind the stops.
+    `actions` overrides the configured list (tests).
     """
+    from src.agent import nse_corporate_actions as nca
     today = today or datetime.now(timezone.utc).date()
+    if actions is None:
+        actions = nca.load_actions()
     out: History = {}
     for sym in symbols:
         path = Path(csv_dir) / f"{sym}.csv"
@@ -112,7 +124,8 @@ def read_nse_history(symbols: Iterable[str], csv_dir: Path, bars: int = 60,
                     rows.append((d, high, low, close))
             # One row per date: the scraper can append the same day twice.
             by_date = {r[0]: r for r in rows}
-            hist = _to_history(by_date.values(), today, bars)
+            adjusted = nca.adjust_rows(list(by_date.values()), nca.for_symbol(actions, sym))
+            hist = _to_history(adjusted, today, bars)
         except Exception as e:
             logger.warning(f"NSE history read failed for {sym}: {e}")
             continue

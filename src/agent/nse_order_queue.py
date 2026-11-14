@@ -62,6 +62,17 @@ CREATE TABLE IF NOT EXISTS nse_paper_highs (
     high_kes    REAL NOT NULL
 );
 
+-- Corporate actions (bonus issue, split, dividend) already applied to a
+-- position's stored high, so a restart never scales it twice.
+CREATE TABLE IF NOT EXISTS nse_paper_high_actions (
+    symbol      TEXT NOT NULL,
+    opened_at   TEXT NOT NULL,
+    action_key  TEXT NOT NULL,
+    factor      REAL NOT NULL,
+    applied_at  TEXT NOT NULL,
+    PRIMARY KEY (symbol, opened_at, action_key)
+);
+
 -- The paper account's value each trading day (its latest reading that
 -- day), for the dashboard's equity curve.
 CREATE TABLE IF NOT EXISTS nse_paper_equity (
@@ -321,6 +332,33 @@ class NseOrderQueue:
                 " high_kes = excluded.high_kes", (symbol, opened_at, float(high)))
             self._conn.commit()
             return high
+
+    def scale_paper_high(self, symbol: str, opened_at: str, action_key: str, factor: float) -> bool:
+        """Multiply this position's stored high by `factor` once per action.
+
+        A bonus issue, split or dividend moves the price down with no loss to
+        the holder; the high recorded before it is in the old terms and would
+        otherwise set a trailing stop the next ordinary day could trip.
+        Returns True when it scaled (False: already done, or no high stored).
+        """
+        with self._lock:
+            done = self._conn.execute(
+                "SELECT 1 FROM nse_paper_high_actions WHERE symbol = ? AND opened_at = ? AND action_key = ?",
+                (symbol, opened_at, action_key)).fetchone()
+            if done:
+                return False
+            row = self._conn.execute(
+                "SELECT opened_at, high_kes FROM nse_paper_highs WHERE symbol = ?", (symbol,)).fetchone()
+            scaled = bool(row and row[0] == opened_at)
+            if scaled:
+                self._conn.execute("UPDATE nse_paper_highs SET high_kes = ? WHERE symbol = ?",
+                                   (float(row[1]) * float(factor), symbol))
+            self._conn.execute(
+                "INSERT INTO nse_paper_high_actions (symbol, opened_at, action_key, factor, applied_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (symbol, opened_at, action_key, float(factor), datetime.utcnow().isoformat()))
+            self._conn.commit()
+            return scaled
 
     def paper_high_peek(self, symbol: str, opened_at: str) -> Optional[float]:
         """The stored high for this position, without updating it."""

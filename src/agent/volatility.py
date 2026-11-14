@@ -119,6 +119,17 @@ class VolatilityTracker:
         self._bar_dates.pop(symbol, None)
         return n
 
+    def rescale(self, symbol: str, factor: float) -> None:
+        """Multiply the symbol's held bars by `factor` (an NSE corporate
+        action taking effect while running). ATR as a fraction of price is
+        unchanged by it; what changes is that the next true range no longer
+        spans the event's gap."""
+        if not factor or factor == 1.0 or symbol not in self._close:
+            return
+        for store in (self._close, self._high, self._low):
+            buf = store[symbol]
+            store[symbol] = deque((p * factor for p in buf), maxlen=buf.maxlen)
+
     def bars(self, symbol: str) -> int:
         return len(self._close.get(symbol, ()))
 

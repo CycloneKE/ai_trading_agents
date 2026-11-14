@@ -72,3 +72,45 @@ Shares held the day before the ex-date qualify. The account deducts 5%
 withholding tax (the final rate for resident individuals on NSE-listed
 dividends) and shows gross, tax and net on the Paper Account page. The rate
 is `nse_paper_trading.dividend_withholding_pct` in `config.json`.
+
+## Bonus issues and splits (`nse_corporate_actions.json`)
+
+Add each bonus issue or share split the company announces:
+
+```json
+{
+  "events": [
+    {"symbol": "KCB", "type": "bonus", "ratio": "1:10", "ex_date": "2026-05-20"},
+    {"symbol": "EQTY", "type": "split", "ratio": "2:1", "ex_date": "2026-03-02"}
+  ]
+}
+```
+
+- `type`: `bonus` or `split`.
+- `ratio`: for a bonus, new shares for every shares held (`"1:10"` is one new
+  share for every ten, so 1,000 shares become 1,100). For a split, shares
+  after for every share before (`"2:1"` doubles the share count; `"1:5"` is a
+  consolidation).
+- `ex_date`: the first day the shares trade without the entitlement.
+
+What the agent does with these, and with the dividends above
+(`src/agent/nse_corporate_actions.py`):
+
+- **Prices are adjusted.** Prices before each ex-date are scaled so the
+  event does not read as a fall, the way data vendors adjust a price series:
+  a bonus or split by shares before / shares after, a dividend by
+  (last close - dividend) / last close. This covers the history the strategies,
+  the regime filter, the volatility behind the stops and the weekly screen
+  read. An event taking effect while the agent runs is applied to the prices
+  it holds on its ex-date.
+- **The paper account receives the shares.** Holdings at the close before the
+  ex-date grow by the ratio, in whole shares, at no cost, so the cost per share
+  falls. A buy on the ex-date gets nothing, and the free shares are not a
+  purchase for the "add to winners" limits.
+- **Stops are not tripped by the event.** On an ex-date the trailing stop's
+  peak is rescaled once (recorded, so a restart never does it twice), and for
+  a dividend the stop-loss measures from the cost scaled by the same factor.
+
+Without an entry here, a bonus issue looks like a 9% fall (1-for-10) and can
+trip the 8% stop-loss. Add the announcement before the ex-date when you can.
+
