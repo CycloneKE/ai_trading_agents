@@ -110,7 +110,7 @@ def test_the_sleeve_backtest_ranks_on_months_and_rebalances_monthly():
 
 # ------------------------------------------------------------ review pack
 
-def test_the_review_pack_runs_every_step_records_failures_and_zips_the_result(tmp_path):
+def test_the_review_pack_runs_every_step_records_failures_and_zips_the_result(tmp_path, capsys):
     rp = _script('review_pack')
     ran = []
 
@@ -122,7 +122,7 @@ def test_the_review_pack_runs_every_step_records_failures_and_zips_the_result(tm
         os.makedirs(out if not out.endswith('.md') else os.path.dirname(out), exist_ok=True)
         return SimpleNamespace(returncode=0)
 
-    code = rp.main(['--out', str(tmp_path), '--history', str(tmp_path / 'h')], run=run)
+    code = rp.main(['--out', str(tmp_path), '--history', str(tmp_path / 'h'), '--print'], run=run)
     assert code == 1
     assert ran == ['scripts/fetch_history.py', 'scripts/run_backtest.py', 'scripts/run_backtest.py',
                    'scripts/agent_scorecard.py']
@@ -132,6 +132,9 @@ def test_the_review_pack_runs_every_step_records_failures_and_zips_the_result(tm
         summary = z.read(next(n for n in z.namelist() if n.endswith('SUMMARY.md'))).decode()
     assert '| scorecard | The paper run against its targets | failed (exit 2)' in summary
     assert '| backtest_momentum_sleeve | The 12-month momentum sleeve on its funds | done |' in summary
+    shown = capsys.readouterr().out
+    assert '==================== SUMMARY.md ====================' in shown and '| scorecard |' in shown
+
 
 
 def test_the_pack_backtests_each_book_on_its_own_symbols():

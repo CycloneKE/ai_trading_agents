@@ -11,12 +11,16 @@ Runs, one after the other, and keeps going if a step fails:
                               funds, with the leave-one-out check
 4. scripts/agent_scorecard.py the paper run against its targets
 
-Everything lands in reports/review_pack_<date>/ and a zip of it. Send the
-zip (or SUMMARY.md and the reports inside) for review. The pack holds
-reports only: no keys, no journals, no account numbers.
+Everything lands in data/reports/review_pack_<date>/ and a zip of it: under
+data/, so in a Docker deployment it is on the data volume and survives a
+redeploy. Send the zip (or SUMMARY.md and the reports inside) for review, or
+run with --print to show them on screen for copying, which is the easy way
+from a container terminal. The pack holds reports only: no keys, no
+journals, no account numbers.
 
 Usage:
     python scripts/review_pack.py
+    python scripts/review_pack.py --print                # also show the reports on screen
     python scripts/review_pack.py --skip-download        # prices already in data/history
 """
 import argparse
@@ -60,8 +64,10 @@ def main(argv=None, run=subprocess.run) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--config', default='config/config.json')
     ap.add_argument('--history', default='data/history')
-    ap.add_argument('--out', default='reports')
+    ap.add_argument('--out', default='data/reports')
     ap.add_argument('--skip-download', action='store_true')
+    ap.add_argument('--print', dest='show', action='store_true',
+                    help='print the summary and the reports, to copy from a terminal')
     args = ap.parse_args(argv)
     os.chdir(ROOT)
     with open(args.config) as f:
@@ -94,6 +100,14 @@ def main(argv=None, run=subprocess.run) -> int:
         f.write('\n'.join(lines) + '\n')
 
     archive = shutil.make_archive(pack, 'zip', root_dir=args.out, base_dir=os.path.basename(pack))
+    if args.show:
+        for rel in ('SUMMARY.md', 'backtest_strategies/report.md', 'backtest_momentum_sleeve/report.md',
+                    'scorecard.md'):
+            path = os.path.join(pack, rel)
+            if os.path.exists(path):
+                print(f"\n{'=' * 20} {rel} {'=' * 20}\n")
+                with open(path) as f:
+                    print(f.read())
     failed = [n for n, _, c in results if c != 0]
     print(f"\nReview pack: {archive}")
     if failed:

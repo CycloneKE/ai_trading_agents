@@ -12,41 +12,44 @@ A review pack is one zip file holding everything needed to judge the agent:
 
 It holds reports only: no keys, no account numbers, no trade journals.
 
-## Steps
+## Steps (Coolify or Docker)
 
-Run these on the server where the agent runs, from the project folder (the
-one holding `config/` and `scripts/`).
+The agent runs in a Docker container that Coolify rebuilds from the main
+branch whenever it changes. The container has no `git`; it always holds the
+code of the last deployment.
 
-1. Pull the latest code, so the scripts are there:
+1. Make sure the latest code is deployed: in Coolify, open the application
+   and check the last deployment finished after the change you want (or
+   press **Redeploy**).
+2. Open the container's terminal: in Coolify, the application's
+   **Terminal** tab (or `docker exec -it <container> sh` on the server). The
+   prompt shows `$` and the folder is `/app`.
+3. Make the pack and show it on screen:
 
    ```bash
-   git pull
-   ```
-
-2. Make the pack:
-
-   ```bash
-   python scripts/review_pack.py
+   python scripts/review_pack.py --print
    ```
 
    It downloads six years of daily prices (a few minutes), runs both
-   backtests and the scorecard, and prints where the zip is, for example:
+   backtests and the scorecard, then prints the summary and the three
+   reports. If a step fails, the others still run; the summary says which
+   failed, and its log is in `data/reports/review_pack_<date>/logs/`.
+4. Copy everything from the first `==== SUMMARY.md ====` line to the end
+   and paste it into the conversation.
 
-   ```
-   Review pack: reports/review_pack_20261205_0910.zip
-   ```
-
-   If a step fails, the others still run; the pack says which failed and
-   keeps its log in `logs/`.
-
-3. Share the zip, or open `SUMMARY.md` and the three reports inside and
-   paste them into the conversation.
+The pack is also saved as a zip in `data/reports/`, on the data volume, so a
+redeploy does not delete it.
 
 To run it again without downloading prices again:
 
 ```bash
-python scripts/review_pack.py --skip-download
+python scripts/review_pack.py --print --skip-download
 ```
+
+## Steps (a plain copy of the project)
+
+From the project folder: `git pull`, then `python scripts/review_pack.py`.
+The zip is in `data/reports/`.
 
 ## When to make one
 
