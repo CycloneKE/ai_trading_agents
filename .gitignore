@@ -82,3 +82,6 @@ coverage.xml
 
 # Timestamped config backups written by scripts/manage_universe.py --apply
 config/*.bak.*
+
+# Review packs (scripts/review_pack.py): reports about your own account
+reports/review_pack_*
