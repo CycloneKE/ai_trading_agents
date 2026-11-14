@@ -10,9 +10,35 @@ import AgentFocus from '../AgentFocus';
 import SleeveDashboard from '../SleeveDashboard';
 import TradingViewDrawer from '../TradingViewDrawer';
 import { theme } from '../DashboardStyles';
+import ErrorBoundary from '../ErrorBoundary';
 import { card, columns, SectionHeader, HUDCard, HudRow } from '../ui';
 
-const OverviewView = ({ data, isConnected, onDrill, mobile }) => {
+const PERFORMANCE_SERIES = [{ key: 'value', name: 'Account value', type: 'area', color: theme.colors.primary }];
+
+const OverviewView = ({ data, isConnected, onDrill, mobile, heartbeat = {}, lastUpdated = null }) => {
+  // The risk report keeps value at risk as a share of the account under
+  // current_metrics; this card read a top-level field that does not exist.
+  const varRaw = data.riskMetrics?.current_metrics?.portfolio_var;
+  const varPct = typeof varRaw === 'number' && varRaw > 0 ? varRaw : null;
+  const usEquity = data.performance.us_paper_value ?? data.performance.portfolio_value ?? 0;
+  const daysMeasured = data.performance.days_measured ?? 0;
+  const minDays = data.performance.min_days_for_ratios ?? 20;
+  const ratiosReady = daysMeasured >= minDays;
+  // What the agent is doing, from its own heartbeat (not a fixed "OPTIMAL").
+  const agentState = (() => {
+    if (!isConnected) return { label: 'Unreachable', detail: 'The dashboard cannot reach the agent', color: theme.colors.danger };
+    if (data.status?.trading_halted) return { label: 'Halted', detail: data.status.halt_reason || 'New orders are paused', color: theme.colors.warning };
+    if (heartbeat.triggered) return { label: 'Stopped', detail: 'Its loop stopped answering', color: theme.colors.danger };
+    if (heartbeat.healthy === false) return { label: 'Slow', detail: `Last cycle ${Math.round(heartbeat.elapsed_seconds || 0)}s ago`, color: theme.colors.warning };
+    return { label: 'Running', detail: `Last cycle ${Math.round(heartbeat.elapsed_seconds || 0)}s ago`, color: theme.colors.primary };
+  })();
+  const allocationTotal = (data.allocation || []).reduce((t, a) => t + (a.value || 0), 0);
+  const performanceSeries = React.useMemo(() => [
+    ...PERFORMANCE_SERIES,
+    ...(data.performance.benchmark_name ? [{
+      key: 'benchmark', name: data.performance.benchmark_name, type: 'line', color: theme.colors.secondary, lineStyle: 'dashed',
+    }] : []),
+  ], [data.performance.benchmark_name]);
   const chartMarkers = React.useMemo(() => {
     const raw = data.performance?.trade_markers || [];
     if (raw.length > 0) {
@@ -62,21 +88,23 @@ const OverviewView = ({ data, isConnected, onDrill, mobile }) => {
         subValue={data.performance.total_pnl >= 0 ? `↗ +$${(data.performance.total_pnl || 0).toFixed(2)}` : `↘ -$${Math.abs(data.performance.total_pnl || 0).toFixed(2)}`}
         footer={`US paper: $${(data.performance.us_paper_value ?? data.performance.portfolio_value ?? 0).toLocaleString()} · ${data.performance.nse_is_paper ? 'NSE paper' : 'NSE'}: $${(data.performance.nse_value_usd ?? 0).toLocaleString()}`}
         icon={TrendingUp} color={theme.colors.primary} />
-      <HUDCard title="Exposure (VaR)"
-        value={`$${(data.riskMetrics.portfolio_var || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-        subValue={`Risk Score: ${data.riskMetrics.risk_score?.toFixed(1) || '0.0'}/10`}
-        footer="Parametric 95% 1-day value at risk"
+      <HUDCard title="Value at risk"
+        value={varPct == null ? '—' : `${(varPct * 100).toFixed(2)}%`}
+        subValue={varPct == null ? 'Not measured yet' : `about $${Math.round(varPct * usEquity).toLocaleString()}`}
+        footer="The most the US account should lose in a day, 19 days in 20"
         icon={Shield} color={theme.colors.warning} />
-      <HUDCard title="Win Rate"
-        value={`${((data.performance.win_rate || 0) * 100).toFixed(1)}%`}
-        subValue={`${data.performance.total_trades || 0} Trades`}
-        footer={`Sharpe: ${(data.performance.sharpe_ratio || 0).toFixed(2)} · Max DD: ${((data.performance.max_drawdown || 0) * 100).toFixed(1)}%`}
+      <HUDCard title="Win rate"
+        value={(data.performance.total_trades || 0) > 0 ? `${((data.performance.win_rate || 0) * 100).toFixed(1)}%` : '—'}
+        subValue={`${data.performance.total_trades || 0} closed trade${data.performance.total_trades === 1 ? '' : 's'}`}
+        footer={ratiosReady
+          ? `Sharpe ${(data.performance.sharpe_ratio || 0).toFixed(2)} · deepest fall ${(Math.abs(data.performance.max_drawdown || 0) * 100).toFixed(1)}%`
+          : `Sharpe after ${minDays} days of history (${daysMeasured} so far) · deepest fall ${(Math.abs(data.performance.max_drawdown || 0) * 100).toFixed(1)}%`}
         icon={Zap} color={theme.colors.secondary} />
-      <HUDCard title="System Health"
-        value={isConnected ? 'OPTIMAL' : 'DEGRADED'}
-        subValue={isConnected ? `${Object.keys(data.status.components || {}).length} Services Active` : 'Reconnecting…'}
-        footer={isConnected ? 'Low latency sub-second routing' : 'Re-establishing WebSocket'}
-        icon={Activity} color={isConnected ? theme.colors.accent : theme.colors.warning} />
+      <HUDCard title="Agent"
+        value={agentState.label}
+        subValue={agentState.detail}
+        footer={lastUpdated ? `Dashboard updated ${lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Waiting for the first update'}
+        icon={Activity} color={agentState.color} />
     </HudRow>
 
     <div style={columns('2fr 1fr', mobile)}>
@@ -90,28 +118,14 @@ const OverviewView = ({ data, isConnected, onDrill, mobile }) => {
             height={mobile ? 240 : 300}
             currency="USD"
             timeKey="timestamp"
-            series={[
-              {
-                key: 'value',
-                name: 'Account value',
-                type: 'area',
-                color: theme.colors.primary,
-              },
-              ...(data.performance.benchmark_name ? [{
-                key: 'benchmark',
-                name: data.performance.benchmark_name,
-                type: 'line',
-                color: theme.colors.secondary,
-                lineStyle: 'dashed',
-              }] : [])
-            ]}
-            removeWeekendGaps={true}
+            series={performanceSeries}
+            removeWeekendGaps={false}
             emptyMessage="No portfolio performance curve recorded yet."
           />
         </div>
-        <AgentFocus onDrill={onDrill} />
-        <SleeveDashboard />
-        <AgentActivity activities={data.agentActivity} onDrill={onDrill} />
+        <ErrorBoundary name="What the agent is doing"><AgentFocus onDrill={onDrill} /></ErrorBoundary>
+        <ErrorBoundary name="The dividend sleeve"><SleeveDashboard /></ErrorBoundary>
+        <ErrorBoundary name="Agent activity"><AgentActivity activities={data.agentActivity} onDrill={onDrill} /></ErrorBoundary>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: mobile ? '14px' : '20px', minWidth: 0 }}>
         {/* Top Active Positions */}
@@ -187,7 +201,7 @@ const OverviewView = ({ data, isConnected, onDrill, mobile }) => {
                       border: '1px solid rgba(255, 255, 255, 0.12)',
                       borderRadius: '8px', fontSize: '11px', color: '#fff',
                     }}
-                    formatter={(value) => [`$${value.toLocaleString()}`, 'Value']}
+                    formatter={(value) => [`$${Math.round(value).toLocaleString()}`, 'Value']}
                   />
                 </PieChart>
               </ResponsiveContainer>
@@ -196,7 +210,7 @@ const OverviewView = ({ data, isConnected, onDrill, mobile }) => {
             )}
           </div>
           {/* Scrollable Legend list */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '10px', maxHeight: '110px', overflowY: 'auto', paddingRight: '4px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '10px' }}>
             {data.allocation && data.allocation.map((entry, idx) => (
               <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', padding: '3px 0' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -204,7 +218,10 @@ const OverviewView = ({ data, isConnected, onDrill, mobile }) => {
                   <span style={{ fontWeight: '600', color: theme.colors.text }}>{entry.name}</span>
                 </div>
                 <span style={{ color: theme.colors.textSecondary, fontVariantNumeric: 'tabular-nums', fontWeight: 700 }}>
-                  ${entry.value.toLocaleString()}
+                  ${Math.round(entry.value).toLocaleString()}
+                  <span style={{ color: theme.colors.textMuted, fontWeight: 600, marginLeft: '8px', display: 'inline-block', minWidth: '38px', textAlign: 'right' }}>
+                    {allocationTotal ? `${((entry.value / allocationTotal) * 100).toFixed(0)}%` : ''}
+                  </span>
                 </span>
               </div>
             ))}
@@ -226,7 +243,7 @@ const OverviewView = ({ data, isConnected, onDrill, mobile }) => {
                         fontWeight: '800', fontSize: '12px', fontVariantNumeric: 'tabular-nums',
                         color: totalPnl >= 0 ? theme.colors.primary : theme.colors.danger,
                       }}>
-                        {totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)}
+                        {totalPnl >= 0 ? '+' : '-'}${Math.abs(totalPnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </span>
                     </div>
                     <div style={{ fontSize: '11px', color: theme.colors.textMuted }}>

@@ -72,7 +72,7 @@ const HelpPanel = ({ onClose }) => (
       <ul style={{ fontSize: '13px', color: theme.colors.textSecondary, paddingLeft: '18px', margin: 0 }}>
         <li style={{ marginBottom: '6px' }}>Panels refresh every 20–30 seconds; the header clock shows the current US market session.</li>
         <li style={{ marginBottom: '6px' }}>Premarket quotes can be sparse or delayed - that is the data vendor, not a fault.</li>
-        <li style={{ marginBottom: '6px' }}>Your login is valid for 24 hours; after that, sign in again.</li>
+        <li style={{ marginBottom: '6px' }}>Your login lasts 8 hours (the server can be set otherwise); after that, sign in again.</li>
         <li>Reopen this guide any time with the <strong>?</strong> button in the header.</li>
       </ul>
     </div>

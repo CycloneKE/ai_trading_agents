@@ -1,4 +1,6 @@
 import React from 'react';
+import { ListChecks } from 'lucide-react';
+import { card, SectionHeader } from './ui';
 
 const AgentActivity = ({ theme = 'dark', activities = [], onDrill = null }) => {
 
@@ -26,8 +28,8 @@ const AgentActivity = ({ theme = 'dark', activities = [], onDrill = null }) => {
   };
 
   return (
-    <div style={{ backgroundColor: currentTheme.bg, padding: '24px', borderRadius: '12px', border: `1px solid ${currentTheme.border}`, backdropFilter: 'blur(10px)' }}>
-      <h3 style={{ color: '#fff', marginBottom: '20px', fontSize: '16px', fontWeight: '800', textTransform: 'uppercase', letterSpacing: '1px' }}>Agent Activity</h3>
+    <div style={card(false)}>
+      <SectionHeader title="Agent activity" icon={ListChecks} desc="Its latest decisions, newest first" />
       <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
         {activities.length === 0 && (
           <div style={{ color: currentTheme.text, opacity: 0.5, fontSize: '13px', padding: '12px 0' }}>

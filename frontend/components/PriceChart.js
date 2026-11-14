@@ -109,6 +109,10 @@ export default function PriceChart({ symbol, height = 360, onLoaded }) {
 
   const bars = data?.bars || [];
   const currency = data?.currency || 'USD';
+  // Decimals the market quotes in: currency pairs such as EUR/USD at 1.0832
+  // read as 1.08 at two places.
+  const lastClose = bars.length ? bars[bars.length - 1].close : 0;
+  const digits = lastClose >= 10 ? 2 : lastClose >= 1 ? 4 : 6;
 
   // Build the chart. The library touches the browser window, so it is loaded
   // here, on the client, rather than imported at the top of the file.
@@ -133,7 +137,7 @@ export default function PriceChart({ symbol, height = 360, onLoaded }) {
       });
       const candles = chart.addSeries(lc.CandlestickSeries, {
         upColor: UP, downColor: DOWN, wickUpColor: UP, wickDownColor: DOWN, borderVisible: false,
-        priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+        priceFormat: { type: 'price', precision: digits, minMove: 10 ** -digits },
       });
       candles.setData(bars);
       candles.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: 0.24 } });
@@ -175,7 +179,7 @@ export default function PriceChart({ symbol, height = 360, onLoaded }) {
       if (chart) chart.remove();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, show, height]);
+  }, [data, show, height, digits]);
 
   useEffect(() => {
     if (chartRef.current) applyRange(chartRef.current, bars.length, range);
@@ -211,10 +215,10 @@ export default function PriceChart({ symbol, height = 360, onLoaded }) {
       {shown && (
         <div style={{ fontSize: '11px', color: theme.colors.textSecondary, marginBottom: '6px', display: 'flex', gap: '10px', flexWrap: 'wrap', fontFamily: 'JetBrains Mono, monospace' }}>
           <span style={{ color: '#fff', fontWeight: 700 }}>{shown.time}</span>
-          <span>O {shown.open?.toFixed(2)}</span>
-          <span>H {shown.high?.toFixed(2)}</span>
-          <span>L {shown.low?.toFixed(2)}</span>
-          <span>C <strong style={{ color: '#fff' }}>{shown.close?.toFixed(2)}</strong></span>
+          <span>O {shown.open?.toFixed(digits)}</span>
+          <span>H {shown.high?.toFixed(digits)}</span>
+          <span>L {shown.low?.toFixed(digits)}</span>
+          <span>C <strong style={{ color: '#fff' }}>{shown.close?.toFixed(digits)}</strong></span>
           {change != null && <span style={{ color: change >= 0 ? UP : DOWN }}>{pct(change)}</span>}
         </div>
       )}

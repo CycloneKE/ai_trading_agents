@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from 'react';
 import UnifiedPortfolio from '../UnifiedPortfolio';
 import PaperBook from './PaperBook';
 import { theme } from '../DashboardStyles';
-import { apiGet, card, money, pct, gainColor, SubTabs } from '../ui';
+import { apiGet, card, money, pct, gainColor, SubTabs, whenVisible } from '../ui';
 
 const TABS = [
   { id: 'all', label: 'All holdings' },
@@ -30,7 +30,7 @@ function usePolled(path, active, seconds = 30) {
     setData(null);
     if (!active || !path) return undefined;
     load();
-    const id = setInterval(load, seconds * 1000);
+    const id = setInterval(whenVisible(load), seconds * 1000);
     return () => clearInterval(id);
   }, [active, path, load, seconds]);
   return { data, error };

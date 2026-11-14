@@ -5,8 +5,7 @@ import { TrendingUp, TrendingDown, Activity, Shield, Globe, Flag, Layers } from 
 import { theme } from '../DashboardStyles';
 import {
   apiGet, card, money, pct, gainColor, fxSourceNote, SectionHeader, HUDCard, HudRow, SubTabs, Empty, Note,
-  th, td, tableHeadRow,
-} from '../ui';
+  th, td, tableHeadRow, whenVisible } from '../ui';
 import NsePaperAccount from './NsePaperAccount';
 import NseMarketScan from './NseMarketScan';
 import { getApiBase } from '../../utils/apiBase';
@@ -236,7 +235,7 @@ function OrderTickets({ active, mobile }) {
   useEffect(() => {
     if (!active) return undefined;
     load();
-    const id = setInterval(load, 20000);
+    const id = setInterval(whenVisible(load), 20000);
     return () => clearInterval(id);
   }, [active, load]);
 
@@ -333,7 +332,7 @@ export default function NseSection({ active, sub, onSub, nseData, isOperator, mo
   useEffect(() => {
     if (!active) return undefined;
     loadPaper();
-    const id = setInterval(loadPaper, 30000);
+    const id = setInterval(whenVisible(loadPaper), 30000);
     return () => clearInterval(id);
   }, [active, loadPaper]);
 

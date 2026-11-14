@@ -38,6 +38,9 @@ class PerformanceMetrics:
     winning_trades: int
     losing_trades: int
 
+MIN_DAYS_FOR_RATIOS = 20
+
+
 class PerformanceAnalytics:
     """Comprehensive performance analytics engine"""
     
@@ -105,6 +108,7 @@ class PerformanceAnalytics:
                             'timestamp': self.portfolio_values[i]['timestamp'],
                             'return': (curr_value - prev_value) / prev_value
                         })
+                self._trim()
                 logger.info(f"Loaded {len(self.portfolio_values)} portfolio value points from database.")
             else:
                 logger.info("Portfolio history is empty; will accumulate from real trading activity.")
@@ -163,13 +167,7 @@ class PerformanceAnalytics:
                         'return': return_pct
                     })
             
-            # Keep only recent data (configurable)
-            max_history = self.config.get('max_history_days', 365) * 24  # Assuming hourly data
-            if len(self.portfolio_values) > max_history:
-                self.portfolio_values = self.portfolio_values[-max_history:]
-            
-            if len(self.returns_history) > max_history:
-                self.returns_history = self.returns_history[-max_history:]
+            self._trim()
                 
         except Exception as e:
             logger.error(f"Error recording portfolio value: {e}")
@@ -214,21 +212,28 @@ class PerformanceAnalytics:
             
             # Convert to numpy array for calculations
             returns_array = np.array([r['return'] for r in returns])
-            
-            # Basic return metrics
             total_return = np.prod(1 + returns_array) - 1
-            annualized_return = (1 + total_return) ** (self.trading_days_per_year / len(returns_array)) - 1
-            volatility = np.std(returns_array) * np.sqrt(self.trading_days_per_year)
-            
-            # Risk-adjusted metrics
-            excess_returns = returns_array - (self.risk_free_rate / self.trading_days_per_year)
-            sharpe_ratio = np.mean(excess_returns) / np.std(returns_array) * np.sqrt(self.trading_days_per_year) if np.std(returns_array) > 0 else 0
-            
-            # Sortino ratio (downside deviation)
-            downside_returns = returns_array[returns_array < 0]
-            downside_deviation = np.std(downside_returns) * np.sqrt(self.trading_days_per_year) if len(downside_returns) > 0 else 0
-            sortino_ratio = np.mean(excess_returns) / downside_deviation * np.sqrt(self.trading_days_per_year) if downside_deviation > 0 else 0
-            
+
+            # Volatility, Sharpe, Sortino and the annualised return are
+            # measured on daily returns (the last reading of each day). The
+            # agent records the account every minute; treating each minute's
+            # change as a day's made the Sharpe ratio read -4.9 or +41 on an
+            # ordinary month. Below MIN_DAYS_FOR_RATIOS days they are 0, and
+            # the report says how many days were measured.
+            daily, per_year = self._daily_returns(start_date, end_date)
+            annualized_return = volatility = sharpe_ratio = sortino_ratio = 0.0
+            if len(daily) >= MIN_DAYS_FOR_RATIOS:
+                d = np.array(daily)
+                growth = float(np.prod(1 + d))
+                annualized_return = growth ** (per_year / len(d)) - 1 if growth > 0 else -1.0
+                volatility = float(np.std(d, ddof=1) * np.sqrt(per_year))
+                excess = d - self.risk_free_rate / per_year
+                sd = float(np.std(d, ddof=1))
+                sharpe_ratio = float(np.mean(excess) / sd * np.sqrt(per_year)) if sd > 0 else 0.0
+                # Downside deviation: below-zero excess returns, over all days.
+                downside = float(np.sqrt(np.mean(np.minimum(excess, 0.0) ** 2)))
+                sortino_ratio = float(np.mean(excess) / downside * np.sqrt(per_year)) if downside > 0 else 0.0
+
             # Drawdown metrics
             max_drawdown = self._calculate_max_drawdown(returns_array)
             calmar_ratio = annualized_return / abs(max_drawdown) if max_drawdown != 0 else 0
@@ -257,6 +262,38 @@ class PerformanceAnalytics:
             logger.error(f"Error calculating performance metrics: {e}")
             return PerformanceMetrics(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     
+    def _daily_returns(self, start_date: Optional[datetime] = None,
+                       end_date: Optional[datetime] = None):
+        """Day-to-day returns of the last reading of each day, and how many
+        such days make a year: 365 when the account is valued on weekends
+        too (crypto trades every day), 252 when it is not."""
+        last: Dict[Any, float] = {}
+        for v in self.portfolio_values:
+            ts = v['timestamp']
+            if (start_date and ts < start_date) or (end_date and ts > end_date):
+                continue
+            if v['value'] and v['value'] > 0:
+                last[ts.date()] = float(v['value'])
+        days = sorted(last)
+        values = [last[d] for d in days]
+        returns = [b / a - 1 for a, b in zip(values, values[1:]) if a > 0]
+        per_year = 365 if any(d.weekday() >= 5 for d in days) else self.trading_days_per_year
+        return returns, per_year
+
+    def days_measured(self) -> int:
+        """How many day-to-day returns the ratios are measured on."""
+        return len(self._daily_returns()[0])
+
+    def _trim(self) -> None:
+        """Keep max_history_days of readings (by time, not by count: at one
+        reading a minute the old count of 365 x 24 kept about six days)."""
+        if not self.portfolio_values:
+            return
+        cutoff = self.portfolio_values[-1]['timestamp'] - timedelta(days=self.config.get('max_history_days', 365))
+        if self.portfolio_values[0]['timestamp'] < cutoff:
+            self.portfolio_values = [v for v in self.portfolio_values if v['timestamp'] >= cutoff]
+            self.returns_history = [r for r in self.returns_history if r['timestamp'] >= cutoff]
+
     def _filter_returns_by_date(self, start_date: Optional[datetime], 
                                end_date: Optional[datetime]) -> List[Dict[str, Any]]:
         """Filter returns by date range"""
@@ -419,7 +456,9 @@ class PerformanceAnalytics:
                     'calmar_ratio': metrics.calmar_ratio,
                     'win_rate': metrics.win_rate,
                     'profit_factor': metrics.profit_factor,
-                    'total_trades': metrics.total_trades
+                    'total_trades': metrics.total_trades,
+                    'days_measured': len(self._daily_returns(start_date, end_date)[0]),
+                    'min_days_for_ratios': MIN_DAYS_FOR_RATIOS,
                 },
                 'strategy_performance': strategy_performance,
                 'portfolio_chart': recent_values,

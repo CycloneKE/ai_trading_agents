@@ -41,6 +41,28 @@ export const columns = (template, mobile, gap) => ({
   gap: gap ?? (mobile ? '14px' : '20px'),
 });
 
+// Wraps a polling function so it does nothing while the browser tab is
+// hidden. Every panel polls the API every 10 to 60 seconds; a tab left open
+// in the background kept doing so, and with a second tab the dashboard ran
+// into the server's per-client request limit.
+export function whenVisible(fn) {
+  return (...args) => {
+    if (typeof document !== 'undefined' && document.hidden) return undefined;
+    return fn(...args);
+  };
+}
+
+// Calls `fn` when the tab comes back into view, so a returning reader sees
+// fresh figures at once rather than at the next poll.
+export function useOnVisible(fn) {
+  useEffect(() => {
+    const onChange = () => { if (!document.hidden) fn(); };
+    document.addEventListener('visibilitychange', onChange);
+    return () => document.removeEventListener('visibilitychange', onChange);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+}
+
 // A GET against the trading API with the saved login.
 export async function apiGet(path) {
   const token = typeof window !== 'undefined' ? localStorage.getItem('trading_token') : null;
