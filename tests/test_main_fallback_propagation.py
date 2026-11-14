@@ -39,7 +39,6 @@ def test_main_propagates_top_level_use_fallback_only(monkeypatch):
     monkeypatch.setattr(main_module, 'RealTimeDataFeed', Dummy)
     monkeypatch.setattr(main_module, 'StrategyManager', Dummy)
     monkeypatch.setattr(main_module, 'BrokerManager', Dummy)
-    monkeypatch.setattr(main_module, 'OrderExecutionEngine', Dummy)
     monkeypatch.setattr(main_module, 'RealTimeRiskManager', Dummy)
     monkeypatch.setattr(main_module, 'PerformanceAnalytics', Dummy)
     monkeypatch.setattr(main_module, 'SecureConfigManager', lambda *a, **k: Dummy())

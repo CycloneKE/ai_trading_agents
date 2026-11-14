@@ -69,3 +69,31 @@ def _private_loss_limits(tmp_path_factory, monkeypatch):
     breach there would quietly refuse buys in any test that builds an agent."""
     from src.agent import loss_limits
     monkeypatch.setattr(loss_limits, 'DATA_DIR', tmp_path_factory.mktemp('loss_limits'))
+
+
+@pytest.fixture(autouse=True)
+def _private_data_files(request, tmp_path_factory, monkeypatch):
+    """Tests never create or change the real databases under data/.
+
+    The escalation, audit, improvement, sleeve and risk databases, and the
+    learned NSE ISIN map, are opened under the data folder when a class is
+    built without a path of its own. Tests that did so left those files in
+    the repository's data/ folder, where a later run (or the live agent)
+    read what an earlier test had written. Each test gets a private folder.
+
+    Modules that import DATA_DIR inside a function read it from
+    src.utils.paths at call time, so that is pointed at the private folder
+    too, except for the tests marked real_data_dir, which check the real path.
+    """
+    import importlib
+    private = tmp_path_factory.mktemp('data')
+    if not request.node.get_closest_marker('real_data_dir'):
+        monkeypatch.setattr('src.utils.paths.DATA_DIR', private)
+    for name in ('src.agent.escalation_manager', 'src.agent.audit_journal',
+                 'src.agent.self_assessment', 'src.agent.nse_order_queue',
+                 'src.agent.sector_specialist', 'src.agent.performance_analytics',
+                 'src.agent.sleeve.sleeve_manager',
+                 'src.agent.sleeve.dividend_ledger'):
+        monkeypatch.setattr(importlib.import_module(name), 'DATA_DIR', private)
+    from src.connectors import nse_isin
+    monkeypatch.setattr(nse_isin, '_default_path', lambda: private / 'nse_isin_map.json')

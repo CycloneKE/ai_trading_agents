@@ -60,7 +60,8 @@ function EquityCurve({ points, start, benchmarkName, mobile, fills = [], onDrill
   const markers = (fills || []).map((f) => {
     const isBuy = (f.side || '').toLowerCase() === 'buy';
     return {
-      time: f.day || f.time || f.created_at,
+      // The API sends each fill's time as `at` (paper_accounts.build_view).
+      time: f.at || f.time || f.day || f.created_at,
       symbol: f.symbol,
       kind: f.side?.toLowerCase(),
       side: f.side?.toUpperCase(),
@@ -68,7 +69,7 @@ function EquityCurve({ points, start, benchmarkName, mobile, fills = [], onDrill
       position: isBuy ? 'belowBar' : 'aboveBar',
       shape: isBuy ? 'arrowUp' : 'arrowDown',
       color: isBuy ? theme.colors.primary : theme.colors.danger,
-      id: `paper-fill-${f.id || f.symbol}-${f.time || f.day}`
+      id: `paper-fill-${f.id || f.symbol}-${f.at || f.time || f.day}`
     };
   });
 

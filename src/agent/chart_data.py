@@ -114,3 +114,53 @@ def tradingview_symbol(symbol: str, market: str) -> str:
     if market == 'forex':
         return f"FX:{s.replace('_', '')}"
     return s
+
+
+# Resolution of the account-value curve sent to the dashboard: (age in days
+# up to which this applies, bucket size in minutes). Older readings than the
+# last row are kept one per day.
+THIN_STEPS = ((2, 5), (30, 60))
+
+
+def thin_curve(points: List[Dict[str, Any]], now=None, key: str = 'timestamp') -> List[Dict[str, Any]]:
+    """The account-value curve at a resolution a chart can draw: the last
+    reading of every 5 minutes over the last two days, of every hour back to
+    30 days, of every day before that, plus the first and latest readings.
+
+    The agent values the account every minute, and /api/performance used to
+    send every reading (3.5 MB for 60 days, polled every 20 seconds), which
+    the chart could not even show at once."""
+    from datetime import datetime, timedelta, timezone
+
+    def when(p):
+        ts = p.get(key)
+        if isinstance(ts, datetime):
+            return ts
+        try:
+            return datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+        except (TypeError, ValueError):
+            return None
+
+    stamped = [(when(p), p) for p in points or []]
+    stamped = [(t, p) for t, p in stamped if t is not None]
+    if len(stamped) <= 2:
+        return [p for _, p in stamped]
+    latest = stamped[-1][0]
+    now = now or latest
+    if (now.tzinfo is None) != (latest.tzinfo is None):
+        now = now.replace(tzinfo=latest.tzinfo)
+
+    def bucket(t):
+        age = now - t
+        for days, minutes in THIN_STEPS:
+            if age <= timedelta(days=days):
+                return (t.date(), (t.hour * 60 + t.minute) // minutes, minutes)
+        return (t.date(), 0, 1440)
+
+    out: Dict[Any, Dict[str, Any]] = {}
+    for t, p in stamped:
+        out[bucket(t)] = p                      # the last reading of each bucket
+    thinned = list(out.values())
+    if thinned[0] is not stamped[0][1]:
+        thinned.insert(0, stamped[0][1])
+    return thinned

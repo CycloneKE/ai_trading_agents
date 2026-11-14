@@ -3,7 +3,7 @@ import { X, Activity, Layers, AlertTriangle, Cpu } from 'lucide-react';
 import { theme, glassCard } from './DashboardStyles';
 import { getApiBase } from '../utils/apiBase';
 import PriceChart from './PriceChart';
-import { columns, money, signedMoney, useIsMobile } from './ui';
+import { columns, money, signedMoney, useIsMobile, whenVisible } from './ui';
 
 const REASON_LABEL = {
   hold: 'No directional signal',
@@ -76,7 +76,7 @@ const SymbolDrilldown = ({ symbol, onClose }) => {
       }
     };
     load();
-    const id = setInterval(load, 20000);
+    const id = setInterval(whenVisible(load), 20000);
     return () => { alive = false; clearInterval(id); };
   }, [symbol]);
 

@@ -10,7 +10,7 @@ import {
 import TradingViewDrawer from './TradingViewDrawer';
 import { theme, glassCard } from './DashboardStyles';
 import { getApiBase } from '../utils/apiBase';
-import { fxSourceNote } from './ui';
+import { fxSourceNote, whenVisible } from './ui';
 
 const REGION_COLORS = {
   'US': '#3b82f6',
@@ -60,7 +60,7 @@ export default function UnifiedPortfolio({ onDrill }) {
     }
 
     try {
-      const perfRes = await fetch(`${getApiBase()}/api/performance`, {
+      const perfRes = await fetch(`${getApiBase()}/api/performance?period=ALL`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (perfRes.ok) {
@@ -88,7 +88,7 @@ export default function UnifiedPortfolio({ onDrill }) {
 
   useEffect(() => {
     fetchPortfolio();
-    const timer = setInterval(fetchPortfolio, 15000);
+    const timer = setInterval(whenVisible(fetchPortfolio), 15000);
     return () => clearInterval(timer);
   }, [fetchPortfolio]);
 
@@ -545,8 +545,8 @@ export default function UnifiedPortfolio({ onDrill }) {
               <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: '8px', border: `1px solid ${theme.colors.border}30` }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                   <span style={{ 
-                    backgroundColor: fill.side === 'buy' ? 'rgba(16,185,129,0.15)' : 'rgba(244,63,94,0.15)', 
-                    color: fill.side === 'buy' ? theme.colors.primary : theme.colors.danger, 
+                    backgroundColor: String(fill.side).toLowerCase() === 'buy' ? 'rgba(16,185,129,0.15)' : 'rgba(244,63,94,0.15)',
+                    color: String(fill.side).toLowerCase() === 'buy' ? theme.colors.primary : theme.colors.danger,
                     padding: '4px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '800' 
                   }}>
                     {fill.side?.toUpperCase()}
@@ -554,11 +554,18 @@ export default function UnifiedPortfolio({ onDrill }) {
                   <div>
                     <span style={{ fontWeight: '800', color: '#fff', fontSize: '13px' }}>{fill.symbol}</span>
                     <div style={{ fontSize: '11px', color: theme.colors.textMuted }}>
-                      Qty: {fill.fill_quantity || fill.quantity} @ {fill.fill_price ? `$${fill.fill_price}` : 'Market'} · {fill.resolved_by || 'auto_paper_trader'}
+                      Qty: {fill.fill_quantity || fill.quantity} @ {fill.fill_price ? `${fill.currency === 'KES' ? 'KES ' : '$'}${Number(fill.fill_price).toLocaleString(undefined, { maximumFractionDigits: 4 })}` : 'Market'} · {fill.resolved_by || 'auto_paper_trader'}
                     </div>
                   </div>
                 </div>
-                <span style={{ fontSize: '11px', color: theme.colors.textMuted }}>{fill.created_at ? new Date(fill.created_at).toLocaleTimeString() : 'Recent'}</span>
+                <span style={{ fontSize: '11px', color: theme.colors.textMuted }}>{(() => {
+                  // The API sends `timestamp` (recent-fills); it never sent created_at.
+                  const when = fill.timestamp || fill.created_at;
+                  const d = when ? new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(when) ? when : `${when}Z`) : null;
+                  return d && !Number.isNaN(d.getTime())
+                    ? d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                    : '';
+                })()}</span>
               </div>
             ))
           ) : (

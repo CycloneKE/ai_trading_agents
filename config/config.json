@@ -426,17 +426,6 @@
     "_risk_per_trade_note": "THE authority for position size. Fraction of equity lost if a position's stop is hit. Notional = equity * risk_per_trade * cash_policy multiplier / (risk_limits.stop_loss_atr_mult * ATR%), then capped at risk_limits.max_position_size. At 0.5% risk with 2.5x ATR stops the 5% cap binds below about 4% ATR, so quiet instruments sit at the cap and volatile ones are sized down. Both the live loop and the backtest use this same formula (src/agent/position_sizing.volatility_scaled_value)."
   },
   "trading_loop_interval": 60,
-  "nlp": {
-    "sentiment_model": "vader",
-    "text_processing": {
-      "remove_stopwords": true,
-      "lemmatize": true
-    }
-  },
-  "automl": {
-    "n_trials": 100,
-    "cv_folds": 5
-  },
   "portfolio_optimization": {
     "risk_free_rate": 0.02,
     "frequency": "daily",
@@ -453,12 +442,9 @@
     "api_key_rotation_days": 90
   },
   "execution": {
+    "_comment": "How signal orders are placed (TradingAgent._entry_order_terms). A buy on the broker account (US shares, crypto) is a marketable limit max_slippage through the decision price: it fills at once in a normal market but never at a price that ran away; crypto limits are immediate-or-cancel. Sells stay market orders so an exit always exits, and stop-loss and monthly core and sleeve orders are unchanged. limit_entries false goes back to market buys.",
     "max_slippage": 0.005,
-    "max_order_size": 10000,
-    "min_order_size": 100,
-    "use_twap": true,
-    "twap_duration": 300,
-    "slice_size": 0.1
+    "limit_entries": true
   },
   "analytics": {
     "benchmark": "SPY",

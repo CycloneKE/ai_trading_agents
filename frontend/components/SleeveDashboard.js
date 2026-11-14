@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { theme } from './DashboardStyles';
 import { getApiBase } from '../utils/apiBase';
+import { Sprout } from 'lucide-react';
+import { whenVisible, card, SectionHeader } from './ui';
 
 const SleeveDashboard = () => {
   const [view, setView] = useState(null);
@@ -17,7 +19,7 @@ const SleeveDashboard = () => {
       } catch (e) {}
     };
     load();
-    const id = setInterval(load, 30000);
+    const id = setInterval(whenVisible(load), 30000);
     return () => { alive = false; clearInterval(id); };
   }, []);
 
@@ -26,13 +28,14 @@ const SleeveDashboard = () => {
   const empty = (msg) => <div style={{ color: theme.colors.textMuted, fontSize: '12px' }}>{msg}</div>;
 
   return (
-    <div style={{ ...theme.glass, padding: '24px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
-        <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 800, letterSpacing: '1px', color: '#fff' }}>LONG-TERM SLEEVE — NSE DIVIDENDS</h3>
-        <span style={{ fontSize: '12px', color: theme.colors.textMuted }}>
-          Target: <span style={{ color: theme.colors.primary, fontWeight: 800 }}>KES {(view.capital_target_kes ?? 0).toLocaleString()}</span>
-          {' · '}Dividends received: <span style={{ color: theme.colors.primary, fontWeight: 800 }}>KES {(view.cumulative_dividends_kes ?? 0).toLocaleString()}</span>
-        </span>
+    <div style={card(false)}>
+      <div>
+        <SectionHeader title="NSE dividend sleeve" icon={Sprout} desc="Long-term NSE holdings bought for their dividends" right={(
+          <span style={{ fontSize: '12px', color: theme.colors.textMuted }}>
+            Target <span style={{ color: theme.colors.primary, fontWeight: 800 }}>KES {(view.capital_target_kes ?? 0).toLocaleString()}</span>
+            {' · '}Dividends received <span style={{ color: theme.colors.primary, fontWeight: 800 }}>KES {(view.cumulative_dividends_kes ?? 0).toLocaleString()}</span>
+          </span>
+        )} />
       </div>
       <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap' }}>
         <div style={{ flex: 1, minWidth: '200px' }}>

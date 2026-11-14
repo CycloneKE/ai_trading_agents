@@ -66,6 +66,7 @@ def test_a_journal_added_later_is_picked_up_without_code_changes(data_dir, tmp_p
     assert 'brand_new_journal.db' in manifest['files']
 
 
+@pytest.mark.real_data_dir
 def test_the_default_destination_is_inside_the_mounted_data_volume():
     """<repo>/backups is destroyed by every container redeploy."""
     from src.utils.paths import DATA_DIR

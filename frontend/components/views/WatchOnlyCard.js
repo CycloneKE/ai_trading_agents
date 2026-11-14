@@ -5,7 +5,7 @@
 import { useEffect, useState } from 'react';
 import { Eye } from 'lucide-react';
 import { theme } from '../DashboardStyles';
-import { apiGet, card, SectionHeader, Empty, Note } from '../ui';
+import { apiGet, card, SectionHeader, Empty, Note, whenVisible } from '../ui';
 
 const PATTERN = {
   trend_200d: 'Trend (200-day average)',
@@ -142,7 +142,7 @@ export default function WatchOnlyCard({ mobile }) {
       })
       .catch((e) => alive && setError(e.message));
     load();
-    const id = setInterval(load, 600000);
+    const id = setInterval(whenVisible(load), 600000);
     return () => { alive = false; clearInterval(id); };
   }, []);
 

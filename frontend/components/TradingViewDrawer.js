@@ -1,187 +1,195 @@
-// TradingView Drawer: A unified, professional financial chart drawer powered by
-// TradingView's Lightweight Charts (Apache 2.0). Replaces standard linear/calendar charts
-// across Overview, Portfolio, NSE, and Analytics views.
+// The dashboard's line and area chart (account value, drawdown, paper
+// accounts), drawn with TradingView's open source Lightweight Charts library
+// (Apache 2.0; its logo on the chart is the attribution the licence asks for).
 //
-// Key Features:
-// - Strictly removes weekend gaps (Saturdays/Sundays & non-trading intervals)
-// - Organic spline curvature (lc.LineType.Curved) eliminating shallow/polygonal look
-// - Full-width edge anchoring (fixLeftEdge & fixRightEdge) with zero empty right margin
-// - Preserves high-density intraday/hourly resolution without collapsing points
-// - Trade execution markers (BUY/SELL/STOP) pinned directly to the curve with click-to-drilldown
-// - Full timeframe drilldown pills: 1D, 1W, 1M, 3M, 6M, 1Y, ALL (always visible)
-// - Feature indicator toggles: SMA Trend, Benchmark overlay, Trade markers
-// - Dotted live price line with badge tag on the right axis
-// - Interactive crosshair HUD with formatted metrics, session returns, and active trade drilldown
+// - Range buttons show a span of time (1D is the last day, 1M the last 30
+//   days), not a number of points: the account is valued every few minutes,
+//   so counting points made "1D" the last minute. Ranges longer than the
+//   history are greyed out.
+// - Lines join the readings with straight segments. Curved lines drew values
+//   between readings that never happened.
+// - The chart is built once and its series updated when the data changes,
+//   so a refresh every 20 seconds no longer resets the zoom.
+// - Trades are marked on the bar of their day (daily data) or the nearest
+//   reading (intraday); trades before the curve starts are left off rather
+//   than piled on its first point.
+// - Weekends are left out of daily stock data (removeWeekendGaps), so the
+//   line does not run flat across them.
 import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import { theme } from './DashboardStyles';
+
+const DAY = 86400;
 
 export const RANGES = [
   { id: '1D', days: 1, label: '1D' },
   { id: '1W', days: 7, label: '1W' },
-  { id: '1M', days: 22, label: '1M' },
-  { id: '3M', days: 66, label: '3M' },
-  { id: '6M', days: 130, label: '6M' },
-  { id: '1Y', days: 252, label: '1Y' },
-  { id: 'ALL', days: 0, label: 'ALL' }
+  { id: '1M', days: 30, label: '1M' },
+  { id: '3M', days: 91, label: '3M' },
+  { id: '6M', days: 182, label: '6M' },
+  { id: '1Y', days: 365, label: '1Y' },
+  { id: 'ALL', days: 0, label: 'ALL' },
 ];
 
+// ISO text with or without a zone ('Z', '+03:00', '-05:00'); text with no
+// zone is UTC, which is how the server writes its timestamps.
+export function parseTime(raw) {
+  if (raw == null || raw === '') return null;
+  if (raw instanceof Date) return Number.isNaN(raw.getTime()) ? null : raw;
+  if (typeof raw === 'number') return new Date(raw < 2e10 ? raw * 1000 : raw);
+  const text = String(raw);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    const [y, m, d] = text.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+  }
+  const zoned = /([zZ]|[+-]\d{2}:?\d{2})$/.test(text);
+  const d = new Date(zoned ? text : `${text}Z`);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+// Seconds since 1970 for a chart time (a 'YYYY-MM-DD' day or seconds).
+export function timeSeconds(t) {
+  if (typeof t === 'number') return t;
+  const d = parseTime(t);
+  return d ? Math.floor(d.getTime() / 1000) : 0;
+}
+
 /**
- * Clean and sort time series data, strictly removing weekend gaps (Sat/Sun).
- * Preserves granular intraday timestamps if present; handles daily dates cleanly.
+ * Sort a series, drop unreadable times and (optionally) weekend readings,
+ * and give each point the time the chart library wants: a 'YYYY-MM-DD' day
+ * for daily data, seconds for intraday readings (one point per second).
  */
 export function cleanTimeSeries(rawData = [], options = {}) {
-  const {
-    timeKey = null,
-    removeWeekends = true,
-  } = options;
-
+  const { timeKey = null, removeWeekends = true } = options;
   if (!Array.isArray(rawData) || rawData.length === 0) return [];
 
   const parsed = [];
   for (const item of rawData) {
     if (!item) continue;
-    const rawTime = (timeKey && item[timeKey]) || item.timestamp || item.day || item.time || item.date;
-    if (!rawTime) continue;
-
-    let d;
-    let isPureDateString = false;
-    if (typeof rawTime === 'string') {
-      if (/^\d{4}-\d{2}-\d{2}$/.test(rawTime)) {
-        isPureDateString = true;
-        const [y, m, day] = rawTime.split('-').map(Number);
-        d = new Date(Date.UTC(y, m - 1, day, 12, 0, 0));
-      } else {
-        d = new Date(rawTime.endsWith('Z') || rawTime.includes('+') ? rawTime : `${rawTime}Z`);
-      }
-    } else if (typeof rawTime === 'number') {
-      d = new Date(rawTime < 2e10 ? rawTime * 1000 : rawTime);
-    } else if (rawTime instanceof Date) {
-      d = rawTime;
-    }
-
-    if (!d || Number.isNaN(d.getTime())) continue;
-
-    // Filter out weekend days if enabled (0 = Sunday, 6 = Saturday)
-    // Forex/Asian open starts Sunday ~21:00 UTC
-    const uDay = d.getUTCDay();
-    const uHour = d.getUTCHours();
-    if (removeWeekends && (uDay === 6 || (uDay === 0 && uHour < 21))) {
-      continue;
-    }
-
+    const raw = (timeKey && item[timeKey]) || item.timestamp || item.day || item.time || item.date;
+    const d = parseTime(raw);
+    if (!d) continue;
+    const day = d.getUTCDay();
+    // Forex opens on Sunday evening (about 21:00 UTC), so only earlier Sunday readings go.
+    if (removeWeekends && (day === 6 || (day === 0 && d.getUTCHours() < 21))) continue;
     parsed.push({
-      date: d,
       sec: Math.floor(d.getTime() / 1000),
       dateStr: d.toISOString().slice(0, 10),
-      isPureDateString,
-      item
+      pureDate: typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw),
+      item,
     });
   }
-
-  if (parsed.length === 0) return [];
-
-  // Sort strictly ascending by time
+  if (!parsed.length) return [];
   parsed.sort((a, b) => a.sec - b.sec);
 
-  // Check whether data has granular intraday timestamps (e.g. hourly or minute snapshots)
-  const allPureDate = parsed.every((p) => p.isPureDateString);
-  const daySet = new Set(parsed.map((p) => p.dateStr));
-  const hasIntraday = !allPureDate && (parsed.length > daySet.size || parsed.some((p) => p.date.getUTCHours() !== 0 || p.date.getUTCMinutes() !== 0));
-
-  if (hasIntraday) {
-    // Intraday: Use UNIX timestamp in seconds with strictly increasing seconds
-    let lastSec = -1;
-    const out = [];
-    for (const p of parsed) {
-      let sec = p.sec;
-      if (sec <= lastSec) sec = lastSec + 1;
-      lastSec = sec;
-      out.push({ time: sec, ...p.item });
-    }
-    return out;
+  const days = new Set(parsed.map((p) => p.dateStr));
+  const intraday = !parsed.every((p) => p.pureDate) && parsed.length > days.size;
+  if (intraday) {
+    const bySecond = new Map();
+    for (const p of parsed) bySecond.set(p.sec, p.item);          // the last reading of each second
+    return Array.from(bySecond.entries()).map(([time, item]) => ({ ...item, time }));
   }
-
-  // Pure daily: Deduplicate to latest point per calendar day (YYYY-MM-DD)
-  const dayMap = new Map();
-  for (const p of parsed) {
-    dayMap.set(p.dateStr, p.item);
-  }
-  const sortedDays = Array.from(dayMap.keys()).sort();
-  return sortedDays.map((t) => ({ time: t, ...dayMap.get(t) }));
+  const byDay = new Map();
+  for (const p of parsed) byDay.set(p.dateStr, p.item);           // the last reading of each day
+  return Array.from(byDay.keys()).sort().map((time) => ({ ...byDay.get(time), time }));
 }
 
 /**
- * Match an external timestamp (e.g. trade execution) to the closest bar on the chart
+ * The bar a trade belongs on: its own day's bar for daily data (or the next
+ * bar, if that day has none), the nearest reading for intraday data. Null
+ * for a trade outside the series.
  */
 export function findClosestBar(cleanedData, rawTime) {
   if (!cleanedData || !cleanedData.length) return null;
-  if (!rawTime) return cleanedData[cleanedData.length - 1];
+  const d = parseTime(rawTime);
+  if (!d) return null;
+  const first = cleanedData[0];
+  const last = cleanedData[cleanedData.length - 1];
 
-  let targetSec = 0;
-  let targetDateStr = '';
-  if (typeof rawTime === 'string') {
-    targetDateStr = rawTime.slice(0, 10);
-    const d = new Date(rawTime.endsWith('Z') || rawTime.includes('+') ? rawTime : `${rawTime}Z`);
-    if (!Number.isNaN(d.getTime())) targetSec = Math.floor(d.getTime() / 1000);
-  } else if (typeof rawTime === 'number') {
-    targetSec = rawTime < 2e10 ? Math.floor(rawTime) : Math.floor(rawTime / 1000);
-    targetDateStr = new Date(targetSec * 1000).toISOString().slice(0, 10);
+  if (typeof first.time === 'string') {
+    const day = d.toISOString().slice(0, 10);
+    if (day < first.time || day > last.time) return null;
+    return cleanedData.find((b) => b.time >= day) || null;
   }
 
-  // If chart uses string dates (daily bars)
-  if (typeof cleanedData[0].time === 'string') {
-    const directMatch = cleanedData.find((b) => b.time === targetDateStr);
-    if (directMatch) return directMatch;
-    const past = cleanedData.filter((b) => b.time <= targetDateStr);
-    if (past.length > 0) return past[past.length - 1];
-    return cleanedData[0];
-  }
-
-  // If chart uses UNIX timestamp seconds (intraday)
-  let closest = cleanedData[0];
-  let minDiff = Math.abs(cleanedData[0].time - targetSec);
+  const sec = Math.floor(d.getTime() / 1000);
+  if (sec < first.time - DAY || sec > last.time + DAY) return null;
+  let closest = first;
   for (const b of cleanedData) {
-    const diff = Math.abs(b.time - targetSec);
-    if (diff < minDiff) {
-      minDiff = diff;
-      closest = b;
-    }
+    if (Math.abs(b.time - sec) < Math.abs(closest.time - sec)) closest = b;
   }
   return closest;
 }
 
-/**
- * Calculate simple moving average over valid numeric values
- */
+/** Simple moving average of `key` over `period` points. */
 export function calculateSMA(data, key, period = 20) {
-  const valid = [];
-  for (let i = 0; i < data.length; i++) {
-    const val = data[i][key];
-    if (typeof val === 'number' && !Number.isNaN(val)) {
-      valid.push({ time: data[i].time, val });
-    }
-  }
+  const valid = data.filter((p) => typeof p[key] === 'number' && !Number.isNaN(p[key]));
   if (valid.length < 3) return [];
-  const effPeriod = Math.min(period, Math.max(2, Math.floor(valid.length / 2)));
-  const result = [];
+  const n = Math.min(period, Math.max(2, Math.floor(valid.length / 2)));
+  const out = [];
   let sum = 0;
-  for (let i = 0; i < valid.length; i++) {
-    sum += valid[i].val;
-    if (i >= effPeriod) {
-      sum -= valid[i - effPeriod].val;
-    }
-    if (i >= effPeriod - 1) {
-      result.push({ time: valid[i].time, value: +(sum / effPeriod).toFixed(2) });
-    }
-  }
-  return result;
+  valid.forEach((p, i) => {
+    sum += p[key];
+    if (i >= n) sum -= valid[i - n][key];
+    if (i >= n - 1) out.push({ time: p.time, value: +(sum / n).toFixed(4) });
+  });
+  return out;
 }
+
+// The index of the first point inside the last `days` days.
+export function rangeStart(data, days) {
+  if (!days || !data.length) return 0;
+  const cutoff = timeSeconds(data[data.length - 1].time) - days * DAY;
+  const i = data.findIndex((p) => timeSeconds(p.time) >= cutoff);
+  return i < 0 ? 0 : i;
+}
+
+// Intraday readings at one even step, so equal distances on the time axis
+// are equal spans of time. The chart spaces points evenly, and the server
+// sends recent readings more densely than old ones (5 minutes over the last
+// two days, hourly to 30 days, daily before), which squeezed a month into
+// one half of the chart and two days into the other. The step suits the
+// chosen range: about 600 points across it, never finer than the readings
+// themselves. Points before the range use the same step.
+export function evenSteps(data, days) {
+  if (data.length < 3 || typeof data[0].time !== 'number') return data;
+  const lastT = data[data.length - 1].time;
+  const from = days ? lastT - days * DAY : data[0].time;
+  const gaps = [];
+  for (let i = 1; i < data.length; i += 1) {
+    if (data[i].time >= from) gaps.push(data[i].time - data[i - 1].time);
+  }
+  if (!gaps.length) return data;
+  // The spacing that covers 80% of the range's time: daily when most of it
+  // is daily history, hourly for a month of hourly readings. An outage of a
+  // day or two in a long range does not count.
+  gaps.sort((a, b) => a - b);
+  const total = gaps.reduce((t, g) => t + g, 0);
+  let covered = 0;
+  let typical = gaps[gaps.length - 1];
+  for (const g of gaps) {
+    covered += g;
+    if (covered >= total * 0.8) { typical = g; break; }
+  }
+  const step = Math.max(Math.ceil((lastT - from) / 600), typical, 60);
+  const out = new Map();
+  for (const p of data) out.set(Math.floor((p.time - lastT) / step), p);   // the last reading of each step
+  return Array.from(out.values());
+}
+
+function seriesSignature(series) {
+  return JSON.stringify(series.map((s) => [s.key, s.name, s.type, s.color, s.lineStyle, s.topColor, s.bottomColor, s.baseValue]));
+}
+
+const pill = (on, color) => ({
+  background: on ? `${color}22` : 'transparent',
+  color: on ? color : theme.colors.textMuted,
+  border: `1px solid ${on ? `${color}88` : 'rgba(255,255,255,0.08)'}`,
+  borderRadius: '6px', padding: '3px 8px', fontSize: '10px', fontWeight: 800, cursor: 'pointer',
+});
 
 export default function TradingViewDrawer({
   data = [],
-  series = [
-    { key: 'value', name: 'Account value', type: 'area', color: theme.colors.primary }
-  ],
+  series = [{ key: 'value', name: 'Account value', type: 'area', color: theme.colors.primary }],
   markers = [],
   height = 280,
   timeKey = null,
@@ -192,488 +200,327 @@ export default function TradingViewDrawer({
   defaultRange = 'ALL',
   emptyMessage = 'No chart data recorded yet.',
   referenceLine = null,
-  referenceTitle = 'Baseline',
+  referenceTitle = 'Start',
   onDrill = null,
   className = '',
-  style = {}
+  style = {},
 }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
-  const seriesInstancesRef = useRef([]);
+  const lcRef = useRef(null);
+  const instancesRef = useRef([]);
+  const markersRef = useRef({ list: [], data: [] });
+  const drillRef = useRef(onDrill);
+  const [ready, setReady] = useState(false);
   const [range, setRange] = useState(defaultRange);
   const [hover, setHover] = useState(null);
   const [showSMA, setShowSMA] = useState(false);
   const [showBenchmark, setShowBenchmark] = useState(true);
   const [showTrades, setShowTrades] = useState(true);
+  drillRef.current = onDrill;
 
-  // Clean data, preserve intraday density, and eliminate weekend gaps
+  const allData = useMemo(
+    () => cleanTimeSeries(data, { timeKey, removeWeekends: removeWeekendGaps }),
+    [data, timeKey, removeWeekendGaps],
+  );
+  const rangeDays = (RANGES.find((r) => r.id === range) || {}).days || 0;
   const cleanedData = useMemo(() => {
-    return cleanTimeSeries(data, { timeKey, removeWeekends: removeWeekendGaps });
-  }, [data, timeKey, removeWeekendGaps]);
+    const stepped = evenSteps(allData, rangeDays);
+    // The benchmark starts where the account starts in the chosen range: what
+    // the account's value then would be worth in the benchmark now. Drawn
+    // from the very first reading, a strong or weak start set the two lines
+    // far apart and flattened both on a short range.
+    const key0 = series[0]?.key || 'value';
+    const at = stepped[rangeStart(stepped, rangeDays)];
+    if (!rangeDays || !at || !(at.benchmark > 0) || !(at[key0] > 0)) return stepped;
+    const factor = at[key0] / at.benchmark;
+    return stepped.map((p) => (typeof p.benchmark === 'number' ? { ...p, benchmark: p.benchmark * factor } : p));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allData, rangeDays, series[0]?.key]);
+  const drawnRangeRef = useRef(null);
+  // Signatures, so a poll that returns the same numbers in new arrays changes nothing.
+  const primaryKey = series[0]?.key || 'value';
+  const seriesKey = seriesSignature(series);
+  const last = cleanedData[cleanedData.length - 1] || {};
+  const dataKey = `${cleanedData.length}|${cleanedData[0]?.time}|${last.time}|${series.map((s) => last[s.key]).join(',')}`;
+  const intraday = typeof cleanedData[0]?.time === 'number';
 
-  // Default value formatter based on currency or generic numbers
-  const defaultFormatter = useCallback((val) => {
+  const placedMarkers = useMemo(() => (markers || []).map((m) => {
+    const bar = findClosestBar(cleanedData, m.time);
+    if (!bar) return null;
+    const isBuy = String(m.kind || m.side || '').toLowerCase().includes('buy');
+    return {
+      source: m,
+      time: bar.time,
+      position: m.position || (isBuy ? 'belowBar' : 'aboveBar'),
+      shape: m.shape || (isBuy ? 'arrowUp' : 'arrowDown'),
+      color: m.color || (isBuy ? theme.colors.primary : theme.colors.danger),
+      text: m.text || `${String(m.side || 'trade').toUpperCase()} ${m.symbol || ''}`.trim(),
+      id: m.id || `${m.symbol || 'trade'}-${bar.time}`,
+    };
+  }).filter(Boolean).sort((a, b) => timeSeconds(a.time) - timeSeconds(b.time)),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [JSON.stringify((markers || []).map((m) => [m.time, m.symbol, m.side, m.kind])), dataKey]);
+  markersRef.current = { list: placedMarkers };
+
+  const format = useCallback((val) => {
     if (typeof val !== 'number' || Number.isNaN(val)) return '—';
     if (formatValue) return formatValue(val);
-    if (currency === 'KES') {
-      return `KES ${Math.round(val).toLocaleString()}`;
-    }
+    if (currency === 'KES') return `KES ${Math.round(val).toLocaleString()}`;
     if (currency === 'USD') {
-      return `$${val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      const digits = Math.abs(val) >= 1000 ? 0 : 2;
+      return `$${val.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
     }
     return val.toLocaleString(undefined, { maximumFractionDigits: 2 });
   }, [formatValue, currency]);
+  const formatRef = useRef(format);
+  formatRef.current = format;
 
-  // Format date display for HUD
-  const formatTimeLabel = useCallback((t) => {
-    if (!t) return '';
+  const timeLabel = useCallback((t) => {
+    if (t == null) return '';
     if (typeof t === 'number') {
       const d = new Date(t * 1000);
-      return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+      return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
     }
-    return String(t);
+    return parseTime(t).toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
   }, []);
 
-  // Check if benchmark series is configured
-  const hasBenchmarkConfig = useMemo(() => {
-    return series.some((s) => s.key === 'benchmark');
-  }, [series]);
-
-  // Primary key for account value
-  const primaryKey = series[0]?.key || 'value';
-
+  // 1. The chart itself, once (and again only if its height changes).
   useEffect(() => {
-    if (!cleanedData.length || !containerRef.current) return undefined;
+    if (!containerRef.current || !cleanedData.length) return undefined;
     let disposed = false;
-    let chart = null;
-
     (async () => {
       const lc = await import('lightweight-charts');
       if (disposed || !containerRef.current) return;
-
-      chart = lc.createChart(containerRef.current, {
+      lcRef.current = lc;
+      const chart = lc.createChart(containerRef.current, {
         autoSize: true,
         layout: {
-          background: { type: lc.ColorType?.Solid || 'solid', color: 'transparent' },
+          background: { type: lc.ColorType.Solid, color: 'transparent' },
           textColor: theme.colors.textSecondary,
           fontSize: 10,
+          fontFamily: 'JetBrains Mono, monospace',
           attributionLogo: true,
-          panes: { separatorColor: 'rgba(51, 65, 85, 0.4)' },
         },
-        grid: {
-          vertLines: { color: 'rgba(51, 65, 85, 0.18)' },
-          horzLines: { color: 'rgba(51, 65, 85, 0.18)' }
-        },
-        rightPriceScale: {
-          borderColor: 'rgba(51, 65, 85, 0.5)',
-          scaleMargins: { top: 0.16, bottom: 0.16 },
-          autoScale: true,
-        },
-        timeScale: {
-          borderColor: 'rgba(51, 65, 85, 0.5)',
-          rightOffset: 0,
-          fixLeftEdge: true,
-          fixRightEdge: true,
-          lockVisibleTimeRangeOnResize: true,
-          barSpacing: 10,
-          minBarSpacing: 1,
-        },
+        localization: { priceFormatter: (v) => formatRef.current(v) },
+        grid: { vertLines: { visible: false }, horzLines: { color: 'rgba(51, 65, 85, 0.22)' } },
+        rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.12, bottom: 0.08 } },
+        timeScale: { borderVisible: false, rightOffset: 2, fixLeftEdge: true, fixRightEdge: true, minBarSpacing: 0.5 },
         crosshair: {
-          mode: lc.CrosshairMode.Normal,
-          vertLine: { color: 'rgba(148, 163, 184, 0.4)', width: 1, style: lc.LineStyle.Dashed },
-          horzLine: { color: 'rgba(148, 163, 184, 0.4)', width: 1, style: lc.LineStyle.Dashed },
+          mode: lc.CrosshairMode.Magnet,
+          vertLine: { color: 'rgba(148, 163, 184, 0.45)', width: 1, style: lc.LineStyle.Dashed, labelBackgroundColor: '#1e293b' },
+          horzLine: { color: 'rgba(148, 163, 184, 0.45)', width: 1, style: lc.LineStyle.Dashed, labelBackgroundColor: '#1e293b' },
         },
+        handleScroll: { vertTouchDrag: false },
       });
-
-      const instances = [];
-
-      series.forEach((sConf, idx) => {
-        // If benchmark is toggled off, skip adding it
-        if (sConf.key === 'benchmark' && !showBenchmark) return;
-
-        const color = sConf.color || (idx === 0 ? theme.colors.primary : theme.colors.secondary);
-        const lineStyle = sConf.lineStyle === 'dashed' ? lc.LineStyle.Dashed : lc.LineStyle.Solid;
-        const sType = sConf.type || (idx === 0 ? 'area' : 'line');
-
-        // Organic spline curvature (Curved) to eliminate shallow/polygonal look
-        const lineType = sConf.lineType === 'simple' ? lc.LineType.Simple : lc.LineType.Curved;
-
-        let sInstance;
-        if (sType === 'area') {
-          sInstance = chart.addSeries(lc.AreaSeries, {
-            lineColor: color,
-            topColor: sConf.topColor || `${color}38`,
-            bottomColor: sConf.bottomColor || `${color}02`,
-            lineWidth: sConf.lineWidth || 2.5,
-            lineType,
-            priceLineVisible: true,
-            priceLineColor: `${color}90`,
-            priceLineStyle: lc.LineStyle.Dotted,
-            lastValueVisible: true,
-            crosshairMarkerVisible: true,
-            crosshairMarkerRadius: 4,
-          });
-        } else if (sType === 'baseline') {
-          sInstance = chart.addSeries(lc.BaselineSeries, {
-            baseValue: { type: 'price', price: sConf.baseValue || 0 },
-            topLineColor: sConf.topColor || theme.colors.primary,
-            bottomLineColor: sConf.bottomColor || theme.colors.danger,
-            lineWidth: sConf.lineWidth || 2.5,
-            lineType,
-            priceLineVisible: true,
-            lastValueVisible: true,
-          });
-        } else {
-          sInstance = chart.addSeries(lc.LineSeries, {
-            color,
-            lineWidth: sConf.lineWidth || 2,
-            lineStyle,
-            lineType,
-            priceLineVisible: false,
-            lastValueVisible: true,
-            crosshairMarkerVisible: true,
-            crosshairMarkerRadius: 3,
-          });
-        }
-
-        // Filter points for this specific series
-        const seriesData = cleanedData
-          .filter((p) => typeof p[sConf.key] === 'number' && !Number.isNaN(p[sConf.key]))
-          .map((p) => ({ time: p.time, value: p[sConf.key] }));
-
-        if (seriesData.length > 0) {
-          sInstance.setData(seriesData);
-        }
-
-        instances.push({ conf: sConf, instance: sInstance, data: seriesData });
-      });
-
-      // Optional SMA Trend Overlay (Curved spline)
-      if (showSMA && cleanedData.length >= 3 && instances.length > 0) {
-        try {
-          const smaData = calculateSMA(cleanedData, primaryKey, 20);
-          if (smaData.length > 0) {
-            const smaInstance = chart.addSeries(lc.LineSeries, {
-              color: '#38bdf8',
-              lineWidth: 1.5,
-              lineType: lc.LineType.Curved,
-              priceLineVisible: false,
-              lastValueVisible: false,
-              crosshairMarkerVisible: true,
-              crosshairMarkerRadius: 2,
-            });
-            smaInstance.setData(smaData);
-            instances.push({ conf: { key: '_sma', name: 'SMA 20', color: '#38bdf8' }, instance: smaInstance, data: smaData });
-          }
-        } catch (e) {
-          console.debug('Failed to add SMA overlay:', e);
-        }
-      }
-
-      // Trade Markers on the Primary Curve (e.g. BUY, SELL, STOP) with Symbol Drilldown
-      if (showTrades && markers && markers.length > 0 && instances.length > 0) {
-        try {
-          const mappedMarkers = markers.map((m) => {
-            const bar = findClosestBar(cleanedData, m.time);
-            const isBuy = (m.kind || m.side || '').toLowerCase().includes('buy');
-            return {
-              time: bar ? bar.time : cleanedData[cleanedData.length - 1].time,
-              position: m.position || (isBuy ? 'belowBar' : 'aboveBar'),
-              shape: m.shape || (isBuy ? 'arrowUp' : 'arrowDown'),
-              color: m.color || (isBuy ? theme.colors.primary : theme.colors.danger),
-              text: m.text || `${(m.side || 'TRADE').toUpperCase()} ${m.symbol || ''}`.trim(),
-              id: m.id || `${m.symbol || 'trade'}-${bar ? bar.time : 'last'}`
-            };
-          }).sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
-
-          lc.createSeriesMarkers(instances[0].instance, mappedMarkers);
-        } catch (e) {
-          console.debug('Failed to place markers on chart:', e);
-        }
-      }
-
-      // Baseline reference price line if provided
-      if (referenceLine != null && instances.length > 0 && typeof referenceLine === 'number') {
-        try {
-          instances[0].instance.createPriceLine({
-            price: referenceLine,
-            color: 'rgba(148, 163, 184, 0.45)',
-            lineWidth: 1,
-            lineStyle: lc.LineStyle.Dashed,
-            axisLabelVisible: true,
-            title: referenceTitle,
-          });
-        } catch (e) {
-          console.debug('Failed to add reference price line:', e);
-        }
-      }
-
-      seriesInstancesRef.current = instances;
-
-      // Subscribe crosshair move for interactive HUD
       chart.subscribeCrosshairMove((param) => {
-        if (!param || !param.time) {
-          setHover(null);
-          return;
-        }
+        if (!param || param.time == null || !param.seriesData) { setHover(null); return; }
         const values = {};
-        instances.forEach((item) => {
-          const valObj = param.seriesData.get(item.instance);
-          if (valObj && typeof valObj.value === 'number') {
-            values[item.conf.key] = valObj.value;
-          }
+        instancesRef.current.forEach(({ key, instance }) => {
+          const v = param.seriesData.get(instance);
+          if (v && typeof v.value === 'number') values[key] = v.value;
         });
         setHover({ time: param.time, values });
       });
-
-      // Subscribe click on chart canvas: click marker to drill down into symbol
       chart.subscribeClick((param) => {
-        if (!param || !param.time || !onDrill || !markers.length) return;
-        const clickedTime = param.time;
-        const matchingMarker = markers.find((m) => {
-          const bar = findClosestBar(cleanedData, m.time);
-          return bar && bar.time === clickedTime && m.symbol;
-        });
-        if (matchingMarker && matchingMarker.symbol) {
-          onDrill(matchingMarker.symbol);
-        }
+        if (!param || param.time == null || !drillRef.current) return;
+        const hit = markersRef.current.list.find((m) => m.time === param.time && m.source.symbol);
+        if (hit) drillRef.current(hit.source.symbol);
       });
-
       chartRef.current = chart;
-      applyTimeRange(chart, cleanedData.length, range);
-
-      // Edge-to-edge layout guarantee on container resize
-      const ro = new ResizeObserver(() => {
-        if (!disposed && chart) {
-          applyTimeRange(chart, cleanedData.length, range);
-        }
-      });
-      if (containerRef.current) {
-        ro.observe(containerRef.current);
-      }
-
-      return () => {
-        ro.disconnect();
-      };
+      setReady(true);
     })();
-
     return () => {
       disposed = true;
-      chartRef.current = null;
-      seriesInstancesRef.current = [];
-      if (chart) {
-        chart.remove();
-      }
+      instancesRef.current = [];
+      if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
+      setReady(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cleanedData, series, markers, height, referenceLine, showSMA, showBenchmark, showTrades]);
+  }, [height, cleanedData.length > 0]);
 
-  // Adjust zoom when range changes
+  // 2. Its series, redrawn when the data or the toggles change.
   useEffect(() => {
-    if (chartRef.current) {
-      applyTimeRange(chartRef.current, cleanedData.length, range);
+    const chart = chartRef.current;
+    const lc = lcRef.current;
+    if (!ready || !chart || !lc) return;
+    const before = chart.timeScale().getVisibleLogicalRange();
+    const firstDraw = instancesRef.current.length === 0;
+    instancesRef.current.forEach(({ instance }) => chart.removeSeries(instance));
+    instancesRef.current = [];
+    chart.applyOptions({ timeScale: { timeVisible: intraday, secondsVisible: false } });
+
+    series.forEach((s, idx) => {
+      if (s.key === 'benchmark' && !showBenchmark) return;
+      const color = s.color || (idx === 0 ? theme.colors.primary : theme.colors.secondary);
+      const type = s.type || (idx === 0 ? 'area' : 'line');
+      const common = {
+        lineWidth: s.lineWidth || (type === 'line' ? 1.5 : 2),
+        lineType: lc.LineType.Simple,
+        priceLineVisible: idx === 0,
+        lastValueVisible: true,
+        crosshairMarkerRadius: 3,
+      };
+      let instance;
+      if (type === 'area') {
+        instance = chart.addSeries(lc.AreaSeries, {
+          ...common, lineColor: color,
+          topColor: s.topColor || `${color}40`, bottomColor: s.bottomColor || `${color}00`,
+          priceLineColor: `${color}90`, priceLineStyle: lc.LineStyle.Dotted,
+        });
+      } else if (type === 'baseline') {
+        instance = chart.addSeries(lc.BaselineSeries, {
+          ...common, baseValue: { type: 'price', price: s.baseValue || 0 },
+          topLineColor: s.topColor || theme.colors.primary, bottomLineColor: s.bottomColor || theme.colors.danger,
+        });
+      } else {
+        instance = chart.addSeries(lc.LineSeries, {
+          ...common, color, lineStyle: s.lineStyle === 'dashed' ? lc.LineStyle.Dashed : lc.LineStyle.Solid,
+        });
+      }
+      instance.setData(cleanedData
+        .filter((p) => typeof p[s.key] === 'number' && !Number.isNaN(p[s.key]))
+        .map((p) => ({ time: p.time, value: p[s.key] })));
+      instancesRef.current.push({ key: s.key, instance });
+    });
+
+    const primary = instancesRef.current[0]?.instance;
+    if (primary && showSMA) {
+      const sma = chart.addSeries(lc.LineSeries, {
+        color: '#38bdf8', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+      });
+      sma.setData(calculateSMA(cleanedData, primaryKey, 20));
+      instancesRef.current.push({ key: '_sma', instance: sma });
     }
-  }, [range, cleanedData.length]);
+    if (primary && showTrades && placedMarkers.length) {
+      // Labels overlap once trades crowd together; past a few, the arrows
+      // alone are drawn and the header names the trade under the cursor.
+      const labelled = placedMarkers.length <= 4;
+      lc.createSeriesMarkers(primary, placedMarkers.map(({ source, ...m }) => (labelled ? m : { ...m, text: '' })));
+    }
+    if (primary && typeof referenceLine === 'number') {
+      primary.createPriceLine({
+        price: referenceLine, color: 'rgba(148, 163, 184, 0.5)', lineWidth: 1,
+        lineStyle: lc.LineStyle.Dashed, axisLabelVisible: true, title: referenceTitle,
+      });
+    }
+    // A new range (or the first drawing) frames that range; a refresh keeps
+    // whatever the reader has zoomed or scrolled to.
+    if (firstDraw || !before || drawnRangeRef.current !== range) applyRange(chart, cleanedData, range);
+    else chart.timeScale().setVisibleLogicalRange(before);
+    drawnRangeRef.current = range;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, dataKey, seriesKey, placedMarkers, showSMA, showBenchmark, showTrades, referenceLine]);
 
-  // Active values (hover or last point)
-  const lastPoint = cleanedData.length ? (cleanedData[cleanedData.length - 1] || {}) : {};
-  const prevPoint = cleanedData.length > 1 ? (cleanedData[cleanedData.length - 2] || null) : null;
-  const activeTime = hover ? hover.time : lastPoint.time;
-  const activePrimaryVal = hover ? hover.values[primaryKey] : lastPoint[primaryKey];
-  const prevPrimaryVal = prevPoint ? prevPoint[primaryKey] : null;
-  const primaryChange = (typeof activePrimaryVal === 'number' && typeof prevPrimaryVal === 'number' && prevPrimaryVal > 0)
-    ? ((activePrimaryVal - prevPrimaryVal) / prevPrimaryVal) * 100
-    : null;
-
-  // Active trade marker matching current hovered/active bar - declared BEFORE any conditional return
-  const activeTrade = useMemo(() => {
-    if (!markers.length || !activeTime || !cleanedData.length) return null;
-    return markers.find((m) => {
-      const bar = findClosestBar(cleanedData, m.time);
-      return bar && bar.time === activeTime;
-    }) || null;
-  }, [markers, activeTime, cleanedData]);
+  // 3. The range buttons.
+  useEffect(() => {
+    if (ready && chartRef.current) applyRange(chartRef.current, cleanedData, range);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [range, ready]);
 
   if (!cleanedData.length) {
     return (
-      <div style={{
-        height, display: 'flex', alignItems: 'center', justifyContent: 'center',
-        color: theme.colors.textMuted, fontSize: '13px', textAlign: 'center', padding: '16px',
-        ...style
-      }} className={className}>
+      <div className={className} style={{
+        height, display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center',
+        color: theme.colors.textMuted, fontSize: '13px', padding: '16px', ...style,
+      }}>
         {emptyMessage}
       </div>
     );
   }
 
-  return (
-    <div style={{ position: 'relative', width: '100%', ...style }} className={className}>
-      {/* Top Header / HUD Bar */}
-      <div style={{
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        gap: '8px', flexWrap: 'wrap', marginBottom: '8px', fontSize: '11px'
-      }}>
-        {/* Active Point Badges & HUD */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-          {activeTime && (
-            <span style={{ color: theme.colors.textSecondary, fontWeight: 700, fontFamily: 'monospace' }}>
-              {formatTimeLabel(activeTime)}
-            </span>
-          )}
+  // What the header shows: the reading under the cursor, or the latest one.
+  const index = hover ? cleanedData.findIndex((p) => p.time === hover.time) : cleanedData.length - 1;
+  const point = cleanedData[index] || last;
+  const valueOf = (key) => (hover && hover.values[key] != null ? hover.values[key] : point[key]);
+  const spanDays = (timeSeconds(last.time) - timeSeconds(allData[0].time)) / DAY;
+  const start = cleanedData[rangeStart(cleanedData, (RANGES.find((r) => r.id === range) || {}).days)];
+  const startValue = start ? start[primaryKey] : null;
+  const shownValue = valueOf(primaryKey);
+  const change = typeof shownValue === 'number' && typeof startValue === 'number' && startValue
+    ? (shownValue / startValue - 1) * 100 : null;
+  const trade = placedMarkers.find((m) => m.time === point.time);
 
-          {series.map((sConf) => {
-            if (sConf.key === 'benchmark' && !showBenchmark) return null;
-            const val = hover ? hover.values[sConf.key] : lastPoint[sConf.key];
-            if (typeof val !== 'number') return null;
+  return (
+    <div className={className} style={{ position: 'relative', width: '100%', ...style }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px', flexWrap: 'wrap', marginBottom: '10px' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: '12px', flexWrap: 'wrap', minHeight: '22px' }}>
+          {series.map((s) => {
+            if (s.key === 'benchmark' && !showBenchmark) return null;
+            const v = valueOf(s.key);
+            if (typeof v !== 'number') return null;
             return (
-              <div key={sConf.key} style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                <span style={{
-                  width: '8px', height: '8px', borderRadius: '50%',
-                  backgroundColor: sConf.color || theme.colors.primary,
-                  display: 'inline-block'
-                }} />
-                <span style={{ color: theme.colors.textMuted }}>{sConf.name}:</span>
-                <strong style={{ color: '#fff', fontFamily: 'monospace' }}>
-                  {defaultFormatter(val)}
-                </strong>
-              </div>
+              <span key={s.key} style={{ display: 'inline-flex', alignItems: 'baseline', gap: '6px', fontSize: '11px' }}>
+                <span style={{ width: '8px', height: '8px', borderRadius: '2px', background: s.color || theme.colors.primary, display: 'inline-block', alignSelf: 'center' }} />
+                <span style={{ color: theme.colors.textMuted }}>{s.name}</span>
+                <strong style={{ color: '#fff', fontSize: s.key === primaryKey ? '15px' : '12px', fontVariantNumeric: 'tabular-nums' }}>{format(v)}</strong>
+              </span>
             );
           })}
-
-          {showSMA && hover?.values?._sma != null && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-              <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: '#38bdf8', display: 'inline-block' }} />
-              <span style={{ color: theme.colors.textMuted }}>SMA 20:</span>
-              <strong style={{ color: '#38bdf8', fontFamily: 'monospace' }}>{defaultFormatter(hover.values._sma)}</strong>
-            </div>
-          )}
-
-          {primaryChange != null && (
-            <span style={{
-              fontSize: '10px', fontWeight: 800, padding: '1px 6px', borderRadius: '4px',
-              backgroundColor: primaryChange >= 0 ? 'rgba(16,185,129,0.15)' : 'rgba(244,63,94,0.15)',
-              color: primaryChange >= 0 ? theme.colors.primary : theme.colors.danger,
-              border: `1px solid ${primaryChange >= 0 ? theme.colors.primary : theme.colors.danger}40`
+          {change != null && (
+            <span title={`Change from ${timeLabel(start.time)}`} style={{
+              fontSize: '11px', fontWeight: 800, fontVariantNumeric: 'tabular-nums',
+              color: change >= 0 ? theme.colors.primary : theme.colors.danger,
             }}>
-              {primaryChange >= 0 ? `↗ +${primaryChange.toFixed(2)}%` : `↘ ${primaryChange.toFixed(2)}%`}
+              {change >= 0 ? '+' : ''}{change.toFixed(2)}% {range === 'ALL' ? 'since start' : `over ${range}`}
             </span>
           )}
-
-          {/* Drilldown interactive pill for trade at this bar */}
-          {activeTrade && (
+          <span style={{ fontSize: '11px', color: theme.colors.textMuted }}>{timeLabel(point.time)}</span>
+          {trade && (
             <button
-              onClick={() => onDrill && activeTrade.symbol && onDrill(activeTrade.symbol)}
-              title={activeTrade.symbol ? `Drill down into ${activeTrade.symbol}` : ''}
-              style={{
-                display: 'inline-flex', alignItems: 'center', gap: '4px',
-                padding: '2px 8px', borderRadius: '5px',
-                backgroundColor: (activeTrade.kind || activeTrade.side || '').toLowerCase().includes('buy')
-                  ? 'rgba(16,185,129,0.2)'
-                  : 'rgba(244,63,94,0.2)',
-                color: (activeTrade.kind || activeTrade.side || '').toLowerCase().includes('buy')
-                  ? theme.colors.primary
-                  : theme.colors.danger,
-                border: `1px solid ${(activeTrade.kind || activeTrade.side || '').toLowerCase().includes('buy') ? theme.colors.primary : theme.colors.danger}50`,
-                fontSize: '11px', fontWeight: 800, cursor: onDrill && activeTrade.symbol ? 'pointer' : 'default',
-              }}
+              onClick={() => onDrill && trade.source.symbol && onDrill(trade.source.symbol)}
+              style={{ ...pill(true, trade.color), cursor: onDrill && trade.source.symbol ? 'pointer' : 'default' }}
             >
-              <span>{activeTrade.text || `${activeTrade.side || 'TRADE'} ${activeTrade.symbol || ''}`}</span>
-              {onDrill && activeTrade.symbol && <span style={{ fontSize: '9px', opacity: 0.85 }}>↗ DRILLDOWN</span>}
+              {trade.text}{onDrill && trade.source.symbol ? ' · open' : ''}
             </button>
           )}
         </div>
 
-        {/* Feature Toggles & Drilldown Timeframe Pills */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
-          {/* Indicator toggles like Apple chart */}
-          <div style={{ display: 'flex', gap: '3px' }}>
-            <button
-              onClick={() => setShowSMA(!showSMA)}
-              title="Toggle 20-period moving average curve"
-              style={{
-                background: showSMA ? 'rgba(56, 189, 248, 0.2)' : 'transparent',
-                color: showSMA ? '#38bdf8' : theme.colors.textMuted,
-                border: `1px solid ${showSMA ? '#38bdf8' : 'rgba(255,255,255,0.08)'}`,
-                borderRadius: '5px', padding: '2px 7px', fontSize: '10px', fontWeight: 800, cursor: 'pointer',
-              }}
-            >
-              SMA 20
+        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+          <button onClick={() => setShowSMA(!showSMA)} title="20-point moving average" style={pill(showSMA, '#38bdf8')}>Average</button>
+          {series.some((s) => s.key === 'benchmark') && (
+            <button onClick={() => setShowBenchmark(!showBenchmark)} title="Show the benchmark" style={pill(showBenchmark, theme.colors.secondary)}>Benchmark</button>
+          )}
+          {placedMarkers.length > 0 && (
+            <button onClick={() => setShowTrades(!showTrades)} title="Show the agent's trades" style={pill(showTrades, theme.colors.primary)}>
+              Trades {placedMarkers.length}
             </button>
-
-            {hasBenchmarkConfig && (
-              <button
-                onClick={() => setShowBenchmark(!showBenchmark)}
-                title="Toggle benchmark curve"
-                style={{
-                  background: showBenchmark ? `${theme.colors.secondary}25` : 'transparent',
-                  color: showBenchmark ? theme.colors.secondary : theme.colors.textMuted,
-                  border: `1px solid ${showBenchmark ? theme.colors.secondary : 'rgba(255,255,255,0.08)'}`,
-                  borderRadius: '5px', padding: '2px 7px', fontSize: '10px', fontWeight: 800, cursor: 'pointer',
-                }}
-              >
-                Benchmark
-              </button>
-            )}
-
-            {markers.length > 0 && (
-              <button
-                onClick={() => setShowTrades(!showTrades)}
-                title="Toggle trade execution markers on chart"
-                style={{
-                  background: showTrades ? `${theme.colors.primary}25` : 'transparent',
-                  color: showTrades ? theme.colors.primary : theme.colors.textMuted,
-                  border: `1px solid ${showTrades ? theme.colors.primary : 'rgba(255,255,255,0.08)'}`,
-                  borderRadius: '5px', padding: '2px 7px', fontSize: '10px', fontWeight: 800, cursor: 'pointer',
-                }}
-              >
-                Trades ({markers.length})
-              </button>
-            )}
-          </div>
-
-          <div style={{ width: '1px', height: '14px', backgroundColor: 'rgba(255,255,255,0.12)', margin: '0 2px' }} />
-
-          {/* Timeframe Drilldown Buttons (1D, 1W, 1M, 3M, 6M, 1Y, ALL) */}
+          )}
           {showRanges && (
-            <div style={{ display: 'flex', gap: '3px', flexWrap: 'wrap' }}>
-              {RANGES.map((r) => (
-                <button
-                  key={r.id}
-                  onClick={() => setRange(r.id)}
-                  style={{
-                    background: range === r.id ? 'rgba(255,255,255,0.16)' : 'transparent',
-                    color: range === r.id ? '#fff' : theme.colors.textMuted,
-                    border: `1px solid ${range === r.id ? theme.colors.border : 'rgba(255,255,255,0.05)'}`,
-                    borderRadius: '5px',
-                    padding: '2px 7px',
-                    fontSize: '10px',
-                    fontWeight: 700,
-                    cursor: 'pointer',
-                    transition: 'all 0.15s ease'
-                  }}
-                >
-                  {r.label}
-                </button>
-              ))}
+            <div role="group" aria-label="Time range" style={{ display: 'flex', gap: '2px', marginLeft: '4px', padding: '2px', borderRadius: '8px', background: 'rgba(255,255,255,0.03)' }}>
+              {RANGES.map((r) => {
+                const tooLong = r.days && r.days > spanDays * 1.5 && r.days > 1;
+                return (
+                  <button
+                    key={r.id}
+                    onClick={() => setRange(r.id)}
+                    disabled={!!tooLong}
+                    aria-pressed={range === r.id}
+                    title={tooLong ? 'Longer than the history recorded so far' : `Last ${r.days ? `${r.days} days` : 'everything'}`}
+                    style={{
+                      background: range === r.id ? 'rgba(255,255,255,0.14)' : 'transparent',
+                      color: range === r.id ? '#fff' : theme.colors.textMuted,
+                      opacity: tooLong ? 0.35 : 1, border: 'none', borderRadius: '6px',
+                      padding: '3px 7px', fontSize: '10px', fontWeight: 800, cursor: tooLong ? 'default' : 'pointer',
+                    }}
+                  >
+                    {r.label}
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>
       </div>
-
-      {/* Chart Canvas Container */}
       <div ref={containerRef} style={{ height, width: '100%', position: 'relative' }} />
     </div>
   );
 }
 
-function applyTimeRange(chart, count, rangeId) {
-  if (!chart || !count) return;
-  const match = RANGES.find((r) => r.id === rangeId);
-  const days = match ? match.days : 0;
-  const ts = chart.timeScale();
-  if (!days || count <= days) {
-    ts.fitContent();
-  } else {
-    ts.setVisibleLogicalRange({ from: Math.max(0, count - days), to: count - 1 });
-  }
+function applyRange(chart, data, rangeId) {
+  if (!chart || !data.length) return;
+  const days = (RANGES.find((r) => r.id === rangeId) || {}).days;
+  const from = rangeStart(data, days);
+  if (!from) chart.timeScale().fitContent();
+  else chart.timeScale().setVisibleLogicalRange({ from, to: data.length - 1 });
 }

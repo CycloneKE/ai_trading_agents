@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { theme, glassCard } from './DashboardStyles';
 import { getApiBase } from '../utils/apiBase';
+import { whenVisible } from './ui';
 
 const SectionHeader = ({ title, icon: Icon, subtitle }) => (
   <div style={{ marginBottom: '20px' }}>
@@ -76,7 +77,7 @@ const GrowthView = ({ onDrill }) => {
 
   useEffect(() => {
     loadGrowthData();
-    const id = setInterval(loadGrowthData, 30000);
+    const id = setInterval(whenVisible(loadGrowthData), 30000);
     return () => clearInterval(id);
   }, [loadGrowthData]);
 

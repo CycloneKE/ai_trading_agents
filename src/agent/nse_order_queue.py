@@ -86,8 +86,9 @@ CREATE TABLE IF NOT EXISTS nse_paper_equity (
 
 
 class NseOrderQueue:
-    def __init__(self, db_path: str = str(DATA_DIR / 'escalations.db'),
+    def __init__(self, db_path: Optional[str] = None,
                  alerter: Optional[Any] = None):
+        db_path = db_path or str(DATA_DIR / 'escalations.db')   # read now, not at import
         self.alerter = alerter
         self._lock = threading.Lock()
         self.db_path = db_path

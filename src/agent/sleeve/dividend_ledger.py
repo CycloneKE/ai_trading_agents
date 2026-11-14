@@ -28,7 +28,8 @@ CREATE INDEX IF NOT EXISTS idx_sleeve_dividends_symbol ON sleeve_dividends(symbo
 
 
 class DividendLedger:
-    def __init__(self, db_path: str = str(DATA_DIR / 'sleeve.db')):
+    def __init__(self, db_path: Optional[str] = None):
+        db_path = db_path or str(DATA_DIR / 'sleeve.db')   # read now, not at import
         self._lock = threading.Lock()
         self.db_path = db_path
         self._conn = sqlite3.connect(db_path, check_same_thread=False)

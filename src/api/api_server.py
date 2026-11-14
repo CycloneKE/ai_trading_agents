@@ -31,7 +31,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _request_counts = defaultdict(list)
 _rate_lock = threading.Lock()
-RATE_LIMIT = int(os.getenv('API_RATE_LIMIT', '100'))  # requests per minute
+# Requests per minute per client. The dashboard alone makes 55 to 70 a
+# minute from one open tab (it polls about a dozen endpoints), so the old 100
+# turned a second tab, or two people behind one proxy, into HTTP 429s and a
+# dashboard that silently stopped updating. Logins have their own lockout.
+RATE_LIMIT = int(os.getenv('API_RATE_LIMIT', '300'))
 # When behind a trusted reverse proxy (Caddy), remote_addr is always the
 # proxy, so all clients would share one bucket. Set TRUST_PROXY=1 to key
 # the limiter on the real client via X-Forwarded-For instead.
@@ -622,6 +626,9 @@ class TradingAPI:
                 report['total_trades'] = metrics.get('total_trades', 0)
                 report['sharpe_ratio'] = metrics.get('sharpe_ratio', 0)
                 report['max_drawdown'] = metrics.get('max_drawdown', 0)
+                # Ratios need this many days of daily returns (performance_analytics).
+                report['days_measured'] = metrics.get('days_measured', 0)
+                report['min_days_for_ratios'] = metrics.get('min_days_for_ratios', 20)
 
                 # Consolidated equity: the US account plus the NSE side in
                 # USD at the live rate. Kept apart from `portfolio_value`,
@@ -649,7 +656,9 @@ class TradingAPI:
 
                 # Append the latest live point to portfolio_chart so the curve
                 # reaches the current minute and includes the latest trade data.
-                chart = report.get('portfolio_chart') or []
+                from src.agent.chart_data import thin_curve
+                chart = thin_curve(report.get('portfolio_chart') or [])
+                report['portfolio_chart'] = chart
                 now_iso = datetime.utcnow().isoformat()
                 if current_value > 0:
                     if not chart:
@@ -839,7 +848,11 @@ class TradingAPI:
                             mkt_val = round(qty * curr, 2)
                             
                             sym_str = getattr(p, 'symbol', '').upper()
-                            region = 'Crypto' if any(c in sym_str for c in ['BTC', 'ETH', 'SOL', 'AVAX', 'DOGE', '-USD']) else 'US'
+                            from src.agent.cost_model import classify
+                            # Alpaca's crypto arrives as BTC-USD (alpaca_broker.from_alpaca_symbol);
+                            # the cost model knows every pair, not only these five coins.
+                            region = ('Crypto' if classify(sym_str, getattr(self.trading_agent, 'config', None) or self.config) == 'crypto'
+                                      or any(c in sym_str for c in ['BTC', 'ETH', 'SOL', 'AVAX', 'DOGE', '-USD']) else 'US')
                             in_core = sym_str in core_symbols
                             if in_core:
                                 core_value += mkt_val

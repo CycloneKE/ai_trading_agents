@@ -19,7 +19,8 @@ import SystemSection from './views/SystemSection';
 import NotificationsView, { notificationItems } from './views/NotificationsView';
 import { SEEN_KEY, newestAlertTime } from './agentAlerts';
 import { theme } from './DashboardStyles';
-import { useIsMobile } from './ui';
+import { useIsMobile, whenVisible, useOnVisible } from './ui';
+import ErrorBoundary from './ErrorBoundary';
 import { getApiBase } from '../utils/apiBase';
 
 const SECTIONS = [
@@ -291,6 +292,7 @@ const AdvancedDashboard = ({ onLogout }) => {
   });
   const [nseData, setNseData] = useState({ quotes: [], movers: { gainers: [], losers: [] }, sectors: [], status: {}, kes_usd_rate: 0.0077, market_open: false });
   const [isConnected, setIsConnected] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(null);
   const [showHelp, setShowHelp] = useState(false);
   const [drilldownSymbol, setDrilldownSymbol] = useState(null);
   const [drilldownSector, setDrilldownSector] = useState(null);
@@ -350,7 +352,7 @@ const AdvancedDashboard = ({ onLogout }) => {
       } catch (e) { /* transient */ }
     };
     load();
-    const id = setInterval(load, 30000);
+    const id = setInterval(whenVisible(load), 30000);
     return () => { alive = false; clearInterval(id); };
   }, [isOperator]);
 
@@ -368,7 +370,7 @@ const AdvancedDashboard = ({ onLogout }) => {
       } catch (e) { /* transient */ }
     };
     load();
-    const id = setInterval(load, 60000);
+    const id = setInterval(whenVisible(load), 60000);
     return () => { alive = false; clearInterval(id); };
   }, [isOperator]);
 
@@ -385,7 +387,7 @@ const AdvancedDashboard = ({ onLogout }) => {
       } catch (e) { /* transient */ }
     };
     load();
-    const id = setInterval(load, 60000);
+    const id = setInterval(whenVisible(load), 60000);
     return () => { alive = false; clearInterval(id); };
   }, []);
 
@@ -403,7 +405,7 @@ const AdvancedDashboard = ({ onLogout }) => {
       } catch (e) { /* transient */ }
     };
     load();
-    const id = setInterval(load, 30000);
+    const id = setInterval(whenVisible(load), 30000);
     return () => { alive = false; clearInterval(id); };
   }, []);
 
@@ -431,13 +433,15 @@ const AdvancedDashboard = ({ onLogout }) => {
       } catch (e) { /* transient */ }
     };
     poll();
-    const id = setInterval(poll, 10000);
+    const id = setInterval(whenVisible(poll), 10000);
     return () => { alive = false; clearInterval(id); };
   }, []);
 
   const fetchData = async () => {
+    // performance?period=ALL: the whole history (the server's default is the
+    // last month), so the chart's 3M, 1Y and ALL have something to show.
     const endpoints = [
-      'status', 'performance', 'positions', 'alerts', 'news-feed',
+      'status', 'performance?period=ALL', 'positions', 'alerts', 'news-feed',
       'risk-metrics', 'model-performance', 'strategy-performance',
       'market-heatmap', 'system-health', 'agent-activity', 'portfolio-allocation',
     ];
@@ -482,11 +486,15 @@ const AdvancedDashboard = ({ onLogout }) => {
       allocation: Array.isArray(newResponses[11]) ? newResponses[11] : prev.allocation,
     }));
     setIsConnected(ok(newResponses[0]));
+    if (ok(newResponses[0])) setLastUpdated(new Date());
   };
+
+  // A tab coming back into view refreshes at once (polling pauses while it is hidden).
+  useOnVisible(() => fetchData());
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 20000);
+    const interval = setInterval(whenVisible(fetchData), 20000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -504,7 +512,7 @@ const AdvancedDashboard = ({ onLogout }) => {
       } catch (e) { /* transient */ }
     };
     fetchNSE();
-    const nseInterval = setInterval(fetchNSE, 30000);
+    const nseInterval = setInterval(whenVisible(fetchNSE), 30000);
     return () => clearInterval(nseInterval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -539,7 +547,7 @@ const AdvancedDashboard = ({ onLogout }) => {
       case 'system': return <SystemSection sub={sub} onSub={onSub} data={data} mobile={mobile} />;
       case 'notifications': return <NotificationsView items={notices} isOperator={isOperator} mobile={mobile} onDrill={drill} onGo={(id) => go(id)}
         agentAlerts={agentAlerts} alertsSeenAt={alertsSeenAt} onMarkRead={markAlertsRead} />;
-      default: return <OverviewView data={data} isConnected={isConnected} onDrill={drill} mobile={mobile} />;
+      default: return <OverviewView data={data} isConnected={isConnected} onDrill={drill} mobile={mobile} heartbeat={heartbeat} lastUpdated={lastUpdated} />;
     }
   };
 
@@ -606,26 +614,20 @@ const AdvancedDashboard = ({ onLogout }) => {
         <Shield color="#020617" size={mobile ? 18 : 22} strokeWidth={2.5} />
       </div>
       <div style={{ minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <h1 style={{
-            fontSize: mobile ? '15px' : '18px', fontWeight: '900', margin: 0,
-            letterSpacing: '0.8px', color: '#fff', whiteSpace: 'nowrap',
-          }}>
-            EMPIRE SLY VAULT
-          </h1>
-          {!mobile && (
-            <span style={{
-              fontSize: '10px', backgroundColor: 'rgba(16,185,129,0.12)', color: theme.colors.primary,
-              padding: '2px 8px', borderRadius: '6px', border: `1px solid ${theme.colors.primary}35`, fontWeight: '800',
-              letterSpacing: '0.5px',
-            }}>
-              QUANTUM AI
-            </span>
-          )}
-        </div>
+        <h1 style={{
+          fontSize: mobile ? '15px' : '17px', fontWeight: '900', margin: 0,
+          letterSpacing: '0.8px', color: '#fff', whiteSpace: 'nowrap',
+        }}>
+          EMPIRE SLY VAULT
+        </h1>
         {!mobile && (
-          <div style={{ fontSize: '11px', color: theme.colors.textMuted, fontWeight: '700', letterSpacing: '0.4px', marginTop: '1px' }}>
-            MULTI-REGION WEALTH & AUTONOMOUS DESK
+          <div style={{ fontSize: '11px', color: theme.colors.textMuted, fontWeight: 600, marginTop: '1px', whiteSpace: 'nowrap' }}>
+            {data.status?.mode === 'live' ? 'Live trading' : 'Paper trading'} · US, crypto, forex and NSE
+            {lastUpdated && (
+              <span title="When the dashboard last heard from the agent">
+                {' · updated '}{lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -661,33 +663,14 @@ const AdvancedDashboard = ({ onLogout }) => {
             </div>
           </>
         ) : (
+          <>
+          {/* Two rows: the name and actions, then the pages. One row put the
+              name's subtitle under the navigation at common laptop widths. */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '16px' }}>
             {brand}
 
-            {/* Streamlined Desktop Navigation Pill Bar */}
-            <nav style={{
-              display: 'flex', gap: '4px', backgroundColor: 'rgba(15, 23, 42, 0.65)',
-              padding: '4px', borderRadius: '12px', border: '1px solid rgba(255, 255, 255, 0.08)',
-            }}>
-              {SECTIONS.map(({ id, label, icon: Icon }) => {
-                const on = section === id;
-                return (
-                  <button key={id} onClick={() => go(id)} style={{
-                    background: on ? 'linear-gradient(135deg, rgba(16,185,129,0.22) 0%, rgba(14,165,233,0.15) 100%)' : 'transparent',
-                    border: `1px solid ${on ? theme.colors.primary + '65' : 'transparent'}`,
-                    color: on ? '#fff' : theme.colors.textSecondary, fontSize: '11px', fontWeight: '800', cursor: 'pointer',
-                    borderRadius: '9px', padding: '7px 13px', display: 'flex', alignItems: 'center', gap: '6px',
-                    transition: 'all 0.15s ease', letterSpacing: '0.4px', textTransform: 'uppercase',
-                  }}>
-                    <Icon size={14} color={on ? theme.colors.primary : theme.colors.textMuted} />
-                    {label}
-                  </button>
-                );
-              })}
-            </nav>
-
             {/* Quick Actions & System Telemetry */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
               <Heartbeat heartbeat={heartbeat} />
               <MarketClock />
               
@@ -719,6 +702,24 @@ const AdvancedDashboard = ({ onLogout }) => {
               </button>
             </div>
           </div>
+          <nav aria-label="Pages" style={{ display: 'flex', gap: '2px', marginTop: '12px', marginBottom: '-15px' }}>
+            {SECTIONS.map(({ id, label, icon: Icon }) => {
+              const on = section === id;
+              return (
+                <button key={id} onClick={() => go(id)} aria-current={on ? 'page' : undefined} style={{
+                  background: 'transparent', border: 'none',
+                  borderBottom: `2px solid ${on ? theme.colors.primary : 'transparent'}`,
+                  color: on ? '#fff' : theme.colors.textSecondary, fontSize: '13px', fontWeight: on ? 800 : 600,
+                  cursor: 'pointer', padding: '8px 14px 11px', display: 'flex', alignItems: 'center', gap: '7px',
+                  transition: 'color 0.15s ease, border-color 0.15s ease', whiteSpace: 'nowrap',
+                }}>
+                  <Icon size={15} color={on ? theme.colors.primary : theme.colors.textMuted} />
+                  {label}
+                </button>
+              );
+            })}
+          </nav>
+          </>
         )}
       </header>
 
@@ -742,7 +743,9 @@ const AdvancedDashboard = ({ onLogout }) => {
       )}
 
       <main style={{ padding: mobile ? '14px 12px calc(84px + env(safe-area-inset-bottom))' : '28px 32px' }}>
-        {page()}
+        <ErrorBoundary name="This page" resetKey={`${section}/${sub || ''}`}>
+          {page()}
+        </ErrorBoundary>
       </main>
 
       {mobile && (

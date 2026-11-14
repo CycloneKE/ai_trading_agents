@@ -221,17 +221,6 @@ def create_default_config(config_path: str) -> None:
             "slippage": 0.0005
         },
         "trading_loop_interval": 60,
-        "nlp": {
-            "sentiment_model": "vader",
-            "text_processing": {
-                "remove_stopwords": True,
-                "lemmatize": True
-            }
-        },
-        "automl": {
-            "n_trials": 100,
-            "cv_folds": 5
-        },
         "portfolio_optimization": {
             "risk_free_rate": 0.02,
             "frequency": "daily",

@@ -4,7 +4,7 @@
 import { useEffect, useState } from 'react';
 import { Target } from 'lucide-react';
 import { theme } from '../DashboardStyles';
-import { apiGet, card, SectionHeader, Empty, Note } from '../ui';
+import { apiGet, card, SectionHeader, Empty, Note, whenVisible } from '../ui';
 
 const STATUS = {
   pass: { label: 'PASS', color: theme.colors.primary },
@@ -104,7 +104,7 @@ export default function Scorecard({ mobile }) {
       })
       .catch((e) => alive && setError(e.message));
     load();
-    const id = setInterval(load, 300000);
+    const id = setInterval(whenVisible(load), 300000);
     return () => { alive = false; clearInterval(id); };
   }, []);
 

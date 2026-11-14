@@ -63,6 +63,9 @@ def test_agent_smoke_start_and_health_check():
         json.dump(base, f)
 
     env = os.environ.copy()
+    # The agent writes its databases to a temporary data folder, not data/.
+    data_dir = tempfile.mkdtemp(prefix='smoke_data_')
+    env['AGENT_DATA_DIR'] = data_dir
     # Provide minimal dummy secrets so _validate_secrets passes
     env.update({
         'COINBASE_API_KEY': 'dummy',
@@ -122,3 +125,5 @@ def test_agent_smoke_start_and_health_check():
             os.remove(tmp_path)
         except Exception:
             pass
+        import shutil
+        shutil.rmtree(data_dir, ignore_errors=True)
