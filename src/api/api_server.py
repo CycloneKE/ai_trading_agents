@@ -291,7 +291,12 @@ class TradingAPI:
         fixed = (float(risk.get('stop_loss_pct', 0.05)), float(risk.get('trailing_stop_pct', 0.03)))
         distances = getattr(agent, '_stop_distances_for', None)
 
+        sleeve = getattr(agent, '_sleeve_symbols', None)
+        sleeve_symbols = sleeve() if callable(sleeve) else set()
+
         def stops_for(symbol):
+            if str(symbol).upper() in sleeve_symbols:
+                return {}          # the momentum sleeve's funds carry no stops (momentum_sleeve.py)
             if callable(distances):
                 return distances(symbol, *fixed)
             return {'stop_loss_pct': fixed[0], 'trailing_stop_pct': fixed[1], 'source': 'fixed'}
