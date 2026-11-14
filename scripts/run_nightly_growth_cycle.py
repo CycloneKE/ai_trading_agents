@@ -2,7 +2,12 @@
 
 Executes post-market closed-loop diagnostics:
 1. Calculates strategy attribution and execution metrics from the order journal.
-2. Identifies outperforming vs underperforming strategies and updates weights into data/config_overlay.json.
+2. Says which strategies are doing better or worse and what weight it would suggest for each.
+   Report only: it changes nothing. It used to write those weights to data/config_overlay.json
+   after a single closed trade, +-10% a night, compounding on its own earlier changes; the
+   live agent never read that file, so the dashboard showed weights that were not in effect.
+   The ensemble's evidence tilt (guardrails.evidence_tilt) already re-weights strategies from
+   the same order journal, inside the guardrails (nothing before five closed trades, 0.5x-1.5x).
 3. Evaluates tracked symbols for persistent losses, illiquidity, or undefined regimes and escalates removal proposals.
 4. Generates a comprehensive growth report for review.
 """
@@ -18,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.agent.decision_journal import DecisionJournal
 from src.agent.escalation_manager import EscalationManager
 from src.agent.order_journal import OrderJournal
-from src.agent.self_assessment import _write_overlay_key, apply_overlay
+from src.agent.guardrails import evidence_tilt
 from src.agent.strategy_attribution import compute_attribution
 from src.agent.universe_manager import effective_universe, propose_removals, compute_symbol_stats
 from src.utils.paths import DATA_DIR
@@ -27,6 +32,16 @@ from src.utils.timeutil import utc_now_iso
 logger = logging.getLogger(__name__)
 
 _compute_symbol_stats = compute_symbol_stats
+
+
+def _trade_sharpe(returns: List[float]) -> float:
+    """Per-trade Sharpe over the strategy's closed-trade returns, as the
+    strategy manager computes it for the evidence tilt."""
+    if len(returns) < 2:
+        return 0.0
+    mean = sum(returns) / len(returns)
+    var = sum((r - mean) ** 2 for r in returns) / len(returns)
+    return (mean / var ** 0.5) * len(returns) ** 0.5 if var > 0 else 0.0
 
 
 def run_growth_cycle(config: Optional[Dict[str, Any]] = None,
@@ -45,8 +60,6 @@ def run_growth_cycle(config: Optional[Dict[str, Any]] = None,
             with open('config/config.json', 'r', encoding='utf-8') as f:
                 config = json.load(f)
 
-    overlay_path = os.path.join(data_path, 'config_overlay.json')
-    apply_overlay(config, overlay_path)
 
     # 1. Initialize journals & managers
     order_journal = OrderJournal(db_path=os.path.join(data_path, 'order_journal.db'))
@@ -57,34 +70,23 @@ def run_growth_cycle(config: Optional[Dict[str, Any]] = None,
     fills = order_journal.filled_orders()
     attribution = compute_attribution(fills)
 
-    # 3. Dynamic Strategy Weight Adaptation
-    strategies_node = config.setdefault('strategies', {})
-    adjusted_weights: Dict[str, float] = {}
-
+    # 3. Strategy weights: what is in effect, and what the evidence suggests.
+    #    Report only. The suggestion is the same evidence tilt the ensemble
+    #    applies live (no change before five closed trades,
+    #    then 0.5x to 1.5x by how convincing the record is), so the report can
+    #    no longer disagree with what the agent actually does.
+    strategies_node = config.get('strategies', {}) or {}
+    configured_weights: Dict[str, float] = {}
+    suggested_weights: Dict[str, float] = {}
     for strat_name, strat_cfg in strategies_node.items():
-        current_weight = float((strat_cfg or {}).get('weight', 1.0))
-        strat_stat = attribution.get(strat_name)
-
-        if strat_stat and strat_stat.get('closed_trades', 0) >= 1:
-            pnl = float(strat_stat.get('realized_pnl', 0.0))
-            win_rate = float(strat_stat.get('win_rate', 0.0))
-
-            if pnl > 0 and win_rate >= 0.5:
-                # Outperforming strategy: reward with 10% weight increase
-                new_weight = round(min(2.0, current_weight * 1.10), 3)
-            elif pnl < 0:
-                # Underperforming strategy: throttle by 10%
-                new_weight = round(max(0.1, current_weight * 0.90), 3)
-            else:
-                new_weight = current_weight
-
-            if new_weight != current_weight and not dry_run:
-                _write_overlay_key(f"strategies.{strat_name}.weight", new_weight, overlay_path)
-                logger.info(f"GrowthCycle: adjusted {strat_name} weight: {current_weight} -> {new_weight}")
-
-            adjusted_weights[strat_name] = new_weight
-        else:
-            adjusted_weights[strat_name] = current_weight
+        if not isinstance(strat_cfg, dict) or strat_name.startswith('_'):
+            continue
+        weight = float(strat_cfg.get('weight', 1.0))
+        configured_weights[strat_name] = weight
+        stat = attribution.get(strat_name) or {}
+        trades = int(stat.get('closed_trades', 0) or 0)
+        sharpe = _trade_sharpe(stat.get('trade_returns') or [])
+        suggested_weights[strat_name] = round(weight * evidence_tilt(trades, sharpe), 3)
 
     # 4. Symbol Performance & Universe Pruning
     watchlist = escalation_mgr.get_active_watchlist() if escalation_mgr else []
@@ -110,7 +112,11 @@ def run_growth_cycle(config: Optional[Dict[str, Any]] = None,
     report = {
         'timestamp': utc_now_iso(),
         'attribution': attribution,
-        'strategies': adjusted_weights,
+        'strategies': configured_weights,
+        'suggested_weights': suggested_weights,
+        'weights_note': ('Weights in effect are the configured ones, tilted live by the evidence '
+                         'tilt. Suggested weights are that tilt applied to the closed trades so '
+                         'far; nothing is changed by this report.'),
         'symbol_stats': symbol_stats,
         'removals': removal_proposals,
         'tracked_symbols_count': len(all_tracked),
@@ -132,13 +138,15 @@ def main():
 
     print(f"Timestamp: {report['timestamp']}")
     print(f"Fills Analyzed: {report['fills_analyzed']}")
-    print("\nStrategy Attribution & Weights:")
+    print("\nStrategy Attribution & Weights (suggested weights are not applied):")
     for strat, wt in report['strategies'].items():
         attr = report['attribution'].get(strat, {})
         pnl = attr.get('realized_pnl', 0.0)
         trades = attr.get('closed_trades', 0)
         win_rate = attr.get('win_rate', 0.0)
-        print(f"  {strat:<16} | Weight: {wt:.2f} | PnL: ${pnl:>9,.2f} | Trades: {trades:>3} | Win Rate: {win_rate:>5.1%}")
+        suggested = report['suggested_weights'].get(strat, wt)
+        print(f"  {strat:<16} | Weight: {wt:.2f} | Suggested: {suggested:.2f} | PnL: ${pnl:>9,.2f} "
+              f"| Trades: {trades:>3} | Win Rate: {win_rate:>5.1%}")
 
     print("\nUniverse Removal Proposals:")
     if report['removals']:

@@ -51,6 +51,17 @@ except ImportError as e:
                  f"signals and will hold indefinitely: {e}")
     TechnicalStrategy = None
 
+def tuned_params(saved: Any) -> Dict[str, Dict[str, Any]]:
+    """{strategy: settings} from data/strategy_params.json, in either layout:
+    the weekly tuner's {"params": {...}, "log": [...]} or the older flat one."""
+    if not isinstance(saved, dict):
+        return {}
+    if isinstance(saved.get('params'), dict):
+        saved = saved['params']
+    return {name: params for name, params in saved.items()
+            if isinstance(params, dict) and not str(name).startswith('_')}
+
+
 class MockStrategy:
     """Simple mock strategy for testing."""
     
@@ -140,26 +151,35 @@ class StrategyManager:
         try:
             strategies_config = self.config.get('strategies', {})
 
-            # Overlay parameters promoted by the nightly practice session
-            # (scripts/practice_session.py). Only values that beat current
-            # parameters on BOTH train and test windows land in this file.
+            # Settings adopted by the weekly strategy tuner (strategy_tuner.py),
+            # which keeps them under "params" in data/strategy_params.json and
+            # also applies them itself once running. A file in the older flat
+            # layout ({strategy: settings}, written by the practice session
+            # before it became report-only) is still read.
             overlay_path = str(DATA_DIR / 'strategy_params.json')
             overlay = {}
             try:
                 if os.path.exists(overlay_path):
                     with open(overlay_path) as f:
-                        overlay = json.load(f)
+                        saved = json.load(f)
+                    overlay = tuned_params(saved)
                     if overlay:
-                        logger.info(f"Applying practiced parameter overlay: {overlay}")
+                        logger.info(f"Applying tuned strategy settings: {overlay}")
             except Exception as e:
-                logger.warning(f"Could not read strategy param overlay: {e}")
+                logger.warning(f"Could not read tuned strategy settings: {e}")
 
             for strategy_name, strategy_config in strategies_config.items():
                 if strategy_config.get('enabled', True) is False:
                     logger.info(f"Strategy {strategy_name} is disabled in config")
                     continue
                 if strategy_name in overlay:
-                    strategy_config = {**strategy_config, **overlay[strategy_name]}
+                    # Only the settings the tuner owns for this strategy's
+                    # family; anything else in an old file is ignored.
+                    from src.agent.strategy_tuner import TUNABLE, family
+                    owned = TUNABLE.get(family(strategy_name), {})
+                    tuned = {k: v for k, v in overlay[strategy_name].items() if k in owned}
+                    if tuned:
+                        strategy_config = {**strategy_config, **tuned}
                 strategy_type = strategy_config.get('type', 'supervised_learning')
                 
                 try:

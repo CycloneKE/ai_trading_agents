@@ -17,7 +17,7 @@ Where each rule lives:
 
 | Mechanism | What it adjusts | Guardrails |
 |---|---|---|
-| strategy_tuner.py | strategy settings | fixed bounds, one step, held-out evidence, weekly, frozen when halted |
+| strategy_tuner.py | strategy settings (the only writer) | fixed bounds, one step, held-out evidence on 30+ trades, a hurdle that grows with candidates tried, probation and revert, weekly, frozen when halted |
 | strategy_manager rebalance | strategy weights from results | 0.1 floor, 0.3 smoothing, weekly |
 | strategy_manager adaptive_confidence | each vote's weight | evidence_tilt: none under 5 closed trades, then 0.5 to 1.5 by t-statistic, recomputed from the journal |
 | strategy_manager adaptive_confidence (OFF by default) | each vote's weight, per market | signal_tilt: none under 50 signals with a known outcome, then 0.5 to 1.5 by how far the hit rate beats chance, recomputed from the signal ledger |

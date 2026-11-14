@@ -21,9 +21,20 @@ how an adaptive system loses money:
   trades are split by exit date into an earlier in-sample stretch and the
   latest `holdout_pct` held out.
 - Adoption. A candidate replaces the current settings only if it beats them
-  held out by at least `min_improvement` (return per symbol), is no worse
-  in-sample, and made at least `min_trades` trades in each stretch. Of
-  those, the best held-out result wins. Otherwise nothing changes.
+  held out by at least the hurdle, is no worse in-sample, and made at least
+  `min_trades` (30) trades in each stretch. Of those, the best held-out
+  result wins. Otherwise nothing changes. The hurdle is `min_improvement`
+  (return per symbol) scaled by sqrt(2 ln k) for k candidates: the best of
+  k equally useless candidates beats the current settings by luck alone by
+  about that much more as k grows (Bailey and Lopez de Prado's point behind
+  the Deflated Sharpe Ratio). It used to adopt on 5 trades, at a flat bar.
+- Probation. An adopted change is judged again once `probation_days` have
+  passed, on the bars since it was adopted only, which no earlier decision
+  saw. If the settings it replaced did better there, over at least
+  `probation_min_trades` trades, it is reverted; if it did at least as well,
+  it is confirmed. A strategy on probation is not re-tuned, so changes do not
+  stack on one that has not proved itself, and after `probation_max_days`
+  without enough trades to judge, the change is confirmed by default.
 - Record. Adopted settings are saved to data/strategy_params.json, applied
   at startup and at once, and every run is logged with its evidence.
 
@@ -54,8 +65,9 @@ TUNABLE = {
 }
 
 DEFAULTS = {'enabled': True, 'interval_days': 7, 'holdout_pct': 0.3,
-            'min_improvement': 0.005, 'min_trades': 5, 'min_bars': 120,
-            'min_closed_trades': 10, 'poor_win_rate': 0.4}
+            'min_improvement': 0.005, 'min_trades': 30, 'min_bars': 120,
+            'min_closed_trades': 10, 'poor_win_rate': 0.4,
+            'probation_days': 28, 'probation_min_trades': 10, 'probation_max_days': 90}
 
 Series = Dict[str, Tuple[List[float], float]]  # symbol -> (daily closes, round-trip cost)
 Evaluation = Dict[str, Tuple[float, int]]       # 'is' / 'oos' -> (return per symbol, trades)
@@ -121,11 +133,20 @@ def neighbours(name: str, current: Dict[str, float]) -> List[Dict[str, float]]:
     return out
 
 
+def hurdle(min_improvement: float, candidates: int) -> float:
+    """The held-out improvement a candidate must show when `candidates` were
+    tried: min_improvement, scaled by sqrt(2 ln k) once k is 2 or more."""
+    if candidates < 2:
+        return float(min_improvement)
+    return float(min_improvement) * max(1.0, math.sqrt(2.0 * math.log(candidates)))
+
+
 def choose(current: Evaluation, candidates: List[Tuple[Dict[str, float], Evaluation]],
            r: Dict[str, Any]) -> Optional[Tuple[Dict[str, float], Evaluation]]:
     """The candidate that earns adoption under the rules above, or None."""
+    bar = hurdle(r['min_improvement'], len(candidates))
     qualified = [(params, ev) for params, ev in candidates
-                 if ev['oos'][0] >= current['oos'][0] + r['min_improvement']
+                 if ev['oos'][0] >= current['oos'][0] + bar
                  and ev['is'][0] >= current['is'][0]
                  and ev['oos'][1] >= r['min_trades'] and ev['is'][1] >= r['min_trades']]
     return max(qualified, key=lambda c: c[1]['oos'][0]) if qualified else None
@@ -151,10 +172,20 @@ class StrategyTuner:
     # ----------------------------------------------------------- persistence
 
     def _load(self) -> Dict[str, Any]:
+        fresh = {'params': {}, 'last_run': 0.0, 'last_triggered': {}, 'log': []}
         try:
-            return json.loads(self.path.read_text())
+            saved = json.loads(self.path.read_text())
         except (OSError, ValueError):
-            return {'params': {}, 'last_run': 0.0, 'last_triggered': {}, 'log': []}
+            return fresh
+        if not isinstance(saved, dict):
+            return fresh
+        if 'params' not in saved:
+            # The practice session used to write {strategy: settings} into this
+            # file. Keep those settings as the starting point (apply_saved drops
+            # any it does not tune) rather than losing them or crashing.
+            from src.agent.strategy_manager import tuned_params
+            return {**fresh, 'params': tuned_params(saved)}
+        return {**fresh, **saved}
 
     def _save(self) -> None:
         try:
@@ -183,8 +214,16 @@ class StrategyTuner:
                 strat.config[key] = value
 
     def apply_saved(self) -> None:
-        for name, params in (self.state.get('params') or {}).items():
-            if name in self.tunable():
+        for name, params in list((self.state.get('params') or {}).items()):
+            if name not in self.tunable() or not isinstance(params, dict):
+                continue
+            # Only the settings this tuner owns for that strategy's family: an
+            # unknown key (lookback_period, or an RSI level on a momentum
+            # strategy, from the old practice session) is dropped, not applied.
+            known = TUNABLE[family(name)]
+            params = {k: v for k, v in params.items() if k in known}
+            self.state['params'][name] = params
+            if params:
                 self._apply(name, params)
                 logger.info(f"Strategy tuning: {name} runs with tuned settings {params}")
 
@@ -260,6 +299,9 @@ class StrategyTuner:
             entry['outcome'] = f"no symbol has {self.rule['min_bars']} daily bars yet"
             logger.info(f"Strategy tuning: {name} not tuned: {entry['outcome']}")
             return self._log(entry)
+        probation = self._probation(name, strat_cfg, series, entry)
+        if probation is not None:
+            return self._log(probation)
         now = self.current(name)
         base = self.evaluator(name, strat_cfg, now, series, self.rule['holdout_pct'])
         cands = [(p, self.evaluator(name, strat_cfg, p, series, self.rule['holdout_pct']))
@@ -274,18 +316,84 @@ class StrategyTuner:
         params, ev = pick
         self._apply(name, params)
         self.state.setdefault('params', {})[name] = params
-        entry.update({'after': params, 'after_eval': ev, 'outcome': 'adopted'})
+        self.state.setdefault('probation', {})[name] = {
+            'since': self.clock(), 'before': now, 'after': params}
+        entry.update({'after': params, 'after_eval': ev, 'outcome': 'adopted',
+                      'hurdle': hurdle(self.rule['min_improvement'], len(cands))})
         logger.warning(
             f"Strategy tuning: {name} {now} -> {params}: held out {ev['oos'][0]:+.2%} vs "
             f"{base['oos'][0]:+.2%} ({ev['oos'][1]} trades), in-sample {ev['is'][0]:+.2%} vs "
             f"{base['is'][0]:+.2%}, over {len(series)} symbols")
         return self._log(entry)
 
+    def _probation(self, name: str, strat_cfg: Dict[str, Any], series: Series,
+                   entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Judge a recent adoption on the bars since it, or None to tune as usual.
+
+        Only bars after the adoption count: the window is the weekdays since
+        then (a little under, for exchange holidays), so on a stock series
+        it holds no bar the adoption decision saw; on crypto, which trades
+        every day, it is shorter still. Returns the log entry when the
+        strategy is on probation, reverted or confirmed.
+        """
+        record = (self.state.get('probation') or {}).get(name)
+        if not record:
+            return None
+        now = self.clock()
+        days = (now - float(record.get('since') or now)) / 86400
+        if days < self.rule['probation_days']:
+            return {**entry, 'outcome': f"on probation: adopted {days:.0f} days ago, "
+                                        f"judged after {self.rule['probation_days']}"}
+        bars = int(_weekdays_between(float(record['since']), now) * 0.95)
+        longest = max(len(closes) for closes, _cost in series.values())
+        pct = min(0.9, bars / longest) if longest else 0.0
+        before, after = record['before'], record['after']
+        ev_before = self.evaluator(name, strat_cfg, before, series, pct)
+        ev_after = self.evaluator(name, strat_cfg, after, series, pct)
+        entry = {**entry, 'probation_bars': bars, 'before': before, 'before_eval': ev_before,
+                 'after': after, 'after_eval': ev_after}
+        trades = min(ev_before['oos'][1], ev_after['oos'][1])
+        if trades < self.rule['probation_min_trades']:
+            if days < self.rule['probation_max_days']:
+                return {**entry, 'outcome': f"on probation: {trades} trades since adoption, "
+                                            f"{self.rule['probation_min_trades']} needed to judge"}
+            del self.state['probation'][name]
+            return {**entry, 'outcome': 'confirmed: too few trades to judge within '
+                                        f"{self.rule['probation_max_days']} days"}
+        del self.state['probation'][name]
+        if ev_before['oos'][0] > ev_after['oos'][0]:
+            self._apply(name, before)
+            self.state.setdefault('params', {})[name] = before
+            logger.warning(
+                f"Strategy tuning: {name} reverted {after} -> {before}: since adoption "
+                f"{ev_after['oos'][0]:+.2%} vs {ev_before['oos'][0]:+.2%} for the old settings "
+                f"({trades} trades)")
+            return {**entry, 'outcome': 'reverted: the old settings did better since adoption'}
+        logger.info(f"Strategy tuning: {name} confirmed {after} after probation "
+                    f"({ev_after['oos'][0]:+.2%} vs {ev_before['oos'][0]:+.2%})")
+        return {**entry, 'outcome': 'confirmed: did at least as well as the old settings since adoption'}
+
     def _log(self, entry: Dict[str, Any]) -> Dict[str, Any]:
         log = self.state.setdefault('log', [])
         log.append(entry)
         del log[:-50]  # the last fifty runs are plenty to audit
         return entry
+
+
+def _weekdays_between(start: float, end: float) -> int:
+    """Monday-to-Friday days after `start`'s date up to and including `end`'s."""
+    from datetime import timedelta as _td
+    d0 = datetime.fromtimestamp(start, timezone.utc).date()
+    d1 = datetime.fromtimestamp(end, timezone.utc).date()
+    if d1 <= d0:
+        return 0
+    days = (d1 - d0).days
+    full, rest = divmod(days, 7)
+    count = full * 5
+    for i in range(1, rest + 1):
+        if (d0 + _td(days=full * 7 + i)).weekday() < 5:
+            count += 1
+    return count
 
 
 def market_history(config: Dict[str, Any]) -> Series:

@@ -1,18 +1,24 @@
-"""Nightly practice session: sharpen strategy parameters on recent history.
+"""Practice session: how would small changes to the technical strategies' settings have done?
 
-For each enabled technical strategy, simulates a small grid of parameter
-variants over recent daily bars, split into train (first 70%) and test
-(last 30%) windows. A variant is promoted ONLY if it beats the current
-parameters on BOTH windows — the out-of-sample gate that keeps this from
-overfitting yesterday's noise.
+For each enabled technical strategy, simulates single-setting variants over
+the last two years of daily bars, split into train (first 70%) and test (last
+30%) windows, and reports which variants beat the current settings on both.
 
-Promotions are written to data/strategy_params.json, which StrategyManager
-overlays onto config at startup, and every decision is logged to
-data/practice_log.jsonl for audit.
+Report only. It used to write its "promotions" to data/strategy_params.json,
+the same file the weekly strategy tuner (src/agent/strategy_tuner.py) keeps
+its state in, in a different layout: whichever ran second wiped out the
+other's record. It also scored variants on next-day moves with no trading
+costs, and could apply RSI settings to strategies that do not use them. The
+weekly tuner is the one process that changes strategy settings: it costs
+trades per market, tunes each strategy only on its own settings, and adopts
+a change only on held-out evidence. This script is kept as a quick look,
+written to data/practice_log.jsonl.
 
-Run after the close (manually or via Task Scheduler):
-    .venv\\Scripts\\python.exe scripts\\practice_session.py
-    ... practice_session.py --dry-run     # evaluate but promote nothing
+Prices are split- and dividend-adjusted (as the live warm-start's are):
+the raw closes it used to read showed a stock split as a crash.
+
+Run after the close:
+    python scripts/practice_session.py
 """
 
 import argparse
@@ -36,7 +42,6 @@ from src.utils.config_validator import load_config
 from src.agent.technical_strategy import TechnicalStrategy
 from src.utils.paths import DATA_DIR
 
-PARAMS_FILE = str(DATA_DIR / 'strategy_params.json')
 LOG_FILE = str(DATA_DIR / 'practice_log.jsonl')
 TRAIN_FRACTION = 0.7
 
@@ -50,13 +55,17 @@ GRID = {
 
 
 def fetch_bars(symbols):
-    # Prefer Yahoo (free, keyless, ~500 daily bars -> much better train/test
-    # windows); fall back to Alpaca IEX (~150 bars) per symbol.
-    from src.connectors.yahoo_history import fetch_daily_closes
+    # Yahoo, split- and dividend-adjusted, ~500 daily bars; Alpaca's IEX
+    # feed (~150 bars, also adjusted) for any symbol Yahoo cannot supply.
+    from src.agent.history_warmstart import _yfinance_daily
     bars = {}
     missing = []
     for sym in symbols:
-        closes = fetch_daily_closes(sym, '2y')
+        try:
+            closes = [row[3] for row in _yfinance_daily(sym, period='2y')]
+        except Exception as e:
+            logger.warning(f'No Yahoo history for {sym}: {e}')
+            closes = []
         if len(closes) >= 80:
             bars[sym] = closes
         else:
@@ -69,7 +78,8 @@ def fetch_bars(symbols):
                 start = (datetime.now() - timedelta(days=250)).strftime('%Y-%m-%d')
                 for sym in missing:
                     try:
-                        data = broker.api.get_bars(sym, '1Day', limit=150, feed='iex', start=start)
+                        data = broker.api.get_bars(sym, '1Day', limit=150, feed='iex', start=start,
+                                                   adjustment='all')
                         closes = [float(b.c) for b in data]
                         if len(closes) >= 80:
                             bars[sym] = closes
@@ -121,8 +131,9 @@ def variants_of(current):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument('--dry-run', action='store_true')
-    args = parser.parse_args()
+    # Accepted for old scheduled commands; the script is always report-only now.
+    parser.add_argument('--dry-run', action='store_true', help=argparse.SUPPRESS)
+    parser.parse_args()
 
     config = load_config('config/config.json')
     symbols = config.get('data_manager', {}).get('symbols', [])[:8]
@@ -131,18 +142,24 @@ def main():
         if cfg.get('enabled') and cfg.get('type') == 'technical'
     }
 
-    overlay = {}
-    if os.path.exists(PARAMS_FILE):
-        with open(PARAMS_FILE) as f:
-            overlay = json.load(f)
+    # The settings the agent runs with now: config plus what the weekly tuner adopted.
+    tuned = {}
+    tuner_file = DATA_DIR / 'strategy_params.json'
+    if os.path.exists(tuner_file):
+        try:
+            with open(tuner_file) as f:
+                saved = json.load(f)
+            tuned = saved.get('params', {}) if isinstance(saved.get('params'), dict) else {}
+        except (OSError, ValueError) as e:
+            logger.warning(f'Could not read the tuned settings: {e}')
 
     print(f'Fetching bars for {len(symbols)} symbols...')
     bars = fetch_bars(symbols)
     print(f'{len(bars)} symbols with sufficient history\n')
 
-    promotions = {}
+    better = 0
     for name, base_cfg in strategies.items():
-        current = {**base_cfg, **overlay.get(name, {})}
+        current = {**base_cfg, **tuned.get(name, {})}
         cur_train, cur_test = evaluate(current, bars)
         print(f'{name}: current params train={cur_train:+.4f} test={cur_test:+.4f}')
 
@@ -168,11 +185,11 @@ def main():
             # defining a grid knob in config fall back to their defaults.
             new_params = {k: variant[k] for k in GRID if k in variant}
             record['promoted'] = {'change': label, 'params': new_params,
-                                  'scores': {'train': v_train, 'test': v_test}}
-            if not args.dry_run:
-                promotions[name] = new_params
-            print(f'  PROMOTE {label} (test {cur_test:+.4f} -> {v_test:+.4f})'
-                  + (' [dry-run: not applied]' if args.dry_run else ''))
+                                  'scores': {'train': v_train, 'test': v_test},
+                                  'applied': False}
+            better += 1
+            print(f'  BETTER ON BOTH: {label} (test {cur_test:+.4f} -> {v_test:+.4f}); '
+                  f'report only, nothing applied')
         else:
             print('  no variant beat current parameters out-of-sample; keeping current')
         print()
@@ -180,14 +197,8 @@ def main():
         with open(LOG_FILE, 'a') as f:
             f.write(json.dumps(record) + '\n')
 
-    if promotions and not args.dry_run:
-        merged = {**overlay, **{k: {**overlay.get(k, {}), **v} for k, v in promotions.items()}}
-        with open(PARAMS_FILE, 'w') as f:
-            json.dump(merged, f, indent=2)
-        print(f'Wrote {len(promotions)} promotion(s) to {PARAMS_FILE} '
-              f'(picked up at next agent start)')
-    elif not promotions:
-        print('No promotions this session.')
+    print(f'{better} strateg{"y" if better == 1 else "ies"} had a variant better on both windows. '
+          f'Nothing was changed: the weekly strategy tuner decides settings. Logged to {LOG_FILE}.')
 
 
 if __name__ == '__main__':

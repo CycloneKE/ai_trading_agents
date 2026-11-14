@@ -51,6 +51,9 @@ def build_growth_view(config: Optional[Dict[str, Any]] = None,
         'tracked_symbols_count': report.get('tracked_symbols_count', 0),
         'active_attributions': report.get('attribution', {}),
         'strategy_weights': report.get('strategies', {}),
+        # Report only: the growth cycle changes no weights (see its docstring).
+        'suggested_weights': report.get('suggested_weights', {}),
+        'weights_note': report.get('weights_note'),
         'removal_proposals': report.get('removals', []),
     }
 
