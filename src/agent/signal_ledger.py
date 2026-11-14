@@ -308,7 +308,8 @@ def tilts(skill_rows: Iterable[Dict[str, Any]], min_signals: int = 50) -> Dict[T
     """The weight scale each strategy would get in each market from its skill
     (never the ensemble's: it is not a voter)."""
     from src.agent.guardrails import signal_tilt
-    return {(r['source'], r['market']): signal_tilt(r['n'], r['z'], min_signals)
+    return {(r['source'], r['market']): signal_tilt(r['n'], r['z'], min_signals,
+                                                    r.get('net_move_pct'), r.get('net_n'))
             for r in skill_rows if r['source'] != ENSEMBLE}
 
 

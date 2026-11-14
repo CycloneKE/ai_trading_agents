@@ -1477,6 +1477,9 @@ class TradingAPI:
                         'symbol': symbol,
                         'performance': perf,
                         'price': price,
+                        # False when no quote arrived: the 0.0% beside it
+                        # is a missing figure, not a flat day.
+                        'quoted': bool(price),
                         'volume': volume,
                         'outlook_score': outlook_score,
                         'agent_profile': agent_profile,
@@ -1484,13 +1487,17 @@ class TradingAPI:
                         'catalysts': catalysts
                     })
                     
-                # Add Kenyan telecommunications sector
-                telecom_perf = 0.0
-                if real_connector:
+                # Add Kenyan telecommunications sector: Safaricom from the
+                # NSE's own quotes. It asked the US feed for SCOM, which on
+                # that exchange is another company or nothing at all.
+                telecom_perf, telecom_price = 0.0, 0.0
+                nse = data_manager.connectors.get('nse') if data_manager and hasattr(data_manager, 'connectors') else None
+                if nse is not None:
                     try:
-                        scom_data = real_connector.get_real_time_data('SCOM')
-                        if scom_data:
-                            telecom_perf = (scom_data.get('change_percent', 0) or 0) / 100.0
+                        q = nse.get_quote('SCOM') or {}
+                        if q.get('price_kes') and q.get('source') in REAL_NSE_SOURCES:
+                            telecom_price = float(q['price_kes'])
+                            telecom_perf = float(q.get('change_pct') or 0) / 100.0
                     except Exception:
                         pass
                 telecom_outlook = 0.0
@@ -1508,7 +1515,9 @@ class TradingAPI:
                     'sector': 'Telecommunications',
                     'symbol': 'SCOM',
                     'performance': telecom_perf,
-                    'price': 0.0,
+                    'price': telecom_price,
+                    'quoted': bool(telecom_price),
+                    'currency': 'KES',
                     'volume': 0,
                     'outlook_score': telecom_outlook,
                     'agent_profile': telecom_profile,

@@ -937,6 +937,7 @@ class TradingAgent:
                     interval_minutes=self.config.get('data_manager', {})
                                         .get('nse_scrape_interval_minutes', 30),
                     symbols=nse_cfg_symbols or None,
+                    licensed_feed=self.config.get('nse_licensed_feed'),
                 )
                 # Seed historical data if this is first run
                 self.nse_scraper.seed_historical(days=730)

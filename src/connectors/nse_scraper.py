@@ -66,8 +66,33 @@ DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "nse_histori
 # nse_pricelist is the checked OCR backfill (src/connectors/nse_pricelist.py);
 # aib_market_pulse is the closing price in AIB-AXYS's daily Market Pulse
 # (src/agent/market_pulse.py), stored only where no live source recorded one.
+# licensed_eod is a licensed end-of-day feed's file (nse_licensed_feed.py).
 REAL_NSE_SOURCES = frozenset({"nse_ticker", "nse_pricelist", "nse_website",
-                              "afx_kwayisi", "afx_history", "aib_market_pulse"})
+                              "afx_kwayisi", "afx_history", "aib_market_pulse",
+                              "licensed_eod"})
+
+# Which source wins when two record the same day. A bar replaces the stored
+# one unless the stored one comes from a better source: before, the last
+# write won, so a web-page price scraped during the session could replace
+# the exchange's own end-of-day price list. The same source may always
+# update its own bar (the ticker moves through the day).
+SOURCE_RANK = {
+    "licensed_eod": 6,     # a licensed end-of-day feed
+    "nse_pricelist": 5,    # the NSE's own daily price list (checked OCR)
+    "nse_ticker": 4,       # the NSE's own ticker feed
+    "nse_website": 3,
+    "afx_kwayisi": 2, "afx_history": 2,
+    "aib_market_pulse": 1,
+}
+
+# Two real sources whose closes for the same day differ by more than this are
+# reported: one of them has misread the market (a parsing change, a stale page).
+DISAGREE_PCT = 3.0
+
+
+def source_rank(source: Any) -> int:
+    """How far a source is trusted; 0 for anything not a market price."""
+    return SOURCE_RANK.get(str(source or ''), 0)
 
 
 @dataclass
@@ -585,8 +610,10 @@ def backfill_afx_history(symbols: List[str]) -> Dict[str, int]:
 # Storage helpers
 # ======================================================================
 
-def save_bars_csv(symbol: str, bars: List[DailyBar]):
-    """Save/merge bars into a CSV file."""
+def save_bars_csv(symbol: str, bars: List[DailyBar]) -> Dict[str, List[Any]]:
+    """Save/merge bars into a CSV file, keeping the better source's bar for a
+    day (SOURCE_RANK). Returns the bars written, the dates where a better
+    source's bar was kept, and the days two real sources disagreed on."""
     if not valid_ticker(symbol):
         raise ValueError(f"not an NSE ticker: {symbol!r}")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -596,14 +623,36 @@ def save_bars_csv(symbol: str, bars: List[DailyBar]):
         with open(csv_path, "r", newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 existing[row["date"]] = row
+    result: Dict[str, List[Any]] = {"written": [], "kept": [], "disagreements": []}
     for bar in bars:
+        old_row = existing.get(bar.date)
+        if old_row is not None:
+            old_src = old_row.get("source")
+            if (old_src != bar.source and old_src in REAL_NSE_SOURCES and bar.source in REAL_NSE_SOURCES):
+                try:
+                    old_close, new_close = float(old_row.get("close") or 0), float(bar.close or 0)
+                except (TypeError, ValueError):
+                    old_close = new_close = 0.0
+                if old_close > 0 and new_close > 0:
+                    gap = abs(new_close / old_close - 1) * 100
+                    if gap > DISAGREE_PCT:
+                        result["disagreements"].append({
+                            "symbol": symbol, "date": bar.date, "gap_pct": round(gap, 2),
+                            old_src: old_close, bar.source: new_close})
+                        logger.warning(f"NSE sources disagree on {symbol} {bar.date}: {old_src} {old_close} "
+                                       f"against {bar.source} {new_close} ({gap:.1f}% apart)")
+            if old_src != bar.source and source_rank(old_src) > source_rank(bar.source):
+                result["kept"].append(bar.date)
+                continue
         existing[bar.date] = asdict(bar)
+        result["written"].append(bar)
     fields = ["date", "symbol", "open", "high", "low", "close", "volume", "change_pct", "source"]
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         for d in sorted(existing.keys()):
             w.writerow(existing[d])
+    return result
 
 
 def save_bars_db(bars: List[DailyBar], db):
@@ -670,8 +719,13 @@ class NSEPeriodicScraper:
         interval_minutes: int = 30,
         symbols: Optional[List[str]] = None,
         record_all_listed: bool = True,
+        licensed_feed: Optional[Dict[str, Any]] = None,
     ):
         self.db = database_manager
+        # config nse_licensed_feed (nse_licensed_feed.py); off by default.
+        self.licensed_feed = licensed_feed or {}
+        self._licensed_last: Optional[Dict[str, Any]] = None
+        self._disagreements: List[Dict[str, Any]] = []
         # Store a bar for every stock the ticker feed lists, not only the
         # watched ones, so every NSE stock builds real history and Market
         # Watch and the screener can cover the whole exchange. The feed is
@@ -713,6 +767,17 @@ class NSEPeriodicScraper:
         logger.info("NSE scraper: starting cycle...")
         results: Dict[str, int] = {}
 
+        # 0. A licensed end-of-day feed's files, when one is set up: they
+        # outrank every scraped source for the days they cover.
+        if self.licensed_feed and self.licensed_feed.get("enabled"):
+            try:
+                from src.connectors.nse_licensed_feed import import_folder
+                summary = import_folder(self.licensed_feed)
+                self._licensed_last = summary
+                self._note_disagreements(summary.get("disagreements", []))
+            except Exception as e:
+                logger.warning(f"NSE licensed feed import failed: {e}")
+
         # 1. The NSE's own ticker feed
         web_bars = scrape_nse_ticker(None if self.record_all_listed else self.symbols)
         logger.info(f"  NSE ticker: {len(web_bars)} symbols")
@@ -730,8 +795,9 @@ class NSEPeriodicScraper:
         for sym in self.symbols:
             if sym in web_bars:
                 bar = web_bars[sym]
-                save_bars_csv(sym, [bar])
-                save_bars_db([bar], self.db)
+                saved = save_bars_csv(sym, [bar]) or {"written": [bar], "disagreements": []}
+                save_bars_db(saved["written"], self.db)
+                self._note_disagreements(saved["disagreements"])
                 results[sym] = 1
             else:
                 results[sym] = 0
@@ -744,8 +810,9 @@ class NSEPeriodicScraper:
                 if not valid_ticker(sym):
                     continue
                 try:
-                    save_bars_csv(sym, [bar])
-                    save_bars_db([bar], self.db)
+                    saved = save_bars_csv(sym, [bar]) or {"written": [bar], "disagreements": []}
+                    save_bars_db(saved["written"], self.db)
+                    self._note_disagreements(saved["disagreements"])
                     stored.append(sym)
                 except Exception as e:
                     logger.warning(f"NSE scraper: could not store {sym}: {e}")
@@ -836,6 +903,11 @@ class NSEPeriodicScraper:
                 logger.error(f"NSE scraper loop error: {e}")
                 time.sleep(60)  # back off on error
 
+    def _note_disagreements(self, found: List[Dict[str, Any]]) -> None:
+        """Keep the latest days on which two real sources disagreed."""
+        if found:
+            self._disagreements = (self._disagreements + list(found))[-50:]
+
     def get_status(self) -> Dict[str, Any]:
         return {
             "running": self._running,
@@ -849,6 +921,11 @@ class NSEPeriodicScraper:
             "last_cycle_missing": self._last_missing,
             "last_real_price_at": (datetime.fromtimestamp(self._last_real_success, tz=EAT).isoformat()
                                    if self._last_real_success else None),
+            # Days on which two real sources' closes were more than
+            # DISAGREE_PCT apart (the better-ranked source's bar was kept).
+            "source_disagreements": list(self._disagreements[-10:]),
+            "licensed_feed": ({"enabled": True, "last_import": self._licensed_last}
+                              if self.licensed_feed.get("enabled") else {"enabled": False}),
         }
 
 

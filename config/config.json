@@ -58,9 +58,9 @@
     }
   },
   "learning": {
-    "_comment": "Learning from every signal's later price move, not only from closed trades (src/agent/signal_ledger.py). The agent records what each strategy's signals did 5 and 20 trading days later, per market, and the scorecard shows each strategy's hit rate against chance. With signal_skill_tilt.enabled false (the default) it only measures. Set it to true and, once a strategy has min_signals signals with a known outcome in a market, its vote there is scaled 0.5x to 1.5x by how far it beats chance (guardrails.signal_tilt). Review the scorecard's Learning section before switching it on.",
+    "_comment": "Learning from every signal's later price move, not only from closed trades (src/agent/signal_ledger.py). The agent records what each strategy's signals did 5 and 20 trading days later, per market, and the scorecard shows each strategy's hit rate against chance and its average move after costs. signal_skill_tilt is on: once a strategy has min_signals signals with a known outcome in a market, its vote there is scaled 0.5x to 1.5x by how far it beats chance (guardrails.signal_tilt). A boost also needs those signals to have made money after costs, so a fast rule that calls direction but not enough to pay its costs (the usual result for US shares) keeps its weight; a strategy clearly worse than chance is reduced, never switched off. Until a strategy reaches min_signals in a market nothing changes. Set enabled to false to measure only.",
     "signal_skill_tilt": {
-      "enabled": false,
+      "enabled": true,
       "horizon": 5,
       "min_signals": 50,
       "refresh_hours": 6
@@ -479,6 +479,22 @@
       ],
       "min_upside_pct": 5.0
     }
+  },
+  "nse_licensed_feed": {
+    "_comment": "End-of-day NSE prices from a licensed data feed, delivered as daily files (src/connectors/nse_licensed_feed.py). Off until a feed is bought. When on, each new CSV file in `folder` is imported at the start of the next NSE cycle as source licensed_eod, which outranks every scraped source; the scrapers keep running as a cross-check and a close more than 3% from theirs shows in the scraper status. Set `columns` to the vendor's column names and `date_format` to how it writes dates. Corporate actions are not imported: add them to config/nse_corporate_actions.json after checking.",
+    "enabled": false,
+    "folder": null,
+    "columns": {
+      "symbol": "Symbol",
+      "date": "Date",
+      "open": "Open",
+      "high": "High",
+      "low": "Low",
+      "close": "Close",
+      "volume": "Volume"
+    },
+    "date_format": "%Y-%m-%d",
+    "delimiter": ","
   },
   "self_assessment": {
     "_comment": "The AI stop-setting review waits for min_closed_trades closed round trips, then asks again only after min_new_trades more. It is advice only.",

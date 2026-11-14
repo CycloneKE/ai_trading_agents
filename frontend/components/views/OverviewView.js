@@ -271,13 +271,22 @@ const OverviewView = ({ data, isConnected, onDrill, mobile, heartbeat = {}, last
                 <div style={{ fontSize: '10px', fontWeight: 800, color: theme.colors.textMuted, letterSpacing: '0.4px' }}>
                   {(s.sector || 'N/A').toUpperCase()}
                 </div>
-                <div style={{
-                  fontWeight: '800', fontSize: '14px', marginTop: '4px',
-                  fontVariantNumeric: 'tabular-nums',
-                  color: (s.performance || 0) >= 0 ? theme.colors.primary : theme.colors.danger,
-                }}>
-                  {(s.performance || 0) >= 0 ? '+' : ''}{((s.performance || 0) * 100).toFixed(1)}%
-                </div>
+                {/* No quote (s.quoted false, or an older server's price of 0)
+                    is a dash, not a "+0.0%" flat day. */}
+                {s.quoted === false || !s.price ? (
+                  <div title={`No quote for ${s.symbol || s.sector} right now`}
+                    style={{ fontWeight: 700, fontSize: '14px', marginTop: '4px', color: theme.colors.textMuted }}>
+                    —
+                  </div>
+                ) : (
+                  <div style={{
+                    fontWeight: '800', fontSize: '14px', marginTop: '4px',
+                    fontVariantNumeric: 'tabular-nums',
+                    color: (s.performance || 0) >= 0 ? theme.colors.primary : theme.colors.danger,
+                  }}>
+                    {(s.performance || 0) >= 0 ? '+' : ''}{((s.performance || 0) * 100).toFixed(1)}%
+                  </div>
+                )}
               </div>
             ))}
           </div>

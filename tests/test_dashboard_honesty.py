@@ -166,3 +166,22 @@ def test_an_unlabelled_price_is_unverified_not_real():
     client, h = _client(nse=nse, nse_symbols=['SCOM'])
     prov = client.get('/api/nse-market', headers=h).get_json()['provenance']
     assert prov['real'] == 0 and prov['unverified'] == 1
+
+
+def test_sector_tiles_say_when_there_is_no_quote_and_price_safaricom_on_the_nse():
+    """A missing quote showed as a +0.0% day, and Kenyan telecoms asked the US
+    feed for SCOM, which there is another company or nothing."""
+    us_feed = SimpleNamespace(get_real_time_data=lambda s: (
+        {'price': 230.0, 'change_percent': 1.5} if s == 'XLK' else
+        {'price': 999.0, 'change_percent': 50.0} if s == 'SCOM' else None))
+    nse = SimpleNamespace(get_quote=lambda s: {'price_kes': 27.45, 'change_pct': -0.8, 'source': 'nse_ticker'})
+    agent = SimpleNamespace(components={'data_manager': SimpleNamespace(connectors={'real_data': us_feed, 'nse': nse})},
+                            config={})
+    client = TradingAPI(agent, {}).app.test_client()
+    rows = {r['sector']: r for r in client.get('/api/market-heatmap', headers={
+        'Authorization': f"Bearer {create_token('tester', 'operator')}"}).get_json()}
+    assert rows['Technology']['quoted'] is True and rows['Technology']['performance'] == pytest.approx(0.015)
+    assert rows['Energy']['quoted'] is False
+    assert rows['Telecommunications']['quoted'] is True
+    assert rows['Telecommunications']['performance'] == pytest.approx(-0.008)
+    assert rows['Telecommunications']['price'] == 27.45
