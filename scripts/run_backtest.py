@@ -317,30 +317,46 @@ def build_strategy_fn(cfg, manager, engine, stop_loss_pct, trailing_pct,
     return strategy
 
 
-def build_rotation_fn(cfg, engine, data, rebalance_every=1):
+def build_rotation_fn(cfg, engine, data, rebalance_every=1, sleeve=None):
     """Cross-sectional momentum rotation: rank the universe, hold the leaders,
     rebalance on a fixed schedule.
 
     Unlike the ensemble path this sees every symbol at once, which is the
     whole point: it is a relative-strength ranking, not a per-symbol verdict.
+
+    The ranking counts in bars, so plain rotation expects monthly bars: on
+    daily bars its "12-month" lookback is twelve days. With `sleeve` (a
+    momentum_sleeve.SleeveConfig) it runs the live momentum sleeve on daily
+    bars instead: month-sized steps of 21 trading days (momentum_sleeve.
+    targets) and a rebalance on the first bar of each calendar month, exactly
+    as the agent trades it.
     """
     from src.agent.momentum_rotation import config_from_dict, rebalance_orders, target_weights
+    from src.agent import momentum_sleeve as ms
 
     rot_cfg = config_from_dict(cfg.get('momentum_rotation', {}))
     history = {}
     stats = {'signals': 0, 'stops': 0, 'blocked_cash': 0, 'atr_sized': 0,
              'rebalances': 0, 'periods_in_cash': 0}
-    state = {'bar': 0}
+    state = {'bar': 0, 'month': None}
 
     def strategy(timestamp, prices, portfolio):
         state['bar'] += 1
         for sym, price in prices.items():
             history.setdefault(sym, []).append(float(price))
 
-        if (state['bar'] - 1) % max(1, rebalance_every) != 0:
+        if sleeve is not None:
+            month = (timestamp.year, timestamp.month)
+            if month == state['month']:
+                return []
+            state['month'] = month
+            if max((len(h) for h in history.values()), default=0) < sleeve.bars_needed:
+                return []                                     # not a year of history yet
+            target = ms.targets(history, sleeve)['weights']
+        elif (state['bar'] - 1) % max(1, rebalance_every) != 0:
             return []
-
-        target = target_weights(history, rot_cfg)
+        else:
+            target = target_weights(history, rot_cfg)
         if not target:
             stats['periods_in_cash'] += 1
 
@@ -461,8 +477,11 @@ def write_report(path, meta, strat, bench, strategy_stats, warnings_list):
         "|---|---|---|---|---|---|",
     ] + meta['cost_rows'] + [
         "",
-        f"- Max position size: {pct(meta['max_position_pct'])} of portfolio",
-        f"- Stop loss: {pct(meta['stop_loss_pct'])}; trailing stop: {pct(meta['trailing_pct'])}",
+        *([f"- Max position size: {pct(meta['max_position_pct'])} of portfolio",
+           f"- Stop loss: {pct(meta['stop_loss_pct'])}; trailing stop: {pct(meta['trailing_pct'])}"]
+          if meta.get('strategy', 'ensemble') == 'ensemble' else
+          [f"- Strategy: {meta.get('strategy')}: monthly rebalance into the ranked leaders; "
+           f"no stop-losses and no per-position cap beyond the ranking's own weights"]),
         f"- Minimum signal confidence to act: {meta['min_confidence']:.2f}",
         "",
         "## Verdict",
@@ -546,9 +565,11 @@ def leave_one_out(args, cfg, data, syms, capital, risk_free):
         try:
             sub_engine = _build_engine(cfg, capital, risk_free, args)
             sub_engine.add_market_data(subset)
-            fn = build_rotation_fn(cfg, sub_engine, subset,
-                                   rebalance_every=args.rebalance_every) \
-                if args.strategy == 'rotation' else None
+            from src.agent.momentum_sleeve import config_from_dict as sleeve_config
+            fn = build_rotation_fn(cfg, sub_engine, subset, rebalance_every=args.rebalance_every,
+                                   sleeve=(sleeve_config(cfg.get('momentum_sleeve'))
+                                           if args.strategy == 'sleeve' else None)) \
+                if args.strategy in ('rotation', 'sleeve') else None
             if fn is None:
                 return []          # only meaningful for the rotation path today
             sub_engine.run_backtest(fn)
@@ -628,10 +649,12 @@ def main():
                          'Defaults to config analytics.risk_free_rate. For a Kenyan '
                          'investor this is the 91-day T-bill: a strategy that cannot '
                          'beat it after costs is not worth running.')
-    ap.add_argument('--strategy', choices=['ensemble', 'rotation'], default='ensemble',
+    ap.add_argument('--strategy', choices=['ensemble', 'rotation', 'sleeve'], default='ensemble',
                     help="'ensemble' drives the live StrategyManager bar by bar; "
                          "'rotation' runs cross-sectional momentum, ranking the "
-                         "whole universe and rebalancing on a schedule.")
+                         "whole universe and rebalancing on a schedule (monthly "
+                         "bars); 'sleeve' runs the live momentum sleeve "
+                         "(momentum_sleeve in the config) on daily bars.")
     ap.add_argument('--rebalance-every', type=int, default=1,
                     help='bars between rotation rebalances (1 for monthly bars, '
                          '~21 for daily). Ignored for --strategy ensemble.')
@@ -710,6 +733,10 @@ def main():
     if args.strategy == 'rotation':
         strat_fn = build_rotation_fn(cfg, engine, data,
                                      rebalance_every=args.rebalance_every)
+    elif args.strategy == 'sleeve':
+        from src.agent.momentum_sleeve import config_from_dict as sleeve_config
+        strat_fn = build_rotation_fn(cfg, engine, data,
+                                     sleeve=sleeve_config(cfg.get('momentum_sleeve')))
     else:
         strat_fn = build_strategy_fn(
             cfg, manager, engine,
@@ -779,6 +806,7 @@ def main():
         'slippage': engine_cfg['slippage_rate'],
         'slippage_model': engine_cfg['slippage_model'],
         'max_position_pct': limits.get('max_position_size', 0.05),
+        'strategy': args.strategy,
         'stop_loss_pct': limits.get('stop_loss_pct', 0.05),
         'trailing_pct': limits.get('trailing_stop_pct', 0.03),
         'min_confidence': args.min_confidence,
