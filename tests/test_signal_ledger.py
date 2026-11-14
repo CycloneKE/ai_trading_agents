@@ -107,9 +107,11 @@ def test_a_symbol_with_no_price_history_produces_nothing_rather_than_an_error():
 
 # ----------------------------------------------------------------- ledger
 
-def outcome(symbol='AAPL', day=1, source='momentum', action='buy', horizon=5, ret=0.02, chance=0.5, market='us_equity'):
+def outcome(symbol='AAPL', day=1, source='momentum', action='buy', horizon=5, ret=0.02, chance=0.5, market='us_equity',
+            net_ret=None):
     return {'symbol': symbol, 'day': START + timedelta(days=day), 'source': source, 'action': action,
-            'horizon': horizon, 'ret': ret, 'chance': chance, 'market': market, 'version': 'v1'}
+            'horizon': horizon, 'ret': ret, 'chance': chance, 'market': market, 'version': 'v1',
+            'net_ret': net_ret}
 
 
 def test_an_outcome_is_recorded_once_and_never_changes(tmp_path):
@@ -177,17 +179,34 @@ def test_skill_is_kept_apart_by_strategy_and_market():
 # ---------------------------------------------------------------- tilting
 
 def test_the_tilt_guardrail_needs_evidence_and_stays_within_bounds():
-    assert signal_tilt(49, 5.0) == 1.0                       # too few signals: no change
-    assert signal_tilt(50, 0.0) == 1.0
-    assert signal_tilt(200, 3.0) == 1.5 and signal_tilt(200, 99.0) == 1.5
+    paid = {'net_move_pct': 0.4, 'net_signals': 200}         # made money after costs
+    assert signal_tilt(49, 5.0, **paid) == 1.0               # too few signals: no change
+    assert signal_tilt(50, 0.0, **paid) == 1.0
+    assert signal_tilt(200, 3.0, **paid) == 1.5 and signal_tilt(200, 99.0, **paid) == 1.5
     assert signal_tilt(200, -3.0) == 0.5 and signal_tilt(200, -99.0) == 0.5    # halved, never switched off
-    assert 1.0 < signal_tilt(200, 1.0) < 1.5 and 0.5 < signal_tilt(200, -1.0) < 1.0
+    assert 1.0 < signal_tilt(200, 1.0, **paid) < 1.5 and 0.5 < signal_tilt(200, -1.0) < 1.0
     for junk in (None, 'x', float('nan')):
-        assert signal_tilt(200, junk) == 1.0 and signal_tilt(junk, 3.0) == 1.0
+        assert signal_tilt(200, junk, **paid) == 1.0 and signal_tilt(junk, 3.0, **paid) == 1.0
+
+
+def test_calling_direction_is_not_enough_a_boost_needs_profit_after_costs():
+    """Fast technical rules on US shares often beat chance on direction
+    but not by enough to pay their costs (Bessembinder and Chan)."""
+    assert signal_tilt(200, 3.0) == 1.0                                          # cost unknown: no boost
+    assert signal_tilt(200, 3.0, net_move_pct=-0.1, net_signals=200) == 1.0      # lost after costs
+    assert signal_tilt(200, 3.0, net_move_pct=0.0, net_signals=200) == 1.0
+    assert signal_tilt(200, 3.0, net_move_pct=0.3, net_signals=20) == 1.0        # too few with a known cost
+    assert signal_tilt(200, 3.0, net_move_pct=0.3, net_signals=200) == 1.5
+    assert signal_tilt(200, -3.0, net_move_pct=0.3, net_signals=200) == 0.5      # a reduction needs no proof
+    assert signal_tilt(200, 3.0, net_move_pct='x', net_signals=200) == 1.0
+    rows = ([outcome(source='rsi', ret=0.004, net_ret=-0.002, day=d) for d in range(80)] +    # right, but unpaid
+            [outcome(source='momentum', ret=0.02, net_ret=0.015, day=d) for d in range(80)])
+    scale = sl.tilts(sl.skill(rows, 5), 50)
+    assert scale[('rsi', 'us_equity')] == 1.0 and scale[('momentum', 'us_equity')] == 1.5
 
 
 def test_only_strategies_are_tilted_never_the_ensemble():
-    rows = [outcome(source=s, ret=0.01, chance=0.5, day=d) for s in ('momentum', 'ensemble') for d in range(80)]
+    rows = [outcome(source=s, ret=0.01, chance=0.5, day=d, net_ret=0.008) for s in ('momentum', 'ensemble') for d in range(80)]
     scale = sl.tilts(sl.skill(rows, 5), 50)
     assert list(scale) == [('momentum', 'us_equity')] and scale[('momentum', 'us_equity')] == 1.5
 
@@ -333,18 +352,19 @@ def test_no_ledger_falls_back_to_the_old_check_and_says_skill_is_not_recorded_ye
 
 
 def test_the_skill_measure_names_the_best_and_worst_and_says_the_tilt_is_off():
-    rows = [outcome(source='momentum', ret=0.01, chance=0.5, day=d) for d in range(80)] + \
-           [outcome(source='rsi_strategy', ret=-0.01, chance=0.5, day=d) for d in range(80)] + \
-           [outcome(source='mean_reversion', ret=0.01, chance=0.5, day=d) for d in range(10)]
-    m = metric(card(rows), 'strategy_skill')
+    rows = [outcome(source='momentum', ret=0.01, chance=0.5, day=d, net_ret=0.008) for d in range(80)] + \
+           [outcome(source='rsi_strategy', ret=-0.01, chance=0.5, day=d, net_ret=-0.012) for d in range(80)] + \
+           [outcome(source='mean_reversion', ret=0.01, chance=0.5, day=d, net_ret=0.008) for d in range(10)]
+    off = {**CONFIG, 'learning': {'signal_skill_tilt': {'enabled': False}}}
+    m = metric(card(rows, off), 'strategy_skill')
     assert m['status'] == 'info' and m['display'] == '2 of 3 pairs judged'
     assert 'Best: momentum in us_equity' in m['note'] and 'Worst: rsi_strategy' in m['note']
     assert 'Measuring only' in m['note']
     tilts = {(r['source'], r['market']): r['tilt'] for r in m['detail']}
     assert tilts[('momentum', 'us_equity')] == 1.5 and tilts[('rsi_strategy', 'us_equity')] == 0.5
     assert tilts[('mean_reversion', 'us_equity')] == 1.0                                # too few signals
-    on = {**CONFIG, 'learning': {'signal_skill_tilt': {'enabled': True}}}
-    assert 'Tilt is ON' in metric(card(rows, on), 'strategy_skill')['note']
+    assert CONFIG['learning']['signal_skill_tilt']['enabled'] is True               # shipped on (finding 13)
+    assert 'Tilt is ON' in metric(card(rows), 'strategy_skill')['note']
 
 
 def test_too_few_signals_is_too_early_and_says_the_most_so_far():

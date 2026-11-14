@@ -510,9 +510,10 @@ def _skill(ledger: Optional[List[Dict[str, Any]]], config: Optional[Dict[str, An
         return _m('strategy_skill', label, None, 'no outcomes yet', EARLY, target,
                   f"A signal's {rule['horizon']}-day outcome is known {rule['horizon']} trading days after it.")
     for r in table:
-        r['tilt'] = round(signal_tilt(r['n'], r['z'], rule['min_signals']), 2)
+        r['tilt'] = round(signal_tilt(r['n'], r['z'], rule['min_signals'], r.get('net_move_pct'), r.get('net_n')), 2)
     judged = [r for r in table if r['n'] >= int(rule['min_signals'])]
-    mode = ('Tilt is ON: each strategy\'s vote in that market is scaled 0.5x to 1.5x by this result.'
+    mode = ('Tilt is ON: each strategy\'s vote in that market is scaled 0.5x to 1.5x by this result '
+            '(a boost only when its signals also made money after costs).'
             if rule['enabled'] else
             'Measuring only: no weight is changed. Switch on learning.signal_skill_tilt once a pair shows a clear result.')
     if not judged:

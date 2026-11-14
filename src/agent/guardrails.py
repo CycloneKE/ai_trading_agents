@@ -20,7 +20,7 @@ Where each rule lives:
 | strategy_tuner.py | strategy settings (the only writer) | fixed bounds, one step, held-out evidence on 30+ trades, a hurdle that grows with candidates tried, probation and revert, weekly, frozen when halted |
 | strategy_manager rebalance | strategy weights from results | 0.1 floor, 0.3 smoothing, weekly |
 | strategy_manager adaptive_confidence | each vote's weight | evidence_tilt: none under 5 closed trades, then 0.5 to 1.5 by t-statistic, recomputed from the journal |
-| strategy_manager adaptive_confidence (OFF by default) | each vote's weight, per market | signal_tilt: none under 50 signals with a known outcome, then 0.5 to 1.5 by how far the hit rate beats chance, recomputed from the signal ledger |
+| strategy_manager adaptive_confidence (learning.signal_skill_tilt, on) | each vote's weight, per market | signal_tilt: none under 50 signals with a known outcome, then 0.5 to 1.5 by how far the hit rate beats chance; a boost only when the signals also made money after costs; recomputed from the signal ledger |
 | llm_allocator.py (AI, off by default) | strategy weights | relative to neutral, 0.5 to 1.5, step 0.25, new-evidence gate, frozen when halted |
 | adaptive_integration.py | position size, risk tolerance | reduce-only, floors, capped at max_position_size |
 | self_assessment.py (AI) | nothing: advice only | evidence gate, checked suggestions |
@@ -114,7 +114,8 @@ MIN_TILT_TRADES = 5
 MIN_SIGNAL_TILT = 50
 
 
-def signal_tilt(signals: Any, z: Any, min_signals: int = MIN_SIGNAL_TILT) -> float:
+def signal_tilt(signals: Any, z: Any, min_signals: int = MIN_SIGNAL_TILT,
+                net_move_pct: Any = None, net_signals: Any = None) -> float:
     """How much a strategy's vote in one market is scaled by what its signals
     did next (signal_ledger.py), as opposed to what its closed trades made.
 
@@ -124,8 +125,16 @@ def signal_tilt(signals: Any, z: Any, min_signals: int = MIN_SIGNAL_TILT) -> flo
     there are `min_signals` signals with a known outcome, then 1 + z/6, held
     to 0.5 to 1.5: a z of 3 earns the largest boost, and a strategy whose
     signals are clearly worse than chance is halved, never switched off.
-    Symmetric, and recomputed from the ledger each time, so it cannot drift
-    on its own.
+    Recomputed from the ledger each time, so it cannot drift on its own.
+
+    A boost also needs the signals to have made money after costs:
+    `net_move_pct`, their average move less the round-trip cost, above zero
+    over at least `min_signals` signals whose cost is known (`net_signals`).
+    Calling the direction more often than chance is not enough when the
+    moves are smaller than the costs, which is what studies of simple
+    technical rules on US shares found (Bessembinder and Chan): such a
+    strategy keeps its weight rather than gaining. A reduction needs no such
+    proof.
     """
     try:
         n, z = int(signals or 0), float(z or 0.0)
@@ -133,7 +142,15 @@ def signal_tilt(signals: Any, z: Any, min_signals: int = MIN_SIGNAL_TILT) -> flo
         return 1.0
     if n < int(min_signals) or z != z:
         return 1.0
-    return max(TILT_LOW, min(TILT_HIGH, 1.0 + z / 6.0))
+    tilt = max(TILT_LOW, min(TILT_HIGH, 1.0 + z / 6.0))
+    if tilt > 1.0:
+        try:
+            paid = float(net_move_pct) > 0 and int(net_signals or 0) >= int(min_signals)
+        except (TypeError, ValueError):
+            paid = False
+        if not paid:
+            return 1.0
+    return tilt
 
 
 def evidence_tilt(closed_trades: Any, t_stat: Any, min_trades: int = MIN_TILT_TRADES) -> float:
