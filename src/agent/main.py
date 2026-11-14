@@ -864,6 +864,17 @@ class TradingAgent:
             self.signal_ledger = None
             self.signal_learning = None
 
+        # Broker call scores: how each research publisher's ratings turned out
+        # (broker_calls.py). Measured only; shown on the Research page and, once
+        # a publisher's record is long enough, in the AI's trade review.
+        try:
+            from src.agent.broker_calls import BrokerCallScores
+            em = self.components.get('escalation_manager')
+            self.broker_scores = BrokerCallScores(self.config, em.db_path) if em is not None else None
+        except Exception as e:
+            logger.error(f"Broker call scores init failed: {e}")
+            self.broker_scores = None
+
         # Watch-only commodities: metals, oil and farm produce are followed and
         # their patterns scored against what prices then did, with no orders
         # and no broker (commodity_watch.py). Separate files, separate book.
@@ -1052,6 +1063,11 @@ class TradingAgent:
                         self.signal_learning.maybe_update()
                     except Exception as e:
                         logger.error(f"Signal learning error: {e}")
+                if getattr(self, 'broker_scores', None):        # measurement only: safe while halted
+                    try:
+                        self.broker_scores.maybe_refresh()
+                    except Exception as e:
+                        logger.error(f"Broker call scores error: {e}")
                 if getattr(self, 'commodity_watch', None):      # watch only: safe while halted
                     try:
                         self.commodity_watch.maybe_update()
@@ -1334,10 +1350,13 @@ class TradingAgent:
                                     research_context = None
                                     em = self.components.get('escalation_manager')
                                     if em:
-                                        watchlist_items = em.get_active_watchlist()
+                                        # Ratings older than research_ingest.rating_max_age_days
+                                        # are not current research; the date goes with the rest.
+                                        watchlist_items = em.get_active_watchlist(
+                                            max_age_days=TradingAgent._rating_max_age(self))
                                         for item in watchlist_items:
                                             if item.get('symbol') == symbol:
-                                                research_context = item
+                                                research_context = TradingAgent._dated_rating(self, item)
                                                 break
                                     
                                     # Uploaded documents that bear on this symbol
@@ -1398,6 +1417,8 @@ class TradingAgent:
                                     }
                                     if 'consensus_verified' in validated_signal:
                                         dec['llm_verdict']['consensus_verified'] = validated_signal['consensus_verified']
+                                    if validated_signal.get('consensus_dispute'):
+                                        dec['llm_verdict']['consensus_dispute'] = str(validated_signal['consensus_dispute'])[:300]
                                     if 'secondary_verdict' in validated_signal:
                                         dec['llm_verdict']['secondary_verdict'] = validated_signal['secondary_verdict']
 
@@ -1901,6 +1922,8 @@ class TradingAgent:
                     }
                     if 'consensus_verified' in validated:
                         dec['llm_verdict']['consensus_verified'] = validated['consensus_verified']
+                    if validated.get('consensus_dispute'):
+                        dec['llm_verdict']['consensus_dispute'] = str(validated['consensus_dispute'])[:300]
                     if 'secondary_verdict' in validated:
                         dec['llm_verdict']['secondary_verdict'] = validated['secondary_verdict']
 
@@ -2018,6 +2041,25 @@ class TradingAgent:
                     f"{', '.join(a.kind + ' ' + a.ex_date.isoformat() for a in due)}")
         return factor
 
+    def _rating_max_age(self) -> int:
+        """Days a broker rating stays current research for the AI's review
+        (research_ingest.rating_max_age_days; 0 keeps every rating)."""
+        cfg = (getattr(self, 'config', None) or {}).get('research_ingest', {}) or {}
+        return int(cfg.get('rating_max_age_days', 90) or 0)
+
+    def _dated_rating(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """A watchlist rating as research context: with the day it was given
+        (the AI used to be shown ratings with no date at all) and, once the
+        publisher has a long enough record, how its past calls turned out."""
+        ctx = dict(item)
+        ctx['rated_on'] = str(item.get('last_updated') or item.get('added_at') or '')[:10] or None
+        scores = getattr(self, 'broker_scores', None)
+        if scores is not None and item.get('source'):
+            record = scores.record_for(item['source'])
+            if record:
+                ctx['source_record'] = record
+        return ctx
+
     def _nse_research(self, symbol: str) -> Optional[Dict[str, Any]]:
         """What AIB-AXYS says about an NSE stock, for the AI's trade review:
         an analyst's rating from an uploaded note (the watchlist), and the
@@ -2029,7 +2071,8 @@ class TradingAgent:
         em = self.components.get('escalation_manager')
         if em is not None:
             try:
-                rated = next((w for w in em.get_active_watchlist()
+                rated = next((w for w in em.get_active_watchlist(
+                                  max_age_days=TradingAgent._rating_max_age(self))
                               if str(w.get('symbol', '')).upper() == symbol.upper()), None)
             except Exception as e:
                 logger.debug(f"Watchlist unavailable for {symbol}: {e}")
@@ -2048,14 +2091,16 @@ class TradingAgent:
             if docs:
                 return {**(pulse or {}), 'documents': docs}
             return pulse
-        ctx = {'recommendation': rated.get('recommendation'), 'target_price': rated.get('target_price'),
-               'rationale': rated.get('rationale') or ''}
+        ctx = {**TradingAgent._dated_rating(self, rated), 'rationale': rated.get('rationale') or ''}
         if pulse:
             ctx['rationale'] = f"{ctx['rationale']} {pulse['rationale']}".strip()
             # A dated, checked rating from the latest sheet beats the
             # watchlist's, which is only as new as the note that added it.
             if pulse.get('recommendation'):
                 ctx['recommendation'], ctx['target_price'] = pulse['recommendation'], pulse['target_price']
+                ctx['rated_on'] = pulse.get('rated_on') or ctx.get('rated_on')
+                ctx['source'] = pulse.get('source') or 'AIB-AXYS'
+                ctx.pop('source_record', None)
         if docs:
             ctx['documents'] = docs
         return ctx

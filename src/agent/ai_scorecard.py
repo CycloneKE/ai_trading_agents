@@ -77,7 +77,9 @@ def reviewed_signals(decisions: Iterable[Dict[str, Any]],
             continue
         seen.add(key)
         out.append({'symbol': d.get('symbol'), 'day': day, 'action': proposed,
-                    'price': float(d['price']), 'outcome': outcome})
+                    'price': float(d['price']), 'outcome': outcome,
+                    # True: the second model agreed; False: it would have held.
+                    'consensus': verdict.get('consensus_verified')})
     return out
 
 
@@ -108,7 +110,8 @@ def scorecard(decisions: Iterable[Dict[str, Any]],
     """Approved versus vetoed signals at each horizon, with a plain verdict."""
     signals = reviewed_signals(decisions, tz_for)
     cache: Dict[str, Any] = {}
-    by_h: Dict[int, Dict[str, List[float]]] = {h: {'approved': [], 'vetoed': []} for h in horizons}
+    by_h: Dict[int, Dict[str, List[float]]] = {h: {'approved': [], 'vetoed': [], 'agreed': [], 'disputed': []}
+                                                for h in horizons}
     for s in signals:
         sym = s['symbol']
         if sym not in cache:
@@ -121,7 +124,11 @@ def scorecard(decisions: Iterable[Dict[str, Any]],
         for h in horizons:
             r = forward_return(closes, s['day'], h, ordered)
             if r is not None:
-                by_h[h][s['outcome']].append(r if s['action'] == 'buy' else -r)
+                move = r if s['action'] == 'buy' else -r
+                by_h[h][s['outcome']].append(move)
+                # Among approved signals, did a disputing second model know better?
+                if s['outcome'] == 'approved' and s.get('consensus') is not None:
+                    by_h[h]['agreed' if s['consensus'] else 'disputed'].append(move)
 
     result: Dict[str, Any] = {'reviewed': len(signals),
                               'approved': sum(1 for s in signals if s['outcome'] == 'approved'),
@@ -132,8 +139,31 @@ def scorecard(decisions: Iterable[Dict[str, Any]],
         edge = (round(a['avg_return_pct'] - v['avg_return_pct'], 2)
                 if a['n'] and v['n'] else None)
         result['horizons'][str(h)] = {'approved': a, 'vetoed': v, 'veto_edge_pct': edge}
+        ag, di = _group(by_h[h]['agreed']), _group(by_h[h]['disputed'])
+        result.setdefault('consensus', {})[str(h)] = {
+            'agreed': ag, 'disputed': di,
+            # Positive: trades the second model disputed did worse, so its
+            # veto would have helped (then consider llm_consensus_blocks).
+            'dispute_edge_pct': (round(ag['avg_return_pct'] - di['avg_return_pct'], 2)
+                                 if ag['n'] and di['n'] else None)}
     result['verdict'] = _verdict(result, max(horizons))
+    result['consensus_verdict'] = _consensus_verdict(result, max(horizons))
     return result
+
+
+def _consensus_verdict(result: Dict[str, Any], h: int) -> str:
+    """Whether the second model's disputes have pointed at worse trades."""
+    row = result['consensus'][str(h)]
+    disputed = row['disputed']['n']
+    if disputed < MIN_FOR_VERDICT:
+        return (f"Too early to judge the second opinion: {disputed} disputed trade(s) have a {h}-day "
+                f"result; at least {MIN_FOR_VERDICT} are needed.")
+    edge = row['dispute_edge_pct']
+    if edge is not None and edge > 0:
+        return (f"Disputed trades did {edge:.2f} points worse over {h} days than agreed ones: the "
+                f"second opinion is worth listening to (llm_consensus_blocks).")
+    return (f"Disputed trades did no worse over {h} days than agreed ones: the second opinion "
+            f"has not earned a veto.")
 
 
 def _verdict(result: Dict[str, Any], h: int) -> str:

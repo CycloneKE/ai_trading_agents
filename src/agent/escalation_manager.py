@@ -376,14 +376,26 @@ class EscalationManager:
             self._conn.commit()
             return cur.rowcount > 0
 
-    def get_active_watchlist(self) -> List[Dict[str, Any]]:
-        """Get list of active symbols currently tracked in the watchlist."""
+    def get_active_watchlist(self, max_age_days: Optional[int] = None,
+                             today=None) -> List[Dict[str, Any]]:
+        """Get list of active symbols currently tracked in the watchlist.
+
+        With `max_age_days`, only ratings added or updated within that many
+        days: what the AI's trade review is given, so a broker call from
+        months ago is not presented as current research. Without it, every
+        active entry (the dashboard's list).
+        """
         with self._lock:
             cur = self._conn.execute(
                 "SELECT * FROM position_watchlist WHERE status = 'active' ORDER BY symbol ASC"
             )
             cur.row_factory = sqlite3.Row
-            return [dict(r) for r in cur.fetchall()]
+            rows = [dict(r) for r in cur.fetchall()]
+        if not max_age_days:
+            return rows
+        from datetime import timedelta as _td
+        cutoff = ((today or datetime.utcnow().date()) - _td(days=int(max_age_days))).isoformat()
+        return [r for r in rows if str(r.get('last_updated') or r.get('added_at') or '')[:10] >= cutoff]
 
     def get_upload_history(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Get history of research uploads."""

@@ -44,6 +44,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# The publisher of the daily recommendation sheets (daily_whispers.py), as the
+# broker call scores name it.
+DAILY_SHEET_SOURCE = 'AIB-AXYS Daily Whispers'
+
 SOURCE = 'aib_market_pulse'
 _lock = threading.Lock()
 
@@ -551,4 +555,6 @@ def research_context(symbol: str, today: Optional[date] = None) -> Optional[Dict
         parts.append('Announcements: ' + '; '.join(f"{a['date']} {a['text']}" for a in news[-5:]) + '.')
     return {'recommendation': rated['recommendation'] if rated else None,
             'target_price': rated['target_price'] if rated else None,
+            'rated_on': rated.get('date') if rated else None,
+            'source': DAILY_SHEET_SOURCE if rated else None,
             'rationale': ' '.join(parts)}

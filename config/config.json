@@ -481,6 +481,8 @@
   },
   "research_ingest": {
     "enabled": true,
+    "_comment": "Broker research uploads (src/agent/broker_research_ingest.py). rating_max_age_days: how long a broker rating stays current research for the AI's trade review; older ones stay on the Research page but are no longer given to the AI (0 keeps every rating). Each rating's date is shown to the AI with it.",
+    "rating_max_age_days": 90,
     "upload_dir": "data/research_uploads",
     "auto_follow_rules": {
       "require_existing_symbol": true,
@@ -662,5 +664,6 @@
     "max_weight": 0.5
   },
   "heartbeat_timeout_seconds": 300,
-  "llm_veto_enabled": false
+  "llm_veto_enabled": false,
+  "llm_consensus_blocks": false
 }
