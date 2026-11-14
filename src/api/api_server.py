@@ -2017,6 +2017,27 @@ class TradingAPI:
                 logger.error(f"Error reading broker ratings: {e}")
                 return jsonify({'error': 'Failed to read the broker ratings'}), 500
 
+        @self.app.route('/api/research/broker-scores', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_broker_scores():
+            """How each research publisher's calls turned out at 20, 60 and 120
+            trading days, against chance (src/agent/broker_calls.py). Refreshed
+            in the background at most twice a day; `refreshing` says one is
+            under way when there is nothing to show yet."""
+            scores = getattr(self.trading_agent, 'broker_scores', None)
+            if scores is None:
+                return jsonify({'enabled': False}), 200
+            try:
+                started = scores.maybe_refresh()
+                board = scores.latest
+                if board is None:
+                    return jsonify({'enabled': True, 'refreshing': True}), 200
+                return jsonify({'enabled': True, 'refreshing': started, **board}), 200
+            except Exception as e:
+                logger.error(f"Error reading broker call scores: {e}")
+                return jsonify({'error': 'Failed to read the broker call scores'}), 500
+
         @self.app.route('/api/research/ratings/<symbol>/follow', methods=['POST'])
         @require_rate_limit
         @token_required

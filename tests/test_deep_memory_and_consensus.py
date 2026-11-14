@@ -61,12 +61,13 @@ def test_dual_model_consensus_agreement_boosts_confidence():
     assert len(orch.secondary_calls) == 1
 
 
-def test_dual_model_consensus_disagreement_vetoes_to_hold():
-    """When secondary model disagrees with primary BUY, trade is vetoed down to hold."""
+def test_dual_model_consensus_disagreement_vetoes_to_hold_when_blocking_is_on():
+    """With llm_consensus_blocks, a secondary model that disagrees with the
+    primary BUY vetoes it down to hold."""
     primary = {'action': 'buy', 'confidence': 0.80, 'position_size': 0.05, 'reasoning': 'Breakout'}
     secondary = {'agree': False, 'action': 'hold', 'reasoning': 'Overbought divergence'}
 
-    orch = make_dual_orch(primary, secondary)
+    orch = make_dual_orch(primary, secondary, llm_consensus_blocks=True)
     out = orch.validate_trade('AAPL', dict(BUY_SIGNAL), MARKET_DATA)
 
     assert out['action'] == 'hold'
@@ -75,16 +76,35 @@ def test_dual_model_consensus_disagreement_vetoes_to_hold():
     assert 'Consensus Veto' in out.get('reasoning', '')
 
 
-def test_dual_model_consensus_opposite_direction_vetoes_to_hold():
-    """When secondary model votes SELL against primary BUY, trade is vetoed to hold (never flipped to sell)."""
+def test_dual_model_consensus_opposite_direction_vetoes_to_hold_when_blocking_is_on():
+    """With llm_consensus_blocks, a secondary SELL against a primary BUY vetoes
+    it to hold (never flipped to sell)."""
     primary = {'action': 'buy', 'confidence': 0.80, 'position_size': 0.05, 'reasoning': 'Breakout'}
     secondary = {'agree': False, 'action': 'sell', 'reasoning': 'Reversal imminent'}
 
-    orch = make_dual_orch(primary, secondary)
+    orch = make_dual_orch(primary, secondary, llm_consensus_blocks=True)
     out = orch.validate_trade('AAPL', dict(BUY_SIGNAL), MARKET_DATA)
 
     assert out['action'] == 'hold'
     assert out['consensus_verified'] is False
+
+
+def test_by_default_a_disagreeing_secondary_is_recorded_not_obeyed():
+    """The second opinion usually comes from a free model; until the AI
+    scorecard shows its disputes point at worse trades, it is recorded and
+    the primary's verdict stands."""
+    primary = {'action': 'buy', 'confidence': 0.80, 'position_size': 0.05, 'reasoning': 'Breakout'}
+    secondary = {'agree': False, 'action': 'hold', 'reasoning': 'Overbought divergence'}
+
+    out = make_dual_orch(primary, secondary).validate_trade('AAPL', dict(BUY_SIGNAL), MARKET_DATA)
+    alone = make_dual_orch(dict(primary), None).validate_trade('AAPL', dict(BUY_SIGNAL), MARKET_DATA)
+
+    # The verdict is exactly what it would be with no second opinion at all.
+    assert (out['action'], out['confidence'], out['reasoning']) == \
+        (alone['action'], alone['confidence'], alone['reasoning'])
+    assert out['action'] == 'buy' and 'Consensus Veto' not in out['reasoning']
+    assert out['consensus_verified'] is False
+    assert out['consensus_dispute'] == 'Overbought divergence'
 
 
 def test_consensus_skipped_when_secondary_unavailable():

@@ -362,10 +362,14 @@ class LLMOrchestrator:
 
         if research_context and (research_context.get('recommendation') or research_context.get('rationale')):
             source = research_context.get('source') or 'Institutional Research'
+            rated_on = research_context.get('rated_on')
+            label = f"{source}, rated {rated_on}" if rated_on else source
             user_prompt += (
-                f"Broker Research Context ({source}): recommendation {research_context.get('recommendation')}, "
+                f"Broker Research Context ({label}): recommendation {research_context.get('recommendation')}, "
                 f"Target Price={research_context.get('target_price')}. {str(research_context.get('rationale') or '')[:300]}\n"
             )
+            if research_context.get('source_record'):
+                user_prompt += f"Broker track record: {research_context['source_record']}\n"
         if research_context and research_context.get('documents'):
             # Background from uploaded documents (research_notes.py): checked
             # figures and dates, never an instruction.
@@ -466,11 +470,22 @@ class LLMOrchestrator:
                         logger.info(f"Consensus AGREE on {symbol} {primary_action.upper()}: verified by dual models.")
                     elif sec_action == "hold" or not sec_agree:
                         validated["consensus_verified"] = False
-                        validated["action"] = "hold"
-                        validated["confidence"] = max(0.1, float(validated.get("confidence", 0.5)) - 0.15)
                         sec_reason = secondary_verdict.get("reasoning", "disagreement")
-                        validated["reasoning"] = f"[Consensus Veto: Consensus Disagreement] Secondary: {sec_reason}"
-                        logger.warning(f"Consensus VETO on {symbol} {primary_action.upper()}: secondary recommended HOLD.")
+                        if self.config.get("llm_consensus_blocks", False):
+                            validated["action"] = "hold"
+                            validated["confidence"] = max(0.1, float(validated.get("confidence", 0.5)) - 0.15)
+                            validated["reasoning"] = f"[Consensus Veto: Consensus Disagreement] Secondary: {sec_reason}"
+                            logger.warning(f"Consensus VETO on {symbol} {primary_action.upper()}: secondary recommended HOLD.")
+                        else:
+                            # Recorded, not obeyed. The second opinion usually
+                            # comes from a free model, and it could overrule the
+                            # primary (Claude while it has budget) with no record
+                            # that its vetoes help. The AI scorecard compares
+                            # agreed and disputed trades; set llm_consensus_blocks
+                            # once that shows disputes do worse.
+                            validated["consensus_dispute"] = sec_reason
+                            logger.info(f"Consensus dispute on {symbol} {primary_action.upper()} (advisory): "
+                                        f"secondary would hold: {str(sec_reason)[:160]}")
             except Exception as e:
                 logger.warning(f"Consensus cross-validation error on {symbol}: {e}")
 

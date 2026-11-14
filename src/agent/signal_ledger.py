@@ -332,7 +332,14 @@ def closes_provider(config: Optional[Dict[str, Any]] = None, ttl: float = 3600.0
         try:
             if classify(symbol, config) == 'nse':
                 from src.connectors.nse_connector import NSE_CSV_DIR
+                from src.agent import nse_corporate_actions as nca
                 closes = bm.nse_closes(symbol, NSE_CSV_DIR)
+                # Adjusted for bonus issues, splits and dividends, as Yahoo's
+                # US closes are: read raw, an ex-date scored as a fall.
+                mine = nca.for_symbol(nca.load_actions(), symbol)
+                if mine and closes:
+                    rows = nca.adjust_rows([(d, c, c, c) for d, c in closes.items()], mine)
+                    closes = {r[0]: r[3] for r in rows}
             else:
                 from src.agent.scorecard import bars_to_closes
                 closes = bars_to_closes(chart_data.yfinance_bars(symbol, period='2y'))
