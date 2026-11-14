@@ -82,7 +82,8 @@ def tbill_switch_reason(candidates, tbill_rate_pct: float,
 class SleeveManager:
     def __init__(self, config: Dict[str, Any], nse_order_queue, fundamentals_store,
                 dividend_ledger, llm_orchestrator=None,
-                db_path: str = str(DATA_DIR / 'sleeve.db')):
+                db_path: Optional[str] = None):
+        db_path = db_path or str(DATA_DIR / 'sleeve.db')   # read now, not at import
         sc = config.get('sleeve') if isinstance(config.get('sleeve'), dict) else config
         self.enabled = sc.get('enabled', False)
         self.nse_capital_kes = sc.get('nse_capital_kes', 0.0)

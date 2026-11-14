@@ -98,7 +98,8 @@ Reply with JSON only, in this shape:
 
 class SelfAssessmentEngine:
     def __init__(self, llm_orchestrator, escalation_manager: EscalationManager, config: Dict[str, Any],
-                 db_path: str = str(DATA_DIR / 'improvements.db')):
+                 db_path: Optional[str] = None):
+        db_path = db_path or str(DATA_DIR / 'improvements.db')   # read now, not at import
         self.llm = llm_orchestrator
         self.escalation_manager = escalation_manager
         self.config = config

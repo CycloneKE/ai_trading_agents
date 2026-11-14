@@ -73,7 +73,8 @@ CREATE TABLE IF NOT EXISTS portfolio_history (
 
 
 class EscalationManager:
-    def __init__(self, db_path: str = str(DATA_DIR / 'escalations.db')):
+    def __init__(self, db_path: Optional[str] = None):
+        db_path = db_path or str(DATA_DIR / 'escalations.db')   # read now, not at import
         os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
         self._lock = threading.Lock()
         self.db_path = db_path

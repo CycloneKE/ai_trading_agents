@@ -84,7 +84,8 @@ Ensure the output is strictly valid raw JSON. Do not wrap in markdown blocks, do
 
 
 class SectorSpecialistManager:
-    def __init__(self, llm_orchestrator, db_path: str = str(DATA_DIR / 'escalations.db')):
+    def __init__(self, llm_orchestrator, db_path: Optional[str] = None):
+        db_path = db_path or str(DATA_DIR / 'escalations.db')   # read now, not at import
         self.llm = llm_orchestrator
         self.db_path = db_path
         self._lock = threading.Lock()
