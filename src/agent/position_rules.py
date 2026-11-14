@@ -68,10 +68,22 @@ def replay(fills: Iterable[Dict[str, Any]]) -> Dict[str, PositionState]:
     (ISO timestamp). A sell larger than the holding is treated as closing it:
     long-only books cannot be short, and older records that were are not
     this book's business.
+
+    A row with side 'split' and a `factor` (shares after / shares before) is
+    a bonus issue or share split: the holding becomes that many times larger,
+    in whole shares, at the same total cost, so the cost per share falls.
+    It is not a buy: entries and the opening date are unchanged, and the last
+    entry price is put in the new shares' terms.
     """
     book: Dict[str, PositionState] = {}
     for f in fills:
         s = book.setdefault(str(f['symbol']).upper(), PositionState())
+        if f.get('side') == 'split':
+            factor = float(f.get('factor') or 0.0)
+            if s.held and factor > 0:
+                s.quantity = float(int(s.quantity * factor + 1e-9))
+                s.last_entry_price = s.last_entry_price / factor
+            continue
         qty, price = float(f['quantity']), float(f['price'])
         fees, when = float(f.get('fees') or 0.0), f.get('time')
         if qty <= 0 or price <= 0:

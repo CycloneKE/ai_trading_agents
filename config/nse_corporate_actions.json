@@ -1,0 +1,4 @@
+{
+  "_comment": "NSE bonus issues and share splits, for adjusting prices (src/agent/nse_corporate_actions.py) and the paper account's share count. Add each company announcement: symbol, type (bonus or split), ratio and ex_date. A bonus ratio \"1:10\" is one new share for every ten held; a split ratio \"2:1\" is two shares for every one. Dividends go in nse_dividend_events.json, which is read for price adjustment too. See config/nse_dividends.README.md.",
+  "events": []
+}

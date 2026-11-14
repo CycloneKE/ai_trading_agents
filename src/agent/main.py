@@ -589,6 +589,13 @@ class TradingAgent:
                 except Exception as e:
                     logger.warning(f"NSE real-history backfill failed: {e}")
             histories.update(nse_history)
+            # The NSE history is adjusted for corporate actions up to its last
+            # bar; one dated later is applied when it takes effect
+            # (_apply_nse_actions).
+            through = self.__dict__.setdefault('_nse_adjusted_through', {})
+            for s, h in nse_history.items():
+                if h.get('last_date'):
+                    through[s] = h['last_date']
 
         if histories:
             sm.warm_start({s: h['close'] for s, h in histories.items()})
@@ -1738,6 +1745,12 @@ class TradingAgent:
         except Exception as e:
             logger.error(f"NSE trading list sync failed: {e}")
         real_prices = {}  # this cycle's real quotes, for the equity snapshot
+        try:
+            from src.agent import nse_corporate_actions as nca
+            nse_actions = nca.load_actions()
+        except Exception as e:
+            logger.error(f"NSE corporate actions unreadable; prices unadjusted this pass: {e}")
+            nse_actions = []
 
         for symbol in nse_symbols:
             try:
@@ -1789,6 +1802,11 @@ class TradingAgent:
                         except Exception as e:
                             logger.debug(f"NSE decision record error: {e}")
                     continue
+
+                # A bonus issue, split or dividend that took effect since the
+                # held prices were adjusted: put them in today's terms before
+                # anything compares today's price with them.
+                TradingAgent._apply_nse_actions(self, symbol, nse_actions)
 
                 # Stops before signals, and whatever the signals say: a paper
                 # position below its stop-loss or trailing stop is closed now,
@@ -1965,6 +1983,40 @@ class TradingAgent:
                     paper.record_equity(real_prices)
             except Exception as e:
                 logger.debug(f"NSE paper equity snapshot failed: {e}")
+
+    def _apply_nse_actions(self, symbol: str, actions, today=None) -> float:
+        """Rescale `symbol`'s held prices for corporate actions that took
+        effect since they were last adjusted; returns the factor applied.
+
+        The warm-start reads history already adjusted up to its last bar.
+        An action dated after that (normally today's ex-date) would otherwise
+        show the strategies, the regime filter and the volatility tracker a
+        fall that is not one. Each action is applied once.
+        """
+        from datetime import date as _date
+        from src.agent import nse_corporate_actions as nca
+        today = today or datetime.utcnow().date()
+        through = self.__dict__.setdefault('_nse_adjusted_through', {})
+        last = through.get(symbol)
+        if last is None:
+            # Never warm-started: nothing held from before today to adjust.
+            through[symbol] = today.isoformat()
+            return 1.0
+        due = nca.effective(nca.for_symbol(actions, symbol), _date.fromisoformat(last), today)
+        if not due:
+            return 1.0
+        from src.connectors.nse_connector import NSE_CSV_DIR
+        factor = nca.combined_factor(due, lambda a: nca.last_close_before(symbol, a.ex_date, NSE_CSV_DIR))
+        sm = self.components.get('strategy_manager')
+        if sm is not None and hasattr(sm, 'rescale'):
+            sm.rescale(symbol, factor)
+        tracker = getattr(self, 'volatility', None)
+        if tracker is not None and hasattr(tracker, 'rescale'):
+            tracker.rescale(symbol, factor)
+        through[symbol] = today.isoformat()
+        logger.info(f"NSE {symbol}: held prices adjusted by {factor:.4f} for "
+                    f"{', '.join(a.kind + ' ' + a.ex_date.isoformat() for a in due)}")
+        return factor
 
     def _nse_research(self, symbol: str) -> Optional[Dict[str, Any]]:
         """What AIB-AXYS says about an NSE stock, for the AI's trade review:

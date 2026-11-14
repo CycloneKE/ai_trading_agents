@@ -342,6 +342,29 @@ class StrategyManager:
             logger.info(f"Warm-started {seeded} strategy/symbol history buffers")
         return seeded
 
+    def rescale(self, symbol: str, factor: float) -> int:
+        """Multiply every buffered price of `symbol` by `factor`.
+
+        For an NSE bonus issue, split or dividend taking effect while running
+        (nse_corporate_actions.py): the bars already held are put in the
+        post-event terms of the prices that follow, as a fresh warm-start from
+        adjusted history would. Returns the buffers changed.
+        """
+        if not factor or factor == 1.0:
+            return 0
+        changed = 0
+        for strategy in self.strategies.values():
+            store = getattr(strategy, 'historical_data', None)
+            if isinstance(store, dict) and store.get(symbol):
+                store[symbol] = [p * factor for p in store[symbol]]
+                changed += 1
+        detector = self.regime_detector
+        if detector is not None and getattr(detector, '_closes', {}).get(symbol):
+            buf = detector._closes[symbol]
+            detector._closes[symbol] = type(buf)((p * factor for p in buf), maxlen=buf.maxlen)
+            changed += 1
+        return changed
+
     def forget(self, symbols) -> int:
         """Drop the price buffers of symbols the agent no longer trades.
 

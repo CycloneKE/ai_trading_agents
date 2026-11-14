@@ -53,6 +53,7 @@ STOP_DEFAULTS = {'enabled': True, 'stop_loss_pct': 0.08, 'trailing_stop_pct': 0.
 # resident individual: final, deducted at source (KRA).
 DIVIDEND_WHT_DEFAULT = 0.05
 DIVIDEND_EVENTS_DEFAULT = 'config/nse_dividend_events.json'
+CORPORATE_ACTIONS_DEFAULT = 'config/nse_corporate_actions.json'
 
 # Idle cash is not left at zero: like a real account's cash swept into a
 # money market fund or Treasury bills, it earns interest, daily, with 15%
@@ -68,6 +69,13 @@ INTEREST_WHT_DEFAULT = 0.15
 # three: they sell whenever they trigger.
 LIMIT_DEFAULTS = {'max_adv_fraction': 0.10, 'adv_days': 20, 'min_holding_days': 30,
                   'max_new_positions_per_week': 2, 'settlement_days': 3}
+
+
+def _csv_close_before(symbol: str, day) -> Optional[float]:
+    """The last real close before `day` in the scraper's NSE history."""
+    from src.agent import nse_corporate_actions as nca
+    from src.connectors.nse_connector import NSE_CSV_DIR
+    return nca.last_close_before(symbol, day, NSE_CSV_DIR)
 
 
 def _parse(ts: Optional[str]) -> datetime:
@@ -160,6 +168,10 @@ class NsePaperAccount:
         self.limits = rule(LIMIT_DEFAULTS, cfg.get('trading_limits'))
         self.dividend_wht = float(cfg.get('dividend_withholding_pct', DIVIDEND_WHT_DEFAULT))
         self.dividend_events_path = cfg.get('dividend_events_path', DIVIDEND_EVENTS_DEFAULT)
+        self.corporate_actions_path = cfg.get('corporate_actions_path', CORPORATE_ACTIONS_DEFAULT)
+        # The last real close before a day, for a dividend's price factor;
+        # replaceable in tests. Default: the scraper's CSV history.
+        self.close_before = None
         self._cash_yield_set = cfg.get('cash_yield_pct')
         self.interest_wht = float(cfg.get('interest_withholding_pct', INTEREST_WHT_DEFAULT))
         self.started_at = queue.paper_account_started_at() if self.enabled else None
@@ -195,10 +207,37 @@ class NsePaperAccount:
     def _fills(self):
         return self.queue.fills(book=BOOK, since=self.started_at)
 
-    def states(self) -> Dict[str, PositionState]:
-        return replay({'symbol': f['symbol'], 'side': f['side'], 'quantity': f['quantity'],
-                       'price': f['price'], 'fees': f['fees_kes'], 'time': f['fill_at']}
-                      for f in self._fills())
+    def corporate_actions(self):
+        """Bonus issues, splits and dividends (nse_corporate_actions.py)."""
+        from src.agent import nse_corporate_actions as nca
+        try:
+            return nca.load_actions(self.corporate_actions_path, self.dividend_events_path)
+        except Exception as e:
+            logger.error(f"NSE corporate actions unreadable: {e}")
+            return []
+
+    def _events(self, until: Optional[datetime] = None, fills=None) -> List[Dict[str, Any]]:
+        """Fills and share actions (bonus issues, splits) in time order.
+
+        A share action counts from the start of its ex-date: shares held at
+        the previous close receive it, and a buy on the ex-date does not.
+        """
+        until = until or datetime.utcnow()
+        rows = [{'symbol': f['symbol'], 'side': f['side'], 'quantity': f['quantity'],
+                 'price': f['price'], 'fees': f['fees_kes'], 'time': f['fill_at']}
+                for f in (fills if fills is not None else self._fills())]
+        opened = _parse(self.started_at) if self.started_at else None
+        for a in self.corporate_actions():
+            if a.kind not in ('bonus', 'split'):
+                continue
+            when = datetime(a.ex_date.year, a.ex_date.month, a.ex_date.day)
+            if when <= until and (opened is None or when > opened):
+                rows.append({'symbol': a.symbol, 'side': 'split', 'factor': a.share_factor,
+                             'quantity': 0, 'price': 0, 'time': when.isoformat()})
+        return sorted(rows, key=lambda r: _parse(r['time']) if r.get('time') else datetime(1970, 1, 1))
+
+    def states(self, now: Optional[datetime] = None) -> Dict[str, PositionState]:
+        return replay(self._events(now))
 
     def account_fees(self, now: Optional[datetime] = None) -> float:
         """Yearly account fees charged so far: one per account year begun."""
@@ -245,11 +284,11 @@ class NsePaperAccount:
             if paid > now or (opened and ex < opened):
                 continue
             sym = str(e['symbol']).upper()
-            held = 0.0
-            for f in fills:
-                if f['symbol'] == sym and _parse(f['fill_at']) < ex:
-                    held += f['quantity'] if f['side'] == 'buy' else -f['quantity']
-            shares = int(round(max(held, 0.0)))
+            # Shares held the day before the ex-date, bonus shares included.
+            before = [r for r in self._events(ex, fills) if r['symbol'] == sym
+                      and _parse(r['time']) < ex]
+            state = replay(before).get(sym)
+            shares = int(round(state.quantity)) if state and state.held else 0
             if shares <= 0:
                 continue
             gross = round(shares * float(e['dividend_kes']), 2)
@@ -417,10 +456,9 @@ class NsePaperAccount:
         state = self.states().get(symbol.upper())
         if not state or not state.held:
             return None
-        high = self.queue.paper_high(symbol.upper(), state.opened_at or '',
-                                     max(price, state.last_entry_price))
+        avg, entry = self._stop_references(symbol.upper(), state)
+        high = self.queue.paper_high(symbol.upper(), state.opened_at or '', max(price, entry))
         stop, trail = self.stop_distances(atr_pct)
-        avg = state.cost / state.quantity
         reason = stop_triggered(price, avg, high, stop, trail)
         if not reason:
             return None
@@ -429,14 +467,45 @@ class NsePaperAccount:
                f"trailing stop: {price:.2f} is {1 - price / high:.1%} below the high {high:.2f}")
         return reason, int(round(state.quantity)), why
 
+    def _stop_references(self, symbol: str, state: PositionState,
+                         scale_high: bool = True) -> Tuple[float, float]:
+        """(cost per share, last entry price) as the stops should read them.
+
+        A bonus issue or split is already in the cost per share (the replay
+        adds the shares at no cost). A dividend is not: the price drops by the
+        dividend on the ex-date while the holder is paid it, so the cost the
+        stop-loss measures from is scaled by the same factor, as is the stored
+        high the trailing stop measures from (once per action, kept in the
+        database).
+        """
+        from src.agent import nse_corporate_actions as nca
+        avg = state.cost / state.quantity
+        entry = state.last_entry_price
+        opened = _parse(state.opened_at).date() if state.opened_at else None
+        today = datetime.utcnow().date()
+        due = nca.effective(nca.for_symbol(self.corporate_actions(), symbol), opened, today)
+        if not due:
+            return avg, entry
+        lookup = self.close_before or _csv_close_before
+        for a in due:
+            factor = a.price_factor(lookup(symbol, a.ex_date) if a.kind == 'dividend' else None)
+            if factor == 1.0:
+                continue
+            if a.kind == 'dividend':
+                avg *= factor
+                entry *= factor
+            if scale_high:
+                self.queue.scale_paper_high(symbol, state.opened_at or '', a.key, factor)
+        return avg, entry
+
     def stop_levels(self, symbol: str, atr_pct: Optional[float] = None) -> Optional[Dict[str, float]]:
         """Where a holding's stops sit now, for display. Updates nothing."""
         state = self.states().get(symbol.upper())
         if not state or not state.held or not self.stop_rule.get('enabled'):
             return None
         stop, trail = self.stop_distances(atr_pct)
-        avg = state.cost / state.quantity
-        high = self.queue.paper_high_peek(symbol.upper(), state.opened_at or '') or state.last_entry_price
+        avg, entry = self._stop_references(symbol.upper(), state, scale_high=False)
+        high = self.queue.paper_high_peek(symbol.upper(), state.opened_at or '') or entry
         return {'stop_loss_kes': round(avg * (1 - stop), 2),
                 'trailing_stop_kes': round(high * (1 - trail), 2),
                 'high_since_entry_kes': round(high, 2), 'stop_loss_pct': stop,
