@@ -25,7 +25,7 @@ def _ev(is_ret, is_n, oos_ret, oos_n):
 class _Scripted:
     """An evaluator that scores settings from a table, recording its calls."""
 
-    def __init__(self, table, default=_ev(0.02, 10, 0.01, 8)):
+    def __init__(self, table, default=_ev(0.02, 40, 0.01, 35)):
         self.table, self.default, self.calls = table, default, []
 
     def __call__(self, name, cfg, params, series, holdout):
@@ -56,32 +56,32 @@ RULE = {**st.DEFAULTS}
 
 
 def test_a_better_held_out_result_that_holds_in_sample_is_adopted():
-    base = _ev(0.02, 10, 0.01, 8)
-    better = ({'threshold': 0.015}, _ev(0.03, 12, 0.03, 9))
+    base = _ev(0.02, 40, 0.01, 35)
+    better = ({'threshold': 0.015}, _ev(0.03, 40, 0.03, 35))
     assert st.choose(base, [better], RULE) == better
 
 
 @pytest.mark.parametrize('candidate, why', [
-    (_ev(0.03, 12, 0.013, 9), 'improvement under the margin'),
-    (_ev(0.01, 12, 0.05, 9), 'worse in-sample: fitted to the held-out stretch'),
-    (_ev(0.03, 12, 0.05, 3), 'too few held-out trades to mean anything'),
-    (_ev(0.03, 2, 0.05, 9), 'too few in-sample trades'),
+    (_ev(0.03, 40, 0.013, 35), 'improvement under the margin'),
+    (_ev(0.01, 40, 0.05, 35), 'worse in-sample: fitted to the held-out stretch'),
+    (_ev(0.03, 40, 0.05, 20), 'too few held-out trades to mean anything (30 needed)'),
+    (_ev(0.03, 20, 0.05, 35), 'too few in-sample trades (30 needed)'),
 ])
 def test_a_candidate_that_fails_any_guard_is_not_adopted(candidate, why):
-    assert st.choose(_ev(0.02, 10, 0.01, 8), [({'threshold': 0.015}, candidate)], RULE) is None, why
+    assert st.choose(_ev(0.02, 40, 0.01, 35), [({'threshold': 0.015}, candidate)], RULE) is None, why
 
 
 def test_the_best_qualifying_candidate_wins():
-    base = _ev(0.02, 10, 0.01, 8)
-    a = ({'threshold': 0.015}, _ev(0.03, 12, 0.03, 9))
-    b = ({'threshold': 0.025}, _ev(0.03, 12, 0.04, 9))
+    base = _ev(0.02, 40, 0.01, 35)
+    a = ({'threshold': 0.015}, _ev(0.03, 40, 0.03, 35))
+    b = ({'threshold': 0.025}, _ev(0.03, 40, 0.04, 35))
     assert st.choose(base, [a, b], RULE) == b
 
 
 # ----------------------------------------------------------- a tuning run
 
 def test_an_adopted_setting_is_applied_saved_and_restored(tmp_path):
-    ev = _Scripted({('momentum', (('threshold', 0.025),)): _ev(0.04, 12, 0.03, 9)})
+    ev = _Scripted({('momentum', (('threshold', 0.025),)): _ev(0.04, 40, 0.03, 35)})
     manager = _manager()
     tuner = _tuner(tmp_path, ev, manager)
     report = {r['strategy']: r for r in tuner.run(['momentum'])}

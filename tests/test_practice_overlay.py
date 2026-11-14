@@ -1,4 +1,10 @@
-"""Tests for the practiced-parameter overlay in StrategyManager."""
+"""Tuned strategy settings applied at start-up (data/strategy_params.json).
+
+The weekly strategy tuner keeps its adopted settings under "params"; the
+practice session used to write a flat {strategy: settings} file there and is
+now report-only, but an old file is still read. Only the settings the tuner
+owns for a strategy's family are applied.
+"""
 import json
 import os
 import sys
@@ -16,18 +22,29 @@ CONFIG = {
 }
 
 
-def test_overlay_applies_promoted_params(tmp_path, monkeypatch):
-    # strategy_manager reads the overlay from the repo-anchored DATA_DIR
-    # (not the CWD), so isolate the test by pointing DATA_DIR at tmp_path
-    # rather than chdir'ing into it.
+def test_the_tuners_settings_apply_at_start_up(tmp_path, monkeypatch):
+    # strategy_manager reads the file from the repo-anchored DATA_DIR
+    # (not the CWD), so point DATA_DIR at tmp_path.
     monkeypatch.setattr('src.agent.strategy_manager.DATA_DIR', tmp_path)
     with open(tmp_path / 'strategy_params.json', 'w') as f:
-        json.dump({'momentum': {'rsi_oversold': 35}}, f)
+        json.dump({'params': {'momentum': {'threshold': 0.03}}, 'last_run': 0, 'log': []}, f)
 
     mgr = StrategyManager(CONFIG)
     strat = mgr.strategies['momentum']
-    assert strat.rsi_oversold == 35        # promoted value wins
-    assert strat.lookback_period == 50     # untouched knobs keep config values
+    assert strat.momentum_threshold == 0.03   # tuned value wins
+    assert strat.lookback_period == 50        # untouched knobs keep config values
+
+
+def test_an_old_flat_file_applies_only_the_strategys_own_settings(tmp_path, monkeypatch):
+    """The practice session wrote RSI levels and lookback_period onto every
+    technical strategy, momentum included, which does not use RSI levels."""
+    monkeypatch.setattr('src.agent.strategy_manager.DATA_DIR', tmp_path)
+    with open(tmp_path / 'strategy_params.json', 'w') as f:
+        json.dump({'momentum': {'threshold': 0.025, 'rsi_oversold': 35, 'lookback_period': 30}}, f)
+
+    strat = StrategyManager(CONFIG).strategies['momentum']
+    assert strat.momentum_threshold == 0.025
+    assert strat.rsi_oversold == 30 and strat.lookback_period == 50
 
 
 def test_missing_or_corrupt_overlay_is_harmless(tmp_path, monkeypatch):
