@@ -55,6 +55,9 @@ SKIP_MEANING = {
     'min_notional': ('check sizing', 'position sized below the broker minimum; '
                                      'capital or risk-per-trade may be too small'),
     'pdt_guard': ('check sizing', 'pattern-day-trader rule blocked the trade'),
+    'stale_price': ('DEGRADED', 'the latest real price was too old, so the trade was refused; '
+                                'a price feed stopped updating or the stock is suspended'),
+    'loss_limit': ('RISK LIMIT', 'a buy was refused because the daily loss or drawdown limit was reached'),
 }
 
 # Signals the agent's rules settle before the AI is asked (main.py
@@ -62,7 +65,7 @@ SKIP_MEANING = {
 # missing review.
 SETTLED_BEFORE_REVIEW = {'market_closed', 'no_position', 'order_pending', 'position_unknown',
                          'already_held', 'add_not_profitable', 'fallback_price', 'stale_price',
-                         'halted', 'no_broker'}
+                         'halted', 'no_broker', 'loss_limit'}
 
 
 def reading(reason):

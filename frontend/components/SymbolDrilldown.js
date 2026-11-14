@@ -40,7 +40,7 @@ const MARKET_LABEL = { nse: 'NSE KENYA', us_equity: 'US STOCK', crypto: 'CRYPTO'
 
 const reasonColor = (r) => {
   if (!r) return theme.colors.primary;
-  if (['halted', 'risk_limits', 'pdt_guard'].includes(r)) return theme.colors.danger;
+  if (['halted', 'risk_limits', 'loss_limit', 'pdt_guard'].includes(r)) return theme.colors.danger;
   if (['llm_veto', 'bias_downgrade', 'consensus_disagreement'].includes(r)) return theme.colors.accent;
   if (r === 'hold') return theme.colors.textMuted;
   return theme.colors.warning;

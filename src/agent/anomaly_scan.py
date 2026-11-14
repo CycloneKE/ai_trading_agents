@@ -71,7 +71,12 @@ BLOCKED = {
                          "Check the broker connection on the Risk & System page."),
     'no_account_info': ("the broker account could not be read", "Check the broker connection on the Risk & System page."),
     'fallback_price': ("the price was not a real market price", "Check the price feeds on the Risk & System page."),
-    'stale_price': ("the latest price is too old (the stock may be suspended)", "No action unless the stock trades again."),
+    'stale_price': ("the latest real price is too old to act on",
+                    "On the NSE the stock may be suspended. For a US stock, crypto or currency the price feed has "
+                    "stopped updating; check the data feeds on the Risk & System page."),
+    'loss_limit': ("the account's daily loss or drawdown limit is reached, so new buys are refused",
+                   "Sells and stops still run. A daily limit clears the next day; for a drawdown, review the "
+                   "losses, then reset the peak on the Risk & System page if trading should continue."),
     'no_price': ("the agent could not get a current price to size the order, so it placed nothing",
                  "Harmless while the market is closed. If it continues during trading hours, the price "
                  "source is not answering; check the data feeds on the Risk & System page."),

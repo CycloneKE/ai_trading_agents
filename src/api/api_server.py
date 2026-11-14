@@ -1182,6 +1182,34 @@ class TradingAPI:
                 logger.error(f"Error resuming trading: {e}")
                 return jsonify({'error': str(e)}), 500
 
+        @self.app.route('/api/risk/loss-limits', methods=['GET'])
+        @require_rate_limit
+        @token_required
+        def get_loss_limits():
+            """The account's daily loss and drawdown against their limits, and
+            whether new buys are being refused (src/agent/loss_limits.py)."""
+            limits = getattr(self.trading_agent, 'loss_limits', None)
+            if limits is None:
+                return jsonify({'enabled': False})
+            return jsonify({'enabled': True, **limits.status()})
+
+        @self.app.route('/api/risk/loss-limits/reset', methods=['POST'])
+        @require_rate_limit
+        @token_required
+        @role_required('operator')
+        def reset_loss_limit_peak():
+            """Make the current equity the drawdown reference, clearing a
+            drawdown breach. Operator-only. Body: {"confirm": true}"""
+            limits = getattr(self.trading_agent, 'loss_limits', None)
+            if limits is None:
+                return jsonify({'error': 'loss limits are not running'}), 404
+            data = request.get_json(silent=True) or {}
+            if data.get('confirm') is not True:
+                return jsonify({'error': 'confirmation required: pass {"confirm": true}'}), 400
+            from flask import g
+            by = getattr(g, 'current_user', None) or 'an operator'
+            return jsonify({'enabled': True, **limits.reset_peak(by=str(by))})
+
         @self.app.route('/api/alerts', methods=['GET'])
         @require_rate_limit
         @token_required
