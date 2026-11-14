@@ -665,5 +665,34 @@
   },
   "heartbeat_timeout_seconds": 300,
   "llm_veto_enabled": false,
-  "llm_consensus_blocks": false
+  "llm_consensus_blocks": false,
+  "momentum_sleeve": {
+    "_comment": "US account (src/agent/momentum_sleeve.py). A share of the strategies' money held in the funds with the strongest 12-1 momentum (the return from about thirteen months to one month ago), rebalanced on the first US session of each month: the approach with the strongest published record, run live beside the technical strategies so the scorecard can compare them. share is of the active share (0.3 x 0.55 = 16.5% of equity). universe must not contain a fund the technical strategies or the core trade (any that does is dropped). top_n leaders still rising are held equal weight, the rest in cash; no stop-losses, no borrowing, no buys while a loss limit is reached. enabled false stops new rebalances; it does not sell what is held.",
+    "enabled": true,
+    "share": 0.3,
+    "universe": [
+      "XLK",
+      "XLI",
+      "XLY",
+      "XLP",
+      "XLU",
+      "XLB",
+      "XLRE",
+      "XLC",
+      "IWM",
+      "EFA",
+      "EEM",
+      "TLT",
+      "DBC"
+    ],
+    "rotation": {
+      "lookback": 12,
+      "skip_recent": 1,
+      "top_n": 3,
+      "min_momentum": 0.0,
+      "absolute_filter": true,
+      "max_weight": 0.5
+    },
+    "min_trade_usd": 100
+  }
 }

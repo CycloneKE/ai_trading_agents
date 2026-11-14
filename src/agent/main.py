@@ -1618,6 +1618,15 @@ class TradingAgent:
                 except Exception as e:
                     logger.error(f"Core portfolio error: {e}")
 
+                # The momentum sleeve: 12-1 relative strength over its own
+                # funds, rebalanced monthly (momentum_sleeve.py).
+                try:
+                    self._run_momentum_cycle()
+                    if getattr(self, 'heartbeat_monitor', None):
+                        self.heartbeat_monitor.ping()
+                except Exception as e:
+                    logger.error(f"Momentum sleeve error: {e}")
+
                 # Dead-Man's Switch heartbeat ping
                 if getattr(self, 'heartbeat_monitor', None):
                     self.heartbeat_monitor.ping()
@@ -2393,8 +2402,10 @@ class TradingAgent:
                     f"{len(placed)} order(s)")
         return placed
 
-    def _place_core_orders(self, broker, planned, prices, now) -> List[Dict[str, Any]]:
+    def _place_core_orders(self, broker, planned, prices, now, strategy: Optional[str] = None
+                           ) -> List[Dict[str, Any]]:
         from src.agent import core_portfolio as core
+        strategy = strategy or core.STRATEGY
         from src.agent.order_journal import make_client_order_id
         from src.agent.position_sizing import size_order
         from src.connectors.base_broker import OrderRequest
@@ -2416,11 +2427,11 @@ class TradingAgent:
                 if not sized:
                     continue
                 qty, tif = sized.quantity, sized.time_in_force
-            coid = make_client_order_id(core.STRATEGY, sym, side, day_key)
+            coid = make_client_order_id(strategy, sym, side, day_key)
             if self.order_journal and not self.order_journal.record_intent(
-                    coid, sym, side, float(qty), 'market', strategy=core.STRATEGY,
-                    strategy_weights={core.STRATEGY: 1.0}):
-                logger.info(f"Core order already journaled today ({coid}); skipping")
+                    coid, sym, side, float(qty), 'market', strategy=strategy,
+                    strategy_weights={strategy: 1.0}):
+                logger.info(f"{strategy} order already journaled today ({coid}); skipping")
                 continue
             result = broker.place_order(OrderRequest(
                 symbol=sym, quantity=float(qty), side=side, order_type='market',
@@ -2444,6 +2455,115 @@ class TradingAgent:
         from src.agent.core_portfolio import active_equity
         cfg, _ = TradingAgent._core(self)
         return active_equity(equity, cfg)
+
+    def _momentum_sleeve(self):
+        """The momentum sleeve's settings and saved state, read once."""
+        if getattr(self, '_sleeve_cfg', None) is None:
+            from src.agent.core_portfolio import CoreState
+            from src.agent.momentum_sleeve import config_from_dict
+            core_cfg, _ = TradingAgent._core(self)
+            self._sleeve_cfg = config_from_dict(
+                (self.config or {}).get('momentum_sleeve'),
+                (self.config.get('data_manager', {}) or {}).get('symbols', []),
+                core_cfg.symbols if core_cfg.enabled else ())
+            self._sleeve_state = CoreState(str(DATA_DIR / 'momentum_sleeve.json'))
+            self._sleeve_last_check = 0.0
+            self._sleeve_value = 0.0
+        return self._sleeve_cfg, self._sleeve_state
+
+    def _sleeve_symbols(self) -> set:
+        cfg, _ = TradingAgent._momentum_sleeve(self)
+        return set(cfg.universe) if cfg.enabled else set()
+
+    def _sleeve_value_now(self) -> float:
+        """Market value of the sleeve's funds at the last sleeve check."""
+        cfg, _ = TradingAgent._momentum_sleeve(self)
+        return float(getattr(self, '_sleeve_value', 0.0) or 0.0) if cfg.enabled else 0.0
+
+    def _technical_equity(self, equity: float) -> float:
+        """What the technical strategies size from: the active share, less
+        the momentum sleeve's part of it when the sleeve is on."""
+        active = TradingAgent._active_equity(self, equity)
+        cfg, _ = TradingAgent._momentum_sleeve(self)
+        return active * (1.0 - cfg.share) if cfg.enabled else active
+
+    def _run_momentum_cycle(self, now: Optional[datetime] = None, fetch_history=None,
+                            price_for=None) -> List[Dict[str, Any]]:
+        """Rebalance the momentum sleeve on the first US session of a month.
+
+        Never while halted; buys nothing while a loss limit is reached (its
+        sells still go); never borrows. Returns the orders placed.
+        """
+        from src.agent import core_portfolio as core
+        from src.agent import momentum_sleeve as ms
+        cfg, state = TradingAgent._momentum_sleeve(self)
+        if not cfg.enabled or self.trading_halted:
+            return []
+        if now is None and time.time() - self._sleeve_last_check < 900:
+            return []
+        self._sleeve_last_check = time.time()
+        now = now or datetime.now(timezone.utc)
+        bm = self.components.get('broker_manager')
+        broker = bm.get_broker() if bm else None
+        if not broker or not broker.is_connected:
+            return []
+        acct = broker.get_account_info()
+        if not acct or not acct.equity:
+            return []
+        fetch_pos = getattr(broker, 'fetch_positions', None)
+        positions = fetch_pos() if callable(fetch_pos) else (broker.get_positions() or [])
+        held, values, prices = {}, {}, {}
+        for p in positions:
+            sym = str(getattr(p, 'symbol', '')).upper()
+            if sym in cfg.universe:
+                qty = float(getattr(p, 'quantity', 0) or 0)
+                px = float(getattr(p, 'current_price', 0) or 0)
+                held[sym] = qty
+                values[sym] = float(getattr(p, 'market_value', 0) or qty * px)
+                if px > 0:
+                    prices[sym] = px
+        self._sleeve_value = sum(values.values())
+        if not core.us_session_open(now):
+            return []
+        reason = ms.due(state.last_rebalance, now.date())
+        if not reason:
+            return []
+        fetch_open = getattr(broker, 'fetch_open_orders', None)
+        for sym in set(held) | set(state.data.get('targets') or {}):
+            pending = fetch_open(sym) if callable(fetch_open) else (broker.get_orders(sym) or [])
+            if any(getattr(o, 'symbol', '').upper() == sym for o in pending):
+                logger.info(f"Momentum sleeve waits: an order for {sym} is still working")
+                return []
+
+        if fetch_history is None:
+            from src.agent.history_warmstart import fetch_daily_history
+            fetch_history = fetch_daily_history
+        history = fetch_history(list(cfg.universe), bars=cfg.bars_needed)
+        closes = {s: (history.get(s) or {}).get('close', []) for s in cfg.universe}
+        plan = ms.targets(closes, cfg)
+        weights = plan['weights']
+        if price_for is None:
+            from src.utils.real_price_feed import price_feed
+            price_for = price_feed.get_price
+        for sym in set(weights) | set(held):
+            if sym not in prices:
+                px = price_for(sym) or (closes.get(sym) or [None])[-1]
+                if px:
+                    prices[sym] = float(px)
+
+        sleeve_value = TradingAgent._active_equity(self, float(acct.equity)) * cfg.share
+        planned = core.plan_orders(weights, sleeve_value, held, prices, cfg.min_trade_usd)
+        limits = getattr(self, 'loss_limits', None)
+        if limits is not None and limits.blocks_buys():
+            planned = [o for o in planned if o['side'] == 'sell']
+            logger.warning("Momentum sleeve: a loss limit is reached; selling only this month")
+        planned = core.fit_to_cash(planned, float(getattr(acct, 'cash', 0) or 0))
+        placed = TradingAgent._place_core_orders(self, broker, planned, prices, now, strategy=ms.STRATEGY)
+        state.save(last_rebalance=now.date().isoformat(), targets=weights, ranking=plan['ranking'],
+                   reason=reason, sleeve_value_target=round(sleeve_value, 2))
+        logger.info(f"Momentum sleeve rebalance ({reason}): holding "
+                    f"{ {s: round(w, 3) for s, w in weights.items()} or 'cash'}, {len(placed)} order(s)")
+        return placed
 
     def _check_risk_limits(self, risk_assessment: Dict[str, Any]) -> bool:
         """
@@ -2691,8 +2811,11 @@ class TradingAgent:
                             portfolio_value = equity
                             active_invested = max(equity - cash, 0.0)
                         else:
-                            portfolio_value = TradingAgent._active_equity(self, equity)
-                            active_invested = max(equity - cash - TradingAgent._core_value_now(self), 0.0)
+                            # The technical strategies' money: the active share
+                            # less the momentum sleeve's, which trades on its own.
+                            portfolio_value = TradingAgent._technical_equity(self, equity)
+                            active_invested = max(equity - cash - TradingAgent._core_value_now(self)
+                                                  - TradingAgent._sleeve_value_now(self), 0.0)
                         deployed_pct = active_invested / portfolio_value if portfolio_value else 0.0
                         if not hasattr(self, 'cash_policy'):
                             from src.agent.cash_policy import CashDeploymentPolicy
@@ -3152,7 +3275,9 @@ class TradingAgent:
             if not positions:
                 return
             
-            core_symbols = TradingAgent._core_symbols(self)
+            # The core's funds and the momentum sleeve's are held to their
+            # monthly schedule; a daily stop would make them other strategies.
+            core_symbols = TradingAgent._core_symbols(self) | TradingAgent._sleeve_symbols(self)
             for position in positions:
                 try:
                     if position.quantity == 0 or position.cost_basis <= 0:
