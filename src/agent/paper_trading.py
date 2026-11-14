@@ -407,12 +407,15 @@ class PaperTradingBroker(BaseBroker):
             if order.order_type == "market":
                 can_execute = True
             elif order.order_type == "limit":
+                # A limit is the worst price accepted; an exchange fills at
+                # the market when that is better (a price-capped buy placed
+                # just above the market fills at the market, not the cap).
                 if order.side == "buy" and current_price <= order.limit_price:
                     can_execute = True
-                    execution_price = order.limit_price
+                    execution_price = min(current_price, order.limit_price)
                 elif order.side == "sell" and current_price >= order.limit_price:
                     can_execute = True
-                    execution_price = order.limit_price
+                    execution_price = max(current_price, order.limit_price)
             elif order.order_type == "stop":
                 if order.side == "buy" and current_price >= order.stop_price:
                     can_execute = True
@@ -434,6 +437,10 @@ class PaperTradingBroker(BaseBroker):
                     execution_price *= (1.0 + self.slippage_percent / 100.0)
                 else:
                     execution_price *= (1.0 - self.slippage_percent / 100.0)
+                # ...but never past a limit order's limit.
+                if order.order_type in ("limit", "stop_limit") and order.limit_price:
+                    execution_price = (min if order.side == "buy" else max)(execution_price,
+                                                                           order.limit_price)
                 
                 # Execute order
                 self._execute_order(order, execution_price)

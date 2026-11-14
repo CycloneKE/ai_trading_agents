@@ -18,7 +18,7 @@ import threading
 import time
 import math
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -59,7 +59,6 @@ from src.agent.cost_model import classify, costs_for
 # The broker entry (config brokers.forex_paper) that holds the forex paper book.
 FOREX_BOOK = 'forex_paper'
 from src.agent.broker_manager import BrokerManager
-from src.agent.order_execution_engine import OrderExecutionEngine
 from src.agent.realtime_risk_manager import RealTimeRiskManager
 from src.agent.performance_analytics import PerformanceAnalytics
 from src.agent.heartbeat_monitor import HeartbeatMonitor
@@ -76,21 +75,11 @@ except ImportError as e:
     PortfolioOptimizer = None
 from src.agent.event_risk_manager import EventRiskManager
 try:
-    from src.agent.nlp_manager import NLPManager
-except ImportError as e:
-    logger.warning(f"NLP modules disabled due to import error: {e}")
-    NLPManager = None
-try:
     from src.connectors.nse_scraper import NSEPeriodicScraper
     NSE_SCRAPER_AVAILABLE = True
 except ImportError:
     NSE_SCRAPER_AVAILABLE = False
     NSEPeriodicScraper = None
-try:
-    from src.agent.automl_optimizer import AutoMLOptimizer
-except ImportError as e:
-    logger.warning(f"AutoML modules disabled due to import error: {e}")
-    AutoMLOptimizer = None
 
 try:
     from src.api.api_server import TradingAPI
@@ -208,12 +197,6 @@ class TradingAgent:
                 self.config.get('realtime_data', {})
             )
             
-            # Order Execution Engine
-            self.execution_engine = OrderExecutionEngine(
-                self.config.get('execution', {}),
-                self.components['broker_manager']
-            )
-            
             # Real-time Risk Manager
             self.risk_manager = RealTimeRiskManager(
                 self.config.get('risk_management', {}),
@@ -322,22 +305,9 @@ class TradingAgent:
             )
 
             
-            # NLP Engine
-            if NLPManager is not None:
-                self.components['nlp_manager'] = NLPManager(
-                    self.config.get('nlp', {})
-                )
-            else:
-                logger.warning("Skipping NLP Manager initialization (not available)")
-            
-            # AutoML Optimizer
-            if AutoMLOptimizer is not None:
-                self.components['automl_optimizer'] = AutoMLOptimizer(
-                    self.config.get('automl', {})
-                )
-            else:
-                logger.warning("Skipping AutoML Optimizer initialization (not available)")
-            
+            # The NLP manager and AutoML optimiser used to be built here and
+            # never used: news reaches decisions as text in the AI's review,
+            # and the strategy tuner (strategy_tuner.py) tunes settings.
             # Portfolio Optimizer
             if PortfolioOptimizer is not None:
                 self.components['portfolio_optimizer'] = PortfolioOptimizer(
@@ -2987,9 +2957,11 @@ class TradingAgent:
                             # strategies that voted for it, by confidence.
                             weights = ({strategy_name: 1.0} if mode == 'parallel' and per_strategy
                                        else credit_weights(per_strategy, action) or {strategy_name: 1.0})
+                            order_type, limit_price, order_tif = TradingAgent._entry_order_terms(
+                                self, action, asset_type, price, order_tif)
                             if self.order_journal and not self.order_journal.record_intent(
                                     client_order_id, symbol, action, float(quantity),
-                                    'market', strategy=strategy_name, strategy_weights=weights):
+                                    order_type, strategy=strategy_name, strategy_weights=weights):
                                 logger.warning(f"Skipping duplicate order decision: {client_order_id}")
                                 if not symbol_executed:
                                     _note(symbol, 'duplicate')
@@ -2999,11 +2971,14 @@ class TradingAgent:
                                 symbol=symbol,
                                 quantity=float(quantity),
                                 side=action,
-                                order_type='market',
+                                # A buy is a marketable limit (_entry_order_terms);
+                                # a sell stays a market order so an exit always exits.
+                                order_type=order_type,
                                 # fractional orders must be DAY (broker rule);
                                 # whole-share keeps DAY too - the loop
                                 # re-decides every cycle, GTC adds nothing.
                                 time_in_force=order_tif,
+                                limit_price=limit_price,
                                 client_order_id=client_order_id
                             )
 
@@ -3177,6 +3152,29 @@ class TradingAgent:
 
     PDT_EQUITY_THRESHOLD = 25_000
     PDT_MAX_DAY_TRADES = 3
+
+    def _entry_order_terms(self, action: str, asset_type: str, price: float,
+                           tif: str) -> Tuple[str, Optional[float], str]:
+        """(order type, limit price, time in force) for a signal's order.
+
+        A buy on the broker account (US shares, crypto) is a marketable limit:
+        a limit `execution.max_slippage` through the decision price, so it
+        fills at once in a normal market but never at a price that ran away
+        (a gap, a thin book). Every order used to be a plain market order and
+        the configured slippage cap did nothing. A crypto limit is
+        immediate-or-cancel, so an unfilled one does not sit for days. A sell
+        stays a market order: an exit that waited for a price could leave the
+        position open, and the stop-loss would then wait behind it. The forex
+        paper book fills every order at the quote, so it keeps market orders.
+        """
+        cfg = (self.config.get('execution') or {})
+        cap = float(cfg.get('max_slippage', 0.005) or 0.0)
+        if action != 'buy' or asset_type == 'forex' or cap <= 0 or not price or price <= 0 \
+                or not cfg.get('limit_entries', True):
+            return 'market', None, tif
+        limit = price * (1 + cap)
+        limit = round(limit, 2) if limit >= 1 else round(limit, 4)   # US tick: a cent from $1
+        return 'limit', limit, ('ioc' if asset_type == 'crypto' else tif)
 
     def _pdt_blocks_order(self, broker, symbol: str, side: str) -> bool:
         """US pattern-day-trader guard for small accounts.
@@ -3566,17 +3564,6 @@ def create_default_config():
             "slippage": 0.0005
         },
         "trading_loop_interval": 60,
-        "nlp": {
-            "sentiment_model": "vader",
-            "text_processing": {
-                "remove_stopwords": True,
-                "lemmatize": True
-            }
-        },
-        "automl": {
-            "n_trials": 100,
-            "cv_folds": 5
-        },
         "portfolio_optimization": {
             "risk_free_rate": 0.02,
             "frequency": "daily",
@@ -3594,11 +3581,7 @@ def create_default_config():
         },
         "execution": {
             "max_slippage": 0.005,
-            "max_order_size": 10000,
-            "min_order_size": 100,
-            "use_twap": True,
-            "twap_duration": 300,
-            "slice_size": 0.1
+            "limit_entries": True
         },
         "analytics": {
             "benchmark": "SPY",

@@ -41,7 +41,8 @@ class AuditJournal:
     Thread-safe and persistent across system restarts.
     """
     
-    def __init__(self, db_path: str = str(DATA_DIR / 'audit_journal.db')):
+    def __init__(self, db_path: Optional[str] = None):
+        db_path = db_path or str(DATA_DIR / 'audit_journal.db')   # read now, not at import
         self.db_path = db_path
         self._lock = threading.Lock()
         
