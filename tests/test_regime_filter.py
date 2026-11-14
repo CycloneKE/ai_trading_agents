@@ -183,4 +183,5 @@ def test_filter_drops_momentum_in_volatile_chop():
     }
     filtered = filter_signals(signals, VOLATILE_CHOP)
     assert 'momentum' not in filtered
-    assert 'rsi_strategy' in filtered
+    # RSI's hold carries no view, and in chop no fast strategy may buy.
+    assert 'rsi_strategy' not in filtered

@@ -129,7 +129,8 @@ def test_each_market_hears_only_its_own_strategies(manager):
     assert set(manager.strategies) >= {'crypto_trend', 'nse_rotation', 'us_earnings_drift'}
     voters = lambda sym: {n for n in manager.strategies if manager.in_scope(n, sym)}
     assert voters('BTC-USD') == {'crypto_trend'}
-    assert voters('SCOM') == {'momentum', 'mean_reversion', 'rsi_strategy', 'nse_rotation'}
+    # NSE costs about 3.9% a round trip: only the slow rotation votes there.
+    assert voters('SCOM') == {'nse_rotation'}
     assert voters('AAPL') == {'momentum', 'mean_reversion', 'rsi_strategy', 'us_earnings_drift'}
 
 
@@ -137,7 +138,9 @@ def test_history_needs_are_per_market_and_slow_strategies_are_optional(manager):
     assert manager.history_needed('BTC-USD') == 200
     assert manager.history_needed('BTC-USD', required_only=True) == 1
     assert manager.history_needed('SCOM') == 141
-    assert manager.history_needed('SCOM', required_only=True) == 50
+    # Only the abstaining rotation votes on NSE; the warm-start holds NSE to
+    # the screener's history bar instead (test_warmstart_and_crypto).
+    assert manager.history_needed('SCOM', required_only=True) == 1
 
 
 def test_an_abstaining_strategy_does_not_water_down_the_others(manager):

@@ -47,3 +47,17 @@ def _offline_fx_rate(tmp_path_factory, monkeypatch):
     from src.connectors import fx_rate
     monkeypatch.setattr(fx_rate, '_shared', fx_rate.FxRate(
         tmp_path_factory.mktemp('fx') / 'fx_rate.json', sources=[], background=False))
+
+
+@pytest.fixture(autouse=True)
+def _private_alert_log(tmp_path_factory, monkeypatch):
+    """Tests never read or write the real data/alerts.jsonl.
+
+    An alerter built without a log of its own keeps one under the data
+    directory. A test that raised an alert that way (an NSE ticket) left it
+    in the repository's data/alerts.jsonl, and the alerts API test, which
+    expects an empty log, then failed whenever it ran after that test or on
+    a machine where the file was left over from an earlier run.
+    """
+    from src.agent import alerts
+    monkeypatch.setattr(alerts, 'DATA_DIR', tmp_path_factory.mktemp('alerts'))

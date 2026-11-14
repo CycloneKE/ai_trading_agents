@@ -110,8 +110,11 @@ const stopText = (h) => {
   const how = s.source === 'atr' ? 'scaled to this holding\'s own daily range' : 'the fixed setting, until a daily range is known';
   return {
     stop: s.stop_loss_price != null ? price(h.symbol, s.stop_loss_price) : '—',
-    trail: s.trailing_stop_price != null ? price(h.symbol, s.trailing_stop_price) : '—',
-    title: `Sells everything ${(s.stop_loss_pct * 100).toFixed(1)}% below the average cost, or ${(s.trailing_stop_pct * 100).toFixed(1)}% below the high of ${s.high_since_entry != null ? price(h.symbol, s.high_since_entry) : 'n/a'}; ${how}`,
+    trail: s.trailing_stop_pct ? (s.trailing_stop_price != null ? price(h.symbol, s.trailing_stop_price) : '—') : 'none',
+    // A market can have no trailing stop (crypto: its trend strategy exits by itself).
+    title: s.trailing_stop_pct
+      ? `Sells everything ${(s.stop_loss_pct * 100).toFixed(1)}% below the average cost, or ${(s.trailing_stop_pct * 100).toFixed(1)}% below the high of ${s.high_since_entry != null ? price(h.symbol, s.high_since_entry) : 'n/a'}; ${how}`
+      : `Sells everything ${(s.stop_loss_pct * 100).toFixed(1)}% below the average cost, an emergency stop only; no trailing stop, the strategy decides the exit; ${how}`,
   };
 };
 

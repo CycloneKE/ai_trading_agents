@@ -218,7 +218,8 @@ def build_strategy_fn(cfg, manager, engine, stop_loss_pct, trailing_pct,
                       max_position_pct, min_confidence, vol=None, data=None):
     """Bar-by-bar signal -> order translation, mirroring the live loop's rules."""
     from src.agent.position_sizing import volatility_scaled_value
-    from src.agent.volatility import stop_distances
+    from src.agent.cost_model import classify
+    from src.agent.volatility import risk_limits_for, stop_distances
     peak_price = {}
     stats = {'signals': 0, 'stops': 0, 'blocked_cash': 0, 'atr_sized': 0}
     limits = cfg.get('risk_limits', {})
@@ -251,9 +252,11 @@ def build_strategy_fn(cfg, manager, engine, stop_loss_pct, trailing_pct,
             engine_pos = engine.positions.get(sym)
             entry = float(getattr(engine_pos, 'avg_price', 0.0) or 0.0)
             peak_price[sym] = max(peak_price.get(sym, price), price)
-            d = stop_distances(cfg, vol.atr_pct(sym) if vol else None)
+            d = stop_distances(cfg, vol.atr_pct(sym) if vol else None, classify(sym, cfg))
             hit_stop = entry > 0 and price <= entry * (1 - d['stop_loss_pct'])
-            hit_trail = price <= peak_price[sym] * (1 - d['trailing_stop_pct'])
+            # 0.0 means this market has no trailing stop (market_overrides).
+            hit_trail = (d['trailing_stop_pct'] > 0
+                         and price <= peak_price[sym] * (1 - d['trailing_stop_pct']))
             if hit_stop or hit_trail:
                 orders.append(Order(symbol=sym, side=OrderSide.SELL,
                                     order_type=OrderType.MARKET,
@@ -288,7 +291,8 @@ def build_strategy_fn(cfg, manager, engine, stop_loss_pct, trailing_pct,
                 target_value = volatility_scaled_value(
                     pv, atr_pct, confidence=conf,
                     risk_per_trade=risk_per_trade,
-                    stop_atr_mult=stop_mult,
+                    stop_atr_mult=float(risk_limits_for(cfg, classify(sym, cfg)).get(
+                        'stop_loss_atr_mult', stop_mult)),
                     max_position_pct=max_position_pct)
                 qty = math.floor(target_value / price) if price > 0 else 0
                 if qty <= 0:

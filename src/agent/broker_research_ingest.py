@@ -172,22 +172,37 @@ class BrokerResearchIngest:
         Ingest a PDF research paper, extract signals, and apply follow/escalation logic.
         """
         logger.info(f"Starting ingest of research PDF: {file_path}")
-        
-        # 1. Parse PDF with full table & page structure
-        extracted = pdf_parser.extract_all(file_path)
-        text = extracted.get("text", "")
+
+        # 1. Parse the PDF once, with full table & page structure. A file
+        #    that cannot be read is still recorded below, as a failed upload:
+        #    this used to raise before the upload was recorded, so a damaged
+        #    or encrypted PDF never showed on the uploads list, and every
+        #    readable one was parsed twice.
+        extracted, read_error = None, None
+        try:
+            extracted = pdf_parser.extract_all(file_path)
+        except Exception as e:
+            read_error = e
+        text = (extracted or {}).get("text", "")
         resolved_source = detect_research_source(text, os.path.basename(file_path), source)
         logger.info(f"Research publisher resolved: {resolved_source}")
-        
+
         # Record upload in DB
         upload_id = self.escalation_manager.record_upload(os.path.basename(file_path), resolved_source)
-        
+
         try:
             # 0. AIB-AXYS's daily Market Pulse is market data, not a note
             #    with ratings: read its tables exactly (market_pulse.py)
             #    rather than asking for recommendations it does not contain.
+            #    Its own reader keeps the scorecard's numbers whole; when it
+            #    cannot read the file, the pages parsed above stand in.
             from src.agent import market_pulse
-            texts = market_pulse.page_texts(file_path)
+            try:
+                texts = market_pulse.page_texts(file_path)
+            except Exception:
+                if extracted is None:
+                    raise
+                texts = [p.get("text") or "" for p in extracted.get("pages", [])]
             if market_pulse.is_market_pulse(texts):
                 summary = market_pulse.ingest(file_path, texts)
                 self.escalation_manager.update_upload_status(
@@ -210,10 +225,9 @@ class BrokerResearchIngest:
                     "document_type": "bond_auction", "status": "completed", "signals_processed": 0,
                     "auto_followed": [], "escalated": [], "note": note})
 
-            # 1. Parse PDF with full table & page structure
-            extracted = pdf_parser.extract_all(file_path)
-            text = extracted.get("text", "")
-            
+            # 1. The pages parsed at the start.
+            if extracted is None:
+                raise read_error or ValueError("The PDF could not be read.")
             if not text:
                 raise ValueError("No text could be extracted from the PDF.")
                 

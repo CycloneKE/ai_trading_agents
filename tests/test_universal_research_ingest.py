@@ -159,3 +159,36 @@ def test_process_pdf_end_to_end_with_detected_source(tmp_path):
             target_price=150.0,
             rationale="High data center demand"
         )
+
+
+def test_an_unreadable_pdf_is_recorded_as_a_failed_upload(tmp_path):
+    """The October merge parsed the PDF before recording the upload and
+    outside the error handling: a damaged file raised to the caller and
+    never appeared on the uploads list."""
+    em_mock = MagicMock(spec=EscalationManager)
+    em_mock.record_upload.return_value = 9
+    ingest = BrokerResearchIngest(llm_orchestrator=None, escalation_manager=em_mock, config={})
+    broken = tmp_path / "broken.pdf"
+    broken.write_text("not a pdf")
+    with patch("src.utils.pdf_parser.extract_all", side_effect=ValueError("damaged file")), \
+            patch("src.agent.market_pulse.page_texts", side_effect=ValueError("damaged file")):
+        result = ingest.process_pdf(str(broken))
+    assert result["status"] == "failed" and "damaged file" in result["error"]
+    em_mock.record_upload.assert_called_once()
+    em_mock.update_upload_status.assert_called_once_with(9, "failed", 0)
+
+
+def test_a_readable_pdf_is_parsed_once(tmp_path):
+    em_mock = MagicMock(spec=EscalationManager)
+    em_mock.record_upload.return_value = 3
+    ingest = BrokerResearchIngest(llm_orchestrator=None, escalation_manager=em_mock, config={})
+    pdf = tmp_path / "note.pdf"
+    pdf.write_text("dummy")
+    pages = {"text": "Quarterly results commentary", "pages": [
+        {"page_number": 1, "text": "Quarterly results commentary", "tables": [],
+         "combined": "Quarterly results commentary"}]}
+    with patch("src.utils.pdf_parser.extract_all", return_value=pages) as extract, \
+            patch("src.agent.market_pulse.page_texts", return_value=["Quarterly results commentary"]), \
+            patch("src.agent.research_notes.ingest", return_value={"status": "completed"}):
+        ingest.process_pdf(str(pdf))
+    assert extract.call_count == 1

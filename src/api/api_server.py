@@ -1881,27 +1881,22 @@ class TradingAPI:
                 # Ensure equity curve includes the latest trading session/today's equity
                 today = datetime.utcnow().strftime('%Y-%m-%d')
                 if acct_summary and acct_summary.get('equity_kes'):
-                    cur_eq = float(acct_summary.get('equity_kes') or 0)
-                    if not curve:
-                        curve = [{
-                            'day': today,
-                            'cash_kes': float(acct_summary.get('cash_kes') or 0),
-                            'holdings_kes': float(acct_summary.get('holdings_kes') or 0),
-                            'equity_kes': cur_eq
-                        }]
+                    live = {
+                        'day': today,
+                        'cash_kes': float(acct_summary.get('cash_kes') or 0),
+                        'holdings_kes': float(acct_summary.get('holdings_kes') or 0),
+                        'equity_kes': float(acct_summary.get('equity_kes') or 0),
+                    }
+                    # One point per day, in date order: today's reading
+                    # replaces today's stored point wherever it sits. Only
+                    # the last point used to be checked, so any later stored
+                    # day left today twice and the curve out of order.
+                    same_day = [p for p in curve if p.get('day') == today]
+                    if same_day:
+                        same_day[0].update(live)
                     else:
-                        last_day = curve[-1].get('day')
-                        if last_day != today:
-                            curve.append({
-                                'day': today,
-                                'cash_kes': float(acct_summary.get('cash_kes') or 0),
-                                'holdings_kes': float(acct_summary.get('holdings_kes') or 0),
-                                'equity_kes': cur_eq
-                            })
-                        else:
-                            curve[-1]['equity_kes'] = cur_eq
-                            curve[-1]['cash_kes'] = float(acct_summary.get('cash_kes') or 0)
-                            curve[-1]['holdings_kes'] = float(acct_summary.get('holdings_kes') or 0)
+                        curve.append(live)
+                        curve.sort(key=lambda p: str(p.get('day') or ''))
 
                 return jsonify({
                     'enabled': True,

@@ -548,6 +548,15 @@ class TradingAgent:
         # What each symbol must have to trade, and how deep to fetch so the
         # slower strategies (a 200-day average, six-month ranking) can vote.
         need_for = {s: self._history_needed(s) for s in live + nse}
+        # NSE trades on nse_rotation alone (strategy_markets), which abstains
+        # until it has its history, so the strategies alone would call one
+        # day of history enough and a short stock would never be topped up.
+        # Hold NSE to the screener's own bar for a tradeable stock instead,
+        # which is also what the stops' ATR and the regime detector need.
+        from src.agent import nse_screener
+        nse_floor = int(nse_screener.settings(self.config).get('min_history_days', 50) or 0)
+        for s in nse:
+            need_for[s] = max(need_for[s], nse_floor)
         need = max(list(need_for.values()) + [1])
         want = lambda syms: max([self._history_needed(s, required_only=False) for s in syms] + [60])
 
@@ -1347,7 +1356,7 @@ class TradingAgent:
                                     from src.agent.verdict_scoreboard import summary_line
 
                                     # Build episodic memory for this asset
-                                    symbol_memory = self._build_symbol_episodic_memory(symbol)
+                                    symbol_memory = TradingAgent._build_symbol_episodic_memory(self, symbol)
 
                                     # Validate with LLM Orchestrator
                                     validated_signal = self.components['llm_orchestrator'].validate_trade(
@@ -1785,7 +1794,7 @@ class TradingAgent:
                     dec['skip_reason'] = blocked
                     validated = {'action': 'hold', 'confidence': 0.0}
                 elif signals and proposed != 'hold' and llm:
-                    symbol_memory = self._build_symbol_episodic_memory(symbol)
+                    symbol_memory = TradingAgent._build_symbol_episodic_memory(self, symbol)
                     validated = llm.validate_trade(symbol, signals, symbol_data, None,
                                                    research_context=TradingAgent._nse_research(self, symbol),
                                                    episodic_memory=symbol_memory)
@@ -2053,7 +2062,7 @@ class TradingAgent:
                 logger.debug(f"Episodic memory decision retrieval error for {symbol}: {e}")
 
         # 2. Recent orders & fills on this symbol
-        oj = getattr(self, 'order_journal', None) or self.components.get('order_journal')
+        oj = getattr(self, 'order_journal', None) or (getattr(self, 'components', None) or {}).get('order_journal')
         if oj:
             try:
                 recent_orders = oj.orders_for_symbol(symbol, limit=3)
@@ -2496,7 +2505,11 @@ class TradingAgent:
                         # for the same signal — and it meant the live agent
                         # sized positions by a method the backtest never
                         # measured, so backtest results did not describe it.
-                        limits = self.config.get('risk_limits', {})
+                        # This market's stop rules: sizing must use the stop
+                        # the position will actually have, or a wider stop
+                        # would risk more than risk_per_trade.
+                        from src.agent.volatility import risk_limits_for
+                        limits = risk_limits_for(self.config, market)
                         atr_pct = None
                         tracker = getattr(self, 'volatility', None)
                         if tracker is not None:
@@ -2903,11 +2916,18 @@ class TradingAgent:
                 atr_pct = tracker.atr_pct(symbol)
             except Exception as e:
                 logger.debug(f"ATR lookup failed for {symbol}: {e}")
+        from src.agent.volatility import stop_distances
+        # Per-market stop rules (risk_limits.market_overrides), e.g. crypto's
+        # trend holding with no trailing stop and a wide emergency stop.
+        market = classify(symbol, self.config)
+        has_override = bool(((self.config.get('risk_limits') or {})
+                             .get('market_overrides') or {}).get(market))
         if atr_pct is None:
+            if has_override:
+                return stop_distances(self.config, None, market)
             return {'stop_loss_pct': fallback_stop,
                     'trailing_stop_pct': fallback_trail, 'source': 'fixed'}
-        from src.agent.volatility import stop_distances
-        return stop_distances(self.config, atr_pct)
+        return stop_distances(self.config, atr_pct, market)
 
     def _enforce_stop_losses(self, stop_loss_pct: float, trailing_stop_pct: float):
         """
