@@ -46,6 +46,7 @@ from src.utils.monitoring import get_monitoring_service
 from src.agent.data_manager import DataManager
 from src.agent.strategy_manager import StrategyManager
 from src.agent.daily_bars import utc_bar_date
+from src.utils.timeutil import quote_age_seconds
 from src.agent.nse_paper_account import (HOLDING_RULE_REASONS, NsePaperAccount,
                                          execute_stop, order_size)
 from src.agent.strategy_attribution import credit_weights
@@ -219,6 +220,11 @@ class TradingAgent:
                 self.database
             )
             self._restore_halt()
+
+            # Account-level daily loss and drawdown limits (loss_limits.py):
+            # past either, new buys are refused; sells and stops never are.
+            from src.agent.loss_limits import LossLimits
+            self.loss_limits = LossLimits(self.config)
             
             # Performance Analytics
             self.performance_analytics = PerformanceAnalytics(
@@ -392,6 +398,8 @@ class TradingAgent:
             return 'market_closed'
         if market == 'forex' and not fx_session_open(now):
             return 'market_closed'
+        if TradingAgent._loss_limit_blocks_buy(self, symbol, action):
+            return 'loss_limit'
         bm = self.components.get('broker_manager')
         if bm is None:
             return None
@@ -1076,6 +1084,7 @@ class TradingAgent:
                         acct = primary.get_account_info()
                         if acct is not None and acct.equity is not None:
                             self.performance_analytics.record_portfolio_value(float(acct.equity))
+                            TradingAgent._update_loss_limits(self, acct.equity)
                 except Exception as e:
                     logger.debug(f"Portfolio value recording error: {e}")
 
@@ -1209,12 +1218,14 @@ class TradingAgent:
                                 symbol_data['bar_date'] = live_bar_date
 
                             price = (symbol_data or {}).get('price') or (symbol_data or {}).get('close')
+                            untradeable = (symbol_data or {}).get('source') in ('fallback', 'stale')
 
                             # Feed the volatility tracker before any decision,
                             # so stop distances reflect the current bar. Uses
                             # high/low when the feed carries them and degrades
-                            # to close-only otherwise.
-                            if price and getattr(self, 'volatility', None):
+                            # to close-only otherwise. Never an invented or a
+                            # stale price: those skewed the ATR the stops use.
+                            if price and not untradeable and getattr(self, 'volatility', None):
                                 self.volatility.update(
                                     symbol, price,
                                     (symbol_data or {}).get('high'),
@@ -1234,6 +1245,13 @@ class TradingAgent:
                             if symbol_data and symbol_data.get('source') == 'fallback':
                                 logger.debug(f"Skipping {symbol}: price is synthetic fallback, not tradeable")
                                 self._cycle_decisions[symbol]['skip_reason'] = 'fallback_price'
+                                continue
+
+                            # Nor on a vendor's price that has stopped updating.
+                            if symbol_data and symbol_data.get('source') == 'stale':
+                                logger.info(f"Skipping {symbol}: last {symbol_data.get('stale_source')} price is "
+                                            f"{symbol_data.get('age_seconds')}s old and nothing fresher answered")
+                                self._cycle_decisions[symbol]['skip_reason'] = 'stale_price'
                                 continue
 
                             if not symbol_data:
@@ -1435,15 +1453,20 @@ class TradingAgent:
                                 live_metrics = self.risk_manager.get_risk_report().get('current_metrics', {})
                             except Exception as e:
                                 logger.debug(f"Risk report unavailable for risk-limit check: {e}")
+                        # The risk manager reports drawdown as 0.0 (it keeps no
+                        # equity history); the loss limits measure the real one.
+                        limits = getattr(self, 'loss_limits', None)
                         risk_assessment = {
                             'portfolio_var': live_metrics.get('portfolio_var', 0),
-                            'current_drawdown': live_metrics.get('max_drawdown', 0),
+                            'current_drawdown': (limits.drawdown() if limits is not None
+                                                 else live_metrics.get('max_drawdown', 0)),
                             'position_sizes': {sym: sig.get('position_size', 0) for sym, sig in all_signals.items()},
                         }
 
-                        # Check risk limits
-                        if self._check_risk_limits(risk_assessment):
-                            # Execute trades
+                        all_signals = TradingAgent._apply_risk_gate(self, all_signals, risk_assessment)
+
+                        # Execute what the risk check left
+                        if all_signals:
                             self._execute_trades(all_signals, risk_assessment)
                             
                             # Provide performance feedback to the adaptive loop (actual PnL feedback)
@@ -1456,18 +1479,6 @@ class TradingAgent:
                                 'win_rate': perf_metrics.get('win_rate', 0.0)
                             }
                             self.components['adaptive_integration'].update_with_performance(real_performance, market_data)
-                        else:
-                            logger.warning("Risk limits exceeded, skipping trade execution")
-                            if getattr(self, 'alerter', None):
-                                self.alerter.send(
-                                    'heal:risk_limits', 'a risk limit is blocking every new trade',
-                                    f"Signals were generated for {', '.join(sorted(all_signals))}, but the agent's "
-                                    f"risk limits (portfolio risk, position size or drawdown) are exceeded, so it "
-                                    f"placed nothing. It looks again every cycle and resumes when they clear.",
-                                    'warning', cooldown_s=6 * 3600)
-                            for s in all_signals:
-                                if s in self._cycle_decisions:
-                                    self._cycle_decisions[s]['skip_reason'] = 'risk_limits'
 
                     # Flush this cycle's decisions (change-detected inside).
                     if self.decision_journal and self._cycle_decisions:
@@ -1596,6 +1607,72 @@ class TradingAgent:
                 if getattr(self, 'self_healing', None):
                     self.self_healing.loop_failed(e)
                 time.sleep(loop_interval)  # Wait before retrying
+
+    def _apply_risk_gate(self, signals: Dict[str, Dict[str, Any]],
+                         risk_assessment: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        """The signals that may proceed past the portfolio risk check.
+
+        A breached risk limit (portfolio risk, position size, drawdown) stops
+        new buys, never exits. It used to drop every signal, sells included,
+        so the agent could not get out at the moment it most needed to.
+        """
+        if TradingAgent._check_risk_limits(self, risk_assessment):
+            return signals
+        blocked = sorted(s for s, sig in signals.items() if sig.get('action') != 'sell')
+        if blocked:
+            logger.warning(f"Risk limits exceeded; holding back new buys: {blocked}")
+            if getattr(self, 'alerter', None):
+                self.alerter.send(
+                    'heal:risk_limits', 'a risk limit is blocking new buys',
+                    f"Buy signals were generated for {', '.join(blocked)}, but the agent's "
+                    f"risk limits (portfolio risk, position size or drawdown) are exceeded, "
+                    f"so it bought nothing. Sells and stops still run. It looks again every "
+                    f"cycle and resumes when they clear.",
+                    'warning', cooldown_s=6 * 3600)
+            decisions = getattr(self, '_cycle_decisions', None) or {}
+            for s in blocked:
+                if s in decisions:
+                    decisions[s]['skip_reason'] = 'risk_limits'
+        return {s: sig for s, sig in signals.items() if sig.get('action') == 'sell'}
+
+    def _update_loss_limits(self, equity) -> Optional[Dict[str, Any]]:
+        """Feed the primary account's equity to the loss limits and alert the
+        operator the first time a limit is reached (loss_limits.py)."""
+        limits = getattr(self, 'loss_limits', None)
+        if limits is None:
+            return None
+        before = limits.breach()
+        status = limits.update(equity)
+        after = status.get('breach')
+        if after and after != before:
+            if after == 'daily_loss':
+                subject = 'daily loss limit reached: new buys stopped for the day'
+                detail = (f"Equity is {status['daily_loss']:.1%} below the day's opening reading "
+                          f"(limit {status['max_daily_loss']:.1%}). New buys are refused until the "
+                          f"next UTC day; sells and stops still run.")
+            else:
+                subject = 'drawdown limit reached: new buys stopped'
+                detail = (f"Equity is {status['drawdown']:.1%} below its peak of "
+                          f"{status['peak_equity']:,.2f} (limit {status['max_drawdown']:.1%}). New buys "
+                          f"are refused until equity recovers inside the limit or an operator resets "
+                          f"the peak; sells and stops still run.")
+            logger.warning(f"Loss limit: {subject}. {detail}")
+            alerter = getattr(self, 'alerter', None)
+            if alerter is not None:
+                alerter.send(f'risk:{after}', subject, detail, 'critical')
+        elif before and not after:
+            logger.warning(f"Loss limit cleared ({before}); new buys allowed again")
+        return status
+
+    def _loss_limit_blocks_buy(self, symbol: str, action: Optional[str]) -> bool:
+        """True for a buy on the primary account while a loss limit is reached.
+        Never true for a sell. The forex paper book keeps its own account."""
+        if action != 'buy':
+            return False
+        limits = getattr(self, 'loss_limits', None)
+        if limits is None or not limits.blocks_buys():
+            return False
+        return classify(symbol, self.config) != 'forex'
 
     def _veto_is_advisory(self, symbol, verdict) -> bool:
         """True when an LLM 'hold' should be advisory only.
@@ -2325,6 +2402,8 @@ class TradingAgent:
         """
         try:
             fallback = None
+            stale = None
+            max_age = TradingAgent._max_quote_age(self)
             for source, source_data in ((market_data or {}).get('market_data') or {}).items():
                 data = (source_data or {}).get('data') or {}
                 if symbol in data:
@@ -2336,17 +2415,38 @@ class TradingAgent:
                 found = {**row, 'symbol': symbol, 'source': source,
                          'timestamp': source_data.get('timestamp')}
                 if source != 'fallback':
+                    # A source's last batch stays here after the source stops
+                    # answering. Taken as current, a failed vendor's hours-old
+                    # price was traded on, and outranked the fallback that
+                    # exists to stop trading during an outage.
+                    age = quote_age_seconds(source_data.get('timestamp'))
+                    if max_age and age is not None and age > max_age:
+                        stale = stale or {**found, 'age_seconds': round(age)}
+                        continue
                     return found
                 fallback = fallback or found
             live = self._live_quote(symbol, TradingAgent._quote_broker(self))
             if live:
                 return live
+            if stale is not None:
+                # Refused downstream, like the fallback, and recorded as
+                # stale_price so the dashboard says why it did not trade.
+                return {**stale, 'source': 'stale', 'stale_source': stale['source']}
             if fallback is None:
                 logger.debug(f"No market data found for symbol {symbol}")
             return fallback
         except Exception as e:
             logger.error(f"Error extracting data for symbol {symbol}: {str(e)}")
             return None
+
+    def _max_quote_age(self) -> float:
+        """Seconds after which a vendor batch is too old to trade on.
+        data_manager.max_quote_age_seconds; 0 turns the check off. The default
+        is three data-collection intervals (the vendor cache adds up to 30s)."""
+        dm = (getattr(self, 'config', None) or {}).get('data_manager', {}) or {}
+        if 'max_quote_age_seconds' in dm:
+            return float(dm.get('max_quote_age_seconds') or 0)
+        return 3.0 * float(dm.get('market_data_interval', 60) or 60)
 
     def _quote_broker(self):
         """The primary broker, when it can quote prices; None otherwise."""
@@ -2422,6 +2522,12 @@ class TradingAgent:
                         _note(symbol, 'below_confidence')
 
                     if action != 'hold' and confidence > 0.1 and position_size > 0:
+                        # Past the daily loss or drawdown limit, no new buys
+                        # (loss_limits.py); sells always go through.
+                        if TradingAgent._loss_limit_blocks_buy(self, symbol, action):
+                            _note(symbol, 'loss_limit')
+                            continue
+
                         # Determine asset type for routing
                         market = classify(symbol, self.config)
                         asset_type = {'crypto': 'crypto', 'forex': 'forex'}.get(market, 'stock')
@@ -3149,6 +3255,8 @@ class TradingAgent:
                 'trading_halted': getattr(self, 'trading_halted', False),
                 'halt_reason': getattr(self, 'halt_reason', None),
                 'halted_at': getattr(self, 'halted_at', None),
+                'loss_limits': (self.loss_limits.status()
+                                if getattr(self, 'loss_limits', None) is not None else None),
                 'timestamp': datetime.now().isoformat(),
                 'components': {}
             }

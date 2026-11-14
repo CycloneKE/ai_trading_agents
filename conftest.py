@@ -61,3 +61,11 @@ def _private_alert_log(tmp_path_factory, monkeypatch):
     """
     from src.agent import alerts
     monkeypatch.setattr(alerts, 'DATA_DIR', tmp_path_factory.mktemp('alerts'))
+
+
+@pytest.fixture(autouse=True)
+def _private_loss_limits(tmp_path_factory, monkeypatch):
+    """Tests never read or write the real data/loss_limits.json: a saved
+    breach there would quietly refuse buys in any test that builds an agent."""
+    from src.agent import loss_limits
+    monkeypatch.setattr(loss_limits, 'DATA_DIR', tmp_path_factory.mktemp('loss_limits'))

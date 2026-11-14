@@ -45,7 +45,9 @@ SKIP_REASONS = {
     'min_holding',        # NSE: held for less than the minimum holding period
     'turnover_budget',    # NSE: this week's allowance of new positions is used up
     'liquidity_cap',      # NSE: too little trading volume for even one share
-    'stale_price',        # NSE: the latest real price is too old to act on
+    'stale_price',        # the latest real price is too old to act on (a stalled feed, a suspended stock)
+    'loss_limit',         # a buy refused: the daily loss or drawdown limit is reached
+    'risk_limits',        # a buy refused: portfolio risk, position size or drawdown over its limit
     'market_closed',      # US stock or forex signal while its market is shut
     'reentry_cooldown',   # sold within the last day: not bought back yet
 }
