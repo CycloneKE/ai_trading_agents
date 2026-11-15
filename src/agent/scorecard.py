@@ -512,8 +512,9 @@ def _skill(ledger: Optional[List[Dict[str, Any]]], config: Optional[Dict[str, An
     for r in table:
         r['tilt'] = round(signal_tilt(r['n'], r['z'], rule['min_signals'], r.get('net_move_pct'), r.get('net_n')), 2)
     judged = [r for r in table if r['n'] >= int(rule['min_signals'])]
-    mode = ('Tilt is ON: each strategy\'s vote in that market is scaled 0.5x to 1.5x by this result '
-            '(a boost only when its signals also made money after costs).'
+    mode = ('Tilt is ON: each strategy\'s buys in that market count 0.5x to 1.5x by this result, '
+            'even when it votes alone (a boost only when its signals also made money after costs; '
+            'sells are never weakened).'
             if rule['enabled'] else
             'Measuring only: no weight is changed. Switch on learning.signal_skill_tilt once a pair shows a clear result.')
     if not judged:

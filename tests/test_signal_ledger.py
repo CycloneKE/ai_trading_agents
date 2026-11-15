@@ -225,7 +225,7 @@ def test_with_no_tilt_the_ensemble_is_exactly_what_it_was_and_a_tilt_moves_only_
     assert fresh.signal_tilt_for('momentum', 'AAPL') == 1.0
     fresh.set_signal_skill({('momentum', 'us_equity'): 1.5, ('mean_reversion', 'us_equity'): 0.5})
     after = ensemble_scores(fresh, 'AAPL')
-    assert after['buy'] > before['buy'] and after['sell'] < before['sell']
+    assert after['buy'] > before['buy'] and after['sell'] == before['sell']   # a sell is never weakened
     assert ensemble_scores(fresh, 'EUR_USD') == ensemble_scores(StrategyManager(CONFIG), 'EUR_USD')   # another market
     fresh.set_signal_skill(None)
     assert ensemble_scores(fresh, 'AAPL') == before

@@ -105,6 +105,7 @@ class BacktestEngine:
         
         # Market data
         self.current_prices = {}
+        self.last_prices = {}     # the latest price seen for each symbol
         self.current_timestamp = None
         
         # Statistics
@@ -414,9 +415,16 @@ class BacktestEngine:
         try:
             total_value = self.cash
             
+            # A holding with no bar this period (a stock on a weekend while
+            # crypto trades, a holiday) keeps its last price. It was valued
+            # at zero, so a mixed stock and crypto backtest lost and regained
+            # every stock holding each weekend: single-day moves of -58% and
+            # +142%, a 342% volatility, and a final value without the stocks
+            # whenever the run ended on a weekend.
+            self.last_prices.update(self.current_prices)
             for symbol, position in self.positions.items():
-                if symbol in self.current_prices and position.quantity != 0:
-                    current_price = self.current_prices[symbol]
+                if symbol in self.last_prices and position.quantity != 0:
+                    current_price = self.last_prices[symbol]
                     position.market_value = position.quantity * current_price
                     
                     if position.quantity > 0:  # Long position
@@ -471,6 +479,7 @@ class BacktestEngine:
             # Reset portfolio state
             self.cash = self.initial_capital
             self.positions = {}
+            self.last_prices = {}
             self.portfolio_value = self.initial_capital
             self.trades = []
             self.portfolio_history = []
@@ -487,7 +496,14 @@ class BacktestEngine:
                 # Accrue on idle cash before marking the portfolio, so the
                 # equity curve reflects interest from the first full period.
                 if i > 0 and period_rate and self.cash > 0:
-                    interest = self.cash * period_rate
+                    # By the time that has passed: with stocks and crypto
+                    # together a bar can be a weekend day, and a fixed rate
+                    # per bar paid 252 days' interest on 365 days a year.
+                    try:
+                        days = (timestamp - all_dates[i - 1]).total_seconds() / 86400.0
+                        interest = self.cash * self.cash_yield * days / 365.25
+                    except (TypeError, AttributeError):
+                        interest = self.cash * period_rate
                     self.cash += interest
                     self.interest_earned += interest
                 

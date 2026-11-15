@@ -20,7 +20,7 @@ Where each rule lives:
 | strategy_tuner.py | strategy settings (the only writer) | fixed bounds, one step, held-out evidence on 30+ trades, a hurdle that grows with candidates tried, probation and revert, weekly, frozen when halted |
 | strategy_manager rebalance | strategy weights from results | 0.1 floor, 0.3 smoothing, weekly |
 | strategy_manager adaptive_confidence | each vote's weight | evidence_tilt: none under 5 closed trades, then 0.5 to 1.5 by t-statistic, recomputed from the journal |
-| strategy_manager adaptive_confidence (learning.signal_skill_tilt, on) | each vote's weight, per market | signal_tilt: none under 50 signals with a known outcome, then 0.5 to 1.5 by how far the hit rate beats chance; a boost only when the signals also made money after costs; recomputed from the signal ledger |
+| strategy_manager adaptive_confidence (learning.signal_skill_tilt, on) | each strategy's buy conviction, per market (sells untouched) | signal_tilt: none under 50 signals with a known outcome, then 0.5 to 1.5 by how far the hit rate beats chance; a boost only when the signals also made money after costs; recomputed from the signal ledger |
 | llm_allocator.py (AI, off by default) | strategy weights | relative to neutral, 0.5 to 1.5, step 0.25, new-evidence gate, frozen when halted |
 | adaptive_integration.py | position size, risk tolerance | reduce-only, floors, capped at max_position_size |
 | self_assessment.py (AI) | nothing: advice only | evidence gate, checked suggestions |

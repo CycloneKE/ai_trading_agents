@@ -132,6 +132,17 @@ def _round_trips(trades):
     return trips
 
 
+def bars_per_year(data):
+    """Bars a year in this data, from the calendar: about 252 for daily stock
+    bars, 365 when crypto (which trades every day) is among the symbols. It
+    was fixed at 252, so six years of mixed bars counted as 8.7 years."""
+    idx = sorted(set().union(*[set(df.index) for df in data.values()])) if data else []
+    if len(idx) < 2:
+        return TRADING_DAYS
+    years = (idx[-1] - idx[0]).days / 365.25
+    return len(idx) / years if years > 0 else TRADING_DAYS
+
+
 def analyse(equity_series, trades, initial_capital, periods_per_year=TRADING_DAYS,
             risk_free=0.0):
     """Institutional metric set computed from the equity curve and round trips."""
@@ -468,6 +479,9 @@ def write_report(path, meta, strat, bench, strategy_stats, warnings_list):
         "",
         f"- Symbols: {', '.join(meta['symbols'])}",
         f"- Period: {meta['start']} to {meta['end']} ({strat['periods']} bars, {strat['years']} years)",
+        *([f"- Measured from the first trade, {meta['evaluated_from']}: before it the strategy was "
+           f"gathering the year of history its ranking needs, in cash. Both it and buy & hold are "
+           f"measured from that day, on the same money."] if meta.get('evaluated_from') else []),
         f"- Initial capital: {meta['capital']:,.2f}",
         f"- Risk-free hurdle: {pct(meta['risk_free_rate'])} a year",
         "",
@@ -549,6 +563,28 @@ def write_report(path, meta, strat, bench, strategy_stats, warnings_list):
 
 # -------------------------------------------------------------- robustness
 
+def from_first_trade(engine, bench_curve, capital, strategy):
+    """(equity, benchmark, starting value, first trade date or None).
+
+    The momentum strategies need about a year of history before their first
+    trade; until then the money sits in cash while the benchmark is already
+    invested, which charged them a year of the benchmark's return. For them
+    both curves start at the first trade, the benchmark rebased to the
+    strategy's value that day. Other strategies are measured from the start.
+    """
+    equity = [p['portfolio_value'] for p in engine.portfolio_history]
+    if strategy not in ('rotation', 'sleeve') or not engine.trades or len(bench_curve) != len(equity):
+        return equity, bench_curve, capital, None
+    first = min(t.timestamp for t in engine.trades)
+    stamps = [p['timestamp'] for p in engine.portfolio_history]
+    i0 = next((i for i, ts in enumerate(stamps) if ts >= first), 0)
+    if i0 <= 0:
+        return equity, bench_curve, capital, None
+    scale = equity[i0] / bench_curve[i0] if bench_curve[i0] else 1.0
+    return (equity[i0:], [v * scale for v in bench_curve[i0:]], equity[i0],
+            str(pd.Timestamp(stamps[i0]).date()))
+
+
 def leave_one_out(args, cfg, data, syms, capital, risk_free):
     """Re-run the strategy once per symbol, with that symbol removed.
 
@@ -573,17 +609,16 @@ def leave_one_out(args, cfg, data, syms, capital, risk_free):
             if fn is None:
                 return []          # only meaningful for the rotation path today
             sub_engine.run_backtest(fn)
-            eq = [p['portfolio_value'] for p in sub_engine.portfolio_history]
-            a = analyse(eq, sub_engine.trades, capital, args.periods_per_year, risk_free)
-            b = analyse(buy_and_hold(subset, kept, capital), [], capital,
-                        args.periods_per_year, risk_free)
+            eq, bench, start, _ = from_first_trade(sub_engine, buy_and_hold(subset, kept, capital),
+                                                   capital, args.strategy)
+            a = analyse(eq, sub_engine.trades, start, args.periods_per_year, risk_free)
+            b = analyse(bench, [], start, args.periods_per_year, risk_free)
             results.append({
                 'dropped': dropped,
                 'cagr': a['cagr'],
                 'benchmark_cagr': b['cagr'],
                 'beats_benchmark': a['cagr'] > b['cagr'],
-                'trading_pnl': a['final_equity'] - capital
-                               - getattr(sub_engine, 'interest_earned', 0.0),
+                'trading_pnl': eq[-1] - capital - getattr(sub_engine, 'interest_earned', 0.0),
                 'profit_factor': a['profit_factor'],
             })
         except Exception as e:
@@ -642,8 +677,9 @@ def main():
     ap.add_argument('--start'); ap.add_argument('--end')
     ap.add_argument('--min-confidence', type=float, default=0.0,
                     help='ignore signals weaker than this (live loop applies its own LLM gate instead)')
-    ap.add_argument('--periods-per-year', type=int, default=TRADING_DAYS,
-                    help='252 for daily bars, 52 weekly, 12 monthly')
+    ap.add_argument('--periods-per-year', type=float, default=None,
+                    help='bars a year; by default worked out from the data (about 252 for '
+                         'daily stock bars, 365 once crypto trades every day)')
     ap.add_argument('--risk-free-rate', type=float, default=None,
                     help='annual risk-free rate as a decimal, e.g. 0.10 for 10%%. '
                          'Defaults to config analytics.risk_free_rate. For a Kenyan '
@@ -687,6 +723,9 @@ def main():
         if not syms:
             raise SystemExit("No symbol has >= 60 bars in the requested window")
         data = {s: data[s] for s in syms}
+
+    if args.periods_per_year is None:
+        args.periods_per_year = bars_per_year(data)
 
     trading = cfg.get('trading', {})
     limits = cfg.get('risk_limits', {})
@@ -752,10 +791,10 @@ def main():
     if not results:
         raise SystemExit("Backtest produced no results; check logs.")
 
-    equity = [p['portfolio_value'] for p in engine.portfolio_history]
-    strat = analyse(equity, engine.trades, capital, args.periods_per_year, risk_free)
-    bench_curve = buy_and_hold(data, syms, capital)
-    bench = analyse(bench_curve, [], capital, args.periods_per_year, risk_free)
+    equity, bench_curve, start_value, evaluated_from = from_first_trade(
+        engine, buy_and_hold(data, syms, capital), capital, args.strategy)
+    strat = analyse(equity, engine.trades, start_value, args.periods_per_year, risk_free)
+    bench = analyse(bench_curve, [], start_value, args.periods_per_year, risk_free)
 
     warnings_list = [
         "No LLM validation layer: the live agent sends every candidate trade to an "
@@ -799,6 +838,7 @@ def main():
         'cost_rows': cost_rows,
         'unverified_markets': unverified,
         'start': str(min(data[s].index.min() for s in syms).date()),
+        'evaluated_from': evaluated_from,
         'end': str(max(data[s].index.max() for s in syms).date()),
         'capital': capital,
         'commission': engine_cfg['commission_rate'],
@@ -818,7 +858,7 @@ def main():
     write_report(os.path.join(args.out, 'report.md'), meta, strat, bench,
                  strat_fn.stats, warnings_list)
 
-    dates = [p['timestamp'] for p in engine.portfolio_history]
+    dates = [p['timestamp'] for p in engine.portfolio_history][-len(equity):]   # from the first trade, if trimmed
     pd.DataFrame({'date': dates, 'strategy_equity': equity,
                   'buy_hold_equity': bench_curve}).to_csv(
         os.path.join(args.out, 'equity_curve.csv'), index=False)
@@ -865,7 +905,13 @@ def main():
               f"broker schedule. Treat these numbers as provisional.")
     if args.leave_one_out and len(syms) > 2:
         loo = leave_one_out(args, cfg, data, syms, capital, risk_free)
-        print("\n" + format_leave_one_out(loo, strat['cagr']))
+        text = format_leave_one_out(loo, strat['cagr'])
+        print("\n" + text)
+        if text:
+            # In the report too, so it travels with the headline it qualifies.
+            with open(os.path.join(args.out, 'report.md'), 'a') as f:
+                f.write("\n## Does it rest on one fund?\n\nThe test again with each symbol left out in turn.\n\n"
+                        "```\n" + text + "\n```\n")
         with open(os.path.join(args.out, 'leave_one_out.json'), 'w') as f:
             json.dump(loo, f, indent=2, default=str)
 
