@@ -2,6 +2,8 @@
 the AI trade review may confirm, weaken or veto but never reverse or
 strengthen a signal, and the adaptive goals layer may only make the agent
 more careful."""
+import pytest
+
 from src.agent import guardrails as g
 from src.agent.adaptive_agent import Goal, GoalType, SelfAdaptiveAgent, AdaptationAction, MIN_SIZE_MULTIPLIER
 from src.agent.adaptive_integration import AdaptiveStrategyIntegration
@@ -141,7 +143,43 @@ def test_a_real_record_does_tilt_the_vote():
     assert _ensemble(proven) == 'buy'                                            # a x1.5 beats b
 
 
+def _vote(perf, sigs, weights=None, min_conf=0.0):
+    from src.agent.strategy_manager import StrategyManager
+    m = StrategyManager({'ensemble_method': 'adaptive_confidence', 'min_trade_confidence': min_conf,
+                         'regime_filter': {'enabled': False}})
+    m.strategy_weights = weights or {n: 0.5 for n in sigs}
+    m.strategy_performance = perf
+    return m._adaptive_confidence_ensemble(sigs, 'X', {'close': 100, 'open': 100})
+
+
 def test_a_significantly_losing_strategy_is_now_reduced():
-    # Before, a losing record was simply ignored. b is the loser here: it is halved.
+    # Before, a losing record was simply ignored. Its buys now count at half.
+    sigs = {'a': {'action': 'buy', 'confidence': 0.65, 'position_size': 0.0},
+            'b': {'action': 'sell', 'confidence': 0.60, 'position_size': 0.0}}
+    assert _vote({'a': {}, 'b': {}}, sigs)['action'] == 'buy'
+    losing_a = {'a': {'closed_trades': 30, 'sharpe_ratio': -2.5, 'win_rate': 0.3}, 'b': {}}
+    assert _vote(losing_a, sigs)['action'] == 'sell'
+
+
+def test_learning_never_weakens_a_sell():
+    # Long-only: a sell can only close or trim a holding, so a poor record
+    # does not make the agent slower to get out.
+    sigs = {'a': {'action': 'buy', 'confidence': 0.60, 'position_size': 0.0},
+            'b': {'action': 'sell', 'confidence': 0.65, 'position_size': 0.0}}
     losing_b = {'a': {}, 'b': {'closed_trades': 30, 'sharpe_ratio': -2.5, 'win_rate': 0.3}}
-    assert _ensemble(losing_b) == 'buy'
+    assert _vote(losing_b, sigs)['action'] == 'sell'
+
+
+def test_a_lone_voter_with_a_poor_record_buys_with_less_conviction():
+    """Crypto and NSE have one voter each. The scores were divided by the
+    learned weights, so a lone strategy's tilt cancelled out and crypto_trend
+    kept buying at full conviction with its signals worse than chance."""
+    sigs = {'solo': {'action': 'buy', 'confidence': 0.6, 'position_size': 0.05}}
+    plain = _vote({'solo': {}}, sigs, min_conf=0.4)
+    losing = _vote({'solo': {'closed_trades': 30, 'sharpe_ratio': -2.5, 'win_rate': 0.3}}, sigs, min_conf=0.4)
+    assert plain['action'] == 'buy' and plain['confidence'] == pytest.approx(0.6)
+    assert losing['action'] == 'hold'                                   # 0.3 is under the 0.4 needed
+    proven = _vote({'solo': {'closed_trades': 30, 'sharpe_ratio': 2.5, 'win_rate': 0.7}}, sigs, min_conf=0.4)
+    assert proven['action'] == 'buy' and proven['confidence'] == pytest.approx(0.9)
+    strong = {'solo': {'action': 'buy', 'confidence': 0.9, 'position_size': 0.05}}
+    assert _vote({'solo': {'closed_trades': 30, 'sharpe_ratio': 2.5, 'win_rate': 0.7}}, strong)['confidence'] == 1.0

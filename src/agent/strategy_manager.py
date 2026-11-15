@@ -728,16 +728,20 @@ class StrategyManager:
             # max(0.1, 0.0 * 0.0) = 0.1 and the configured `weight` values
             # were ignored entirely on this path. Start from the configured
             # weight and only tilt it once real attribution exists.
-            base_weight = self.strategy_weights.get(name, 1.0)
-            # Tilted by its own realised results, and only on evidence: none
-            # under five closed trades, then 0.5x to 1.5x by how convincing
-            # its record is (guardrails.evidence_tilt). This used to double a
-            # strategy's weight on a couple of lucky trades and never reduce
-            # a losing one.
-            base_weight *= evidence_tilt(performance.get('closed_trades'),
-                                         performance.get('sharpe_ratio'))
-            base_weight *= self.signal_tilt_for(name, symbol)
-            base_weight = max(0.01, base_weight)
+            base_weight = max(0.01, self.strategy_weights.get(name, 1.0))
+            # Learned from evidence: its own closed trades (guardrails.
+            # evidence_tilt: none under five, then 0.5x to 1.5x) and what its
+            # signals did next (signal_tilt: none under 50). This scales the
+            # strategy's buy conviction itself, not only its share of the
+            # vote: the scores are divided by the weights before learning, so
+            # a strategy at 0.5x adds half as much. Divided by the learned
+            # weights, a market with one voter (crypto, NSE) cancelled it
+            # out, and crypto_trend kept trading at full conviction with its
+            # signals right 27% of the time against 49% for chance. Sells are
+            # never weakened by it: the agent is long-only, so a sell can
+            # only close or trim a holding.
+            learned = (evidence_tilt(performance.get('closed_trades'), performance.get('sharpe_ratio'))
+                       * self.signal_tilt_for(name, symbol))
             
             # Adaptive logic:
             if market_volatility > 0.03: # High volatility
@@ -753,21 +757,25 @@ class StrategyManager:
             confidence = signals.get('confidence', 0.0)
             position_size = signals.get('position_size', 0.0)
 
-            action_scores[action] += base_weight * confidence
+            effective = base_weight * learned if action == 'buy' else base_weight
+            action_scores[action] += effective * confidence
             total_weight += base_weight
-            total_confidence += base_weight * confidence
-            total_position_size += base_weight * position_size
+            total_confidence += effective * confidence
+            total_position_size += effective * position_size
             raw_weights[name] = base_weight
             if action == 'sell':
                 sell_weighted += base_weight * confidence
             elif action == 'buy':
-                buy_weighted += base_weight * confidence
+                buy_weighted += effective * confidence
 
         if total_weight > 0:
             for action in action_scores:
                 action_scores[action] /= total_weight
             total_confidence /= total_weight
             total_position_size /= total_weight
+        # A boosted strategy can lift the average above what any vote said.
+        action_scores['buy'] = min(action_scores['buy'], 1.0)
+        total_confidence = min(total_confidence, 1.0)
             
         final_action = max(action_scores, key=action_scores.get)
         final_confidence = action_scores[final_action]
