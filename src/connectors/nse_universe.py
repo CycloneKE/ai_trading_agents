@@ -19,6 +19,13 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 logger = logging.getLogger(__name__)
 
 UNCLASSIFIED = 'Unclassified'
+PREFERENCE = 'Preference Shares'
+ETF = 'Exchange Traded Fund'
+REIT = 'Real Estate Investment Trust'
+# Listed instruments that are not ordinary shares. They price and pay
+# differently (a fixed dividend, a gold price, property income), so the
+# share screener does not rank them against companies.
+NON_EQUITY_SECTORS = frozenset({PREFERENCE, ETF, REIT})
 
 # What an NSE equity ticker looks like. The feed also lists bonds under
 # codes such as "IFB1/2023/17"; those, and anything that could name a path
@@ -46,6 +53,7 @@ LISTED: Dict[str, Tuple[str, str]] = {
     'COOP': ('Co-operative Bank', 'Banking'),
     'DTK': ('Diamond Trust Bank', 'Banking'),
     'EQTY': ('Equity Group', 'Banking'),
+    'FMLY': ('Family Bank', 'Banking'),
     'HFCK': ('HF Group', 'Banking'),
     'IMH': ('I&M Group', 'Banking'),
     'KCB': ('KCB Group', 'Banking'),
@@ -54,7 +62,12 @@ LISTED: Dict[str, Tuple[str, str]] = {
     'SCBK': ('Standard Chartered Kenya', 'Banking'),
     # Commercial and services
     'XPRS': ('Express Kenya', 'Commercial & Services'),
-    'HBER': ('Homeboyz Entertainment', 'Commercial & Services'),
+    # Homeboyz trades as HBE: the NSE feed's last HBER bar is 1 October 2026
+    # and HBE (Homeboyz Entertainment Plc) has traded since (operator's NSE
+    # sheet, 17-19 November 2026). The old HBER history stays on disk.
+    'HBE': ('Homeboyz Entertainment', 'Commercial & Services'),
+    'DCON': ('Deacons (East Africa)', 'Commercial & Services'),
+    'QMRT': ('Quick Mart', 'Commercial & Services'),
     'KQ': ('Kenya Airways', 'Commercial & Services'),
     'LKL': ('Longhorn Publishers', 'Commercial & Services'),
     'NBV': ('Nairobi Business Ventures', 'Commercial & Services'),
@@ -65,12 +78,14 @@ LISTED: Dict[str, Tuple[str, str]] = {
     'UCHM': ('Uchumi Supermarkets', 'Commercial & Services'),
     'SCAN': ('WPP Scangroup', 'Commercial & Services'),
     # Construction and allied
+    'ARM': ('ARM Cement', 'Construction'),
     'BAMB': ('Bamburi Cement', 'Construction'),
     'CRWN': ('Crown Paints', 'Construction'),
     'CABL': ('East African Cables', 'Construction'),
     'PORT': ('East African Portland Cement', 'Construction'),
     # Energy and petroleum
     'KEGN': ('KenGen', 'Energy'),
+    'KPC': ('Kenya Pipeline Company', 'Energy'),
     'KPLC': ('Kenya Power', 'Energy'),
     'TOTL': ('TotalEnergies Marketing Kenya', 'Energy'),
     'UMME': ('Umeme', 'Energy'),
@@ -97,11 +112,21 @@ LISTED: Dict[str, Tuple[str, str]] = {
     'EABL': ('East African Breweries', 'Manufacturing'),
     'EVRD': ('Eveready East Africa', 'Manufacturing'),
     'FTGH': ('Flame Tree Group', 'Manufacturing'),
+    'MSC': ('Mumias Sugar', 'Manufacturing'),
     'ORCH': ('Kenya Orchards', 'Manufacturing'),
     'SKL': ('Shri Krishana Overseas', 'Manufacturing'),
     'UNGA': ('Unga Group', 'Manufacturing'),
     # Telecommunication
     'SCOM': ('Safaricom', 'Telecommunication'),
+    # Not ordinary shares: preference shares, exchange-traded funds and
+    # REITs (see NON_EQUITY_SECTORS; the screener leaves them out).
+    'KPLC-P4': ('Kenya Power 4% Preference Shares', PREFERENCE),
+    'KPLC-P7': ('Kenya Power 7% Preference Shares', PREFERENCE),
+    'GLD': ('Absa NewGold ETF', ETF),
+    'SMWF': ('Satrix MSCI World Feeder ETF', ETF),
+    'ALP': ('Africa Logistics Properties I-REIT', REIT),
+    'LAPR': ('Laptrust Imara Income-REIT', REIT),
+    'TRFC': ('TRIFIC Green USD I-REIT', REIT),
 }
 
 # Tickers seen at runtime (the ticker feed, the screener's shortlist) that
@@ -139,6 +164,12 @@ def name_of(symbol: str) -> str:
 
 def sector_of(symbol: str) -> str:
     return LISTED.get((symbol or '').upper(), (None, UNCLASSIFIED))[1]
+
+
+def is_ordinary_share(symbol: str) -> bool:
+    """False for a known preference share, fund or REIT; True otherwise
+    (an unnamed ticker is assumed to be a share, as before)."""
+    return sector_of(symbol) not in NON_EQUITY_SECTORS
 
 
 def symbols_with_real_data(csv_dir: Path) -> List[str]:

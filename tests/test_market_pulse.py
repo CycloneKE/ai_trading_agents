@@ -89,7 +89,7 @@ def test_rates_fx_and_announcements_are_read():
     assert mp.parse_fx(TEXTS)['usd_kes'] == 129.45
     news = mp.parse_announcements(TEXTS, mp._alias_table())
     assert [(a['symbol'], a['kind']) for a in news] == [
-        (None, 'listing'), ('EABL', 'agm'), ('KPLC', 'results'), ('ABSA', 'board')]
+        ('QMRT', 'listing'), ('EABL', 'agm'), ('KPLC', 'results'), ('ABSA', 'board')]
     assert news[2]['text'].endswith('30 June 2026')                    # wrapped line joined
 
 
@@ -97,7 +97,8 @@ def test_names_become_tickers_and_an_unknown_one_is_left_unmatched():
     table = mp._alias_table()
     assert table[mp.normalise('ABSA Bank Kenya Plc')] == 'ABSA'
     assert table[mp.normalise('Kenya Airways Ltd')] == 'KQ'
-    assert mp.normalise('Family Bank Limited') not in table
+    assert table[mp.normalise('Family Bank Limited')] == 'FMLY'          # named since November 2026
+    assert mp.normalise('Some New Listing Plc') not in table
 
 
 def test_an_unknown_name_is_learned_from_the_ticker_feeds_record():
@@ -111,8 +112,8 @@ def test_an_unknown_name_is_learned_from_the_ticker_feeds_record():
 
 def test_ingest_stores_fundamentals_rates_news_and_prices(data_dir):
     s = mp.ingest('report.pdf', TEXTS)
-    assert s['as_of'] == '2026-09-23' and s['stocks_mapped'] == 5
-    assert s['unmapped'] == ['Family Bank Limited'] and s['price_bars_added'] == 5
+    assert s['as_of'] == '2026-09-23' and s['stocks_mapped'] == 6
+    assert s['unmapped'] == [] and s['price_bars_added'] == 6
     f = mp.fundamentals('ABSA', today=date(2026, 9, 24))
     assert f['eps'] == 4.01 and f['dividend_yield_pct'] == pytest.approx(7.12)
     assert mp.latest_rates(today=date(2026, 9, 24))['tbill_91'] == 0.0878
@@ -121,7 +122,7 @@ def test_ingest_stores_fundamentals_rates_news_and_prices(data_dir):
     assert '2026-09-23' in csv_text and 'aib_market_pulse' in csv_text
     # Ingesting the same report again changes nothing and adds no bar.
     again = mp.ingest('report.pdf', TEXTS)
-    assert again['price_bars_added'] == 0 and again['price_bars_already_recorded'] == 5
+    assert again['price_bars_added'] == 0 and again['price_bars_already_recorded'] == 6
     assert len(json.loads((data_dir / 'market_pulse' / 'announcements.json').read_text())) == 4
 
 
@@ -130,7 +131,7 @@ def test_a_live_price_already_stored_is_never_overwritten(data_dir):
         'date,symbol,open,high,low,close,volume,change_pct,source\n'
         '2026-09-23,KCB,93,94,92,93.25,700000,0.3,nse_ticker\n')
     s = mp.ingest('report.pdf', TEXTS)
-    assert s['price_bars_added'] == 4
+    assert s['price_bars_added'] == 5
     assert 'aib_market_pulse' not in (data_dir / 'nse_historical' / 'KCB.csv').read_text()
 
 
@@ -195,4 +196,4 @@ def test_the_upload_route_reads_a_market_pulse_without_the_ai(data_dir, monkeypa
     esc = _Esc()
     out = BrokerResearchIngest(_NoAi(), esc, {}).process_pdf('pulse.pdf')
     assert out['document_type'] == 'market_pulse' and out['status'] == 'completed'
-    assert out['stocks_mapped'] == 5 and esc.status == (7, 'completed', 5)
+    assert out['stocks_mapped'] == 6 and esc.status == (7, 'completed', 6)
