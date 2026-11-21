@@ -91,6 +91,53 @@ def weights(signal: pd.DataFrame, px: pd.DataFrame, sizing: str = 'equal') -> pd
     return sig.div(n, axis=0).fillna(0.0)
 
 
+def trim_replay(px: pd.DataFrame, rf: pd.Series, held: pd.DataFrame, capped: bool, trim_buffer=None,
+                lag: int = 1, start=None) -> Dict:
+    """The live sizing, day by day: a coin is bought on the trend rule's buy
+    with an equal share of the account (or, `capped`, that share scaled by
+    VOL_TARGET over its 60-day volatility), left to grow, and sold on the
+    rule's sell; with `trim_buffer`, each Monday a coin worth more than its
+    cap by more than the buffer is sold back down to it (crypto_risk.py).
+    Costs COST a side; idle cash earns the risk-free rate."""
+    rets = px.pct_change().fillna(0.0)
+    vol = (px.pct_change().rolling(60).std() * np.sqrt(DAYS)).shift(lag)
+    live = (px.notna() & px.rolling(200).mean().notna()).shift(lag, fill_value=False)
+    want = held.shift(lag).fillna(0.0)
+    cash, val, equity = 1.0, {c: 0.0 for c in px.columns}, []
+    for i, d in enumerate(px.index):
+        for c in px.columns:
+            val[c] *= 1 + rets[c].iloc[i]
+        cash *= 1 + rf.iloc[i]
+        total = cash + sum(val.values())
+        n = max(int(live.iloc[i].sum()), 1)
+        for c in px.columns:
+            if not live[c].iloc[i]:
+                continue
+            v = vol[c].iloc[i]
+            cap = total / n * (min(VOL_TARGET / v, 1.0) if capped and v == v and v > 0 else 1.0)
+            if want[c].iloc[i] and val[c] == 0:
+                amount = min(cap, cash)
+                val[c] += amount * (1 - COST)
+                cash -= amount
+            elif not want[c].iloc[i] and val[c] > 0:
+                cash += val[c] * (1 - COST)
+                val[c] = 0.0
+            elif trim_buffer is not None and want[c].iloc[i] and d.weekday() == 0 \
+                    and val[c] > cap * (1 + trim_buffer):
+                cut = val[c] - cap
+                val[c] -= cut
+                cash += cut * (1 - COST)
+        equity.append(cash + sum(val.values()))
+    eq = pd.Series(equity, index=px.index)
+    eq = eq[eq.index >= (start if start is not None else px.index[0])]
+    r = (eq.pct_change() - rf).dropna()
+    years = len(r) / DAYS
+    half = len(r) // 2
+    sharpe = lambda x: float(x.mean() / x.std() * np.sqrt(DAYS)) if x.std() > 0 else 0.0
+    return {'cagr': float((eq.iloc[-1] / eq.iloc[0]) ** (1 / years) - 1), 'sharpe': sharpe(r),
+            'max_dd': float((eq / eq.cummax() - 1).min()), 'halves': (sharpe(r[:half]), sharpe(r[half:]))}
+
+
 def evaluate(w: pd.DataFrame, rets: pd.DataFrame, rf: pd.Series, start, lag: int = 1) -> Dict:
     held = w.shift(lag).fillna(0.0)
     excess = rets.sub(rf, axis=0).fillna(0.0)
@@ -141,6 +188,15 @@ def study(price_dir: str, rate_dir: str):
         print(f"{name:42s} {r['cagr']:7.1%} {r['sharpe']:7.2f} {r['max_dd']:8.1%}  "
               f"{r['halves'][0]:5.2f} / {r['halves'][1]:5.2f}  mean {r['lag_mean']:5.2f}, "
               f"worst {r['lag_min']:5.2f}  {r['exposure']:8.0%} {r['trades']:9.1f}")
+    held = band_rule(px, 200, 0.05)
+    print("\nThe agent's sizing (200-day rule, 5% band), each coin an equal share, left to grow:")
+    for name, kw in (('bought at an equal share, never trimmed', {'capped': False}),
+                     ('bought at its volatility cap, never trimmed', {'capped': True}),
+                     ('volatility cap, trimmed weekly above cap + 20%', {'capped': True, 'trim_buffer': 0.2})):
+        r = trim_replay(px, rf, held, start=start, **kw)
+        out['sizing: ' + name] = r
+        print(f"  {name:46s} {r['cagr']:7.1%} {r['sharpe']:7.2f} {r['max_dd']:8.1%}  "
+              f"{r['halves'][0]:5.2f} / {r['halves'][1]:5.2f}")
     print("\nSharpe is measured over cash. A rule earns its place by a better Sharpe or a much smaller "
           "worst fall than holding, in both halves, and at every delay.")
     return out

@@ -469,4 +469,57 @@ it has not worked since 2012 in AQR's data), and wider trend following
 across many markets (AQR's results recovered after 2022, but it needs a
 futures broker; the fund version tested in section 9 was weak).
 
+## 14. Crypto review and fixes (21 November 2026)
+
+**How crypto is handled.** Bitcoin, Ethereum and Solana trade on the
+Alpaca paper account (Coinbase is off), around the clock, on one rule
+(`crypto_trend`): hold a coin while it is more than 5% above its 200-day
+average, sell it when it is more than 5% below. Positions are small (sized
+from a 0.5% risk budget against a 20% to 30% emergency stop, at most 5% of
+the strategies' money per coin), with no trailing stop. Costs are modelled
+at 0.25% (Alpaca's fee) plus 0.10% slippage a side, not yet checked against
+Alpaca's fee page.
+
+**The rule is sound.** `scripts/crypto_study.py`, 2015 to 2026, fully
+invested when in, after costs:
+
+| | Yearly return | Sharpe | Worst fall | Sharpe, recent half |
+|---|---|---|---|---|
+| 200-day rule, 5% band (as configured) | 80% | 1.28 | -72% | 0.88 |
+| Buy and hold | 74% | 1.09 | -90% | 0.57 |
+
+It beat holding in both halves and stayed between 1.19 and 1.27 when acted
+on one to five days late. A 2% band or none scored about the same; 4-week
+momentum (Liu and Tsyvinski 2021) scored 1.40 but trades about 64 times a
+year, so it is a candidate for later, not a replacement.
+
+**Two problems in how it ran live, both fixed (on paper):**
+
+1. **The AI could block the exit.** For crypto alone, an AI "hold"
+   cancelled any signal, sells included, a rule left over from an earlier
+   crypto strategy that won 18% of its trades. With its exits blocked the
+   trend rule's Sharpe fell from 1.28 to 1.08 (no better than holding) and
+   its worst fall deepened from 72% to 85%. Now a crypto sell always goes,
+   and a crypto buy follows the same AI setting as every other market
+   (`llm_veto_enabled`, advisory while it is false).
+2. **Winners grew unchecked.** A position was sized once, at entry. In the
+   agent's backtest a 2015 Bitcoin purchase grew about 26 times and was most
+   of the account when the 2018 crash took it down 42%; after such a gain the
+   emergency stop, set from the entry price, is far below the market. Now
+   (`crypto_risk` in the config, `src/agent/crypto_risk.py`) each coin has a
+   cap: its usual maximum scaled by 50% / its yearly volatility. A buy is
+   never larger than the cap, and once a week a coin worth more than 20%
+   above its cap is sold back down to it. Replayed on the three coins:
+
+| Sizing | Yearly return | Sharpe | Worst fall |
+|---|---|---|---|
+| Bought at an equal share, never trimmed (before) | 74% | 1.19 | -65% |
+| Volatility cap, trimmed weekly above cap + 20% (now) | 51% | 1.27 | -43% |
+
+The trim trades some return for a much smaller worst fall: less money
+rides on the biggest winners, which is the point. Weekly trims appear on
+the US and crypto paper account page labelled `crypto_trim`, and each
+week's review (value, cap, volatility, any trim) is kept in
+`data/crypto_risk.json`.
+
 These are historical results, not forecasts, and not investment advice.

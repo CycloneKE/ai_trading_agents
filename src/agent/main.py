@@ -1399,8 +1399,13 @@ class TradingAgent:
                                         dec['llm_verdict']['secondary_verdict'] = validated_signal['secondary_verdict']
 
                                     if validated_signal.get('action') == 'hold':
-                                        if TradingAgent._veto_is_advisory(self, symbol, validated_signal):
-                                            logger.info(f"LLM veto advisory only for {symbol} (llm_veto_enabled=False). Signal preserved.")
+                                        if TradingAgent._veto_is_advisory(self, symbol, validated_signal,
+                                                                          symbol_signals.get('action')):
+                                            why = ('a crypto exit is never held back'
+                                                   if symbol_signals.get('action') == 'sell'
+                                                   and classify(symbol, self.config) == 'crypto'
+                                                   else 'llm_veto_enabled=False')
+                                            logger.info(f"LLM veto advisory only for {symbol} ({why}). Signal preserved.")
                                             validated_signal['action'] = symbol_signals['action']
                                             validated_signal['confidence'] = symbol_signals.get('confidence', validated_signal.get('confidence'))
                                             if 'position_size' in symbol_signals:
@@ -1612,6 +1617,13 @@ class TradingAgent:
                 except Exception as e:
                     logger.error(f"Pullback sleeve error: {e}")
 
+                # Crypto caps: a coin grown past its volatility cap is sold
+                # back to it once a week (crypto_risk.py).
+                try:
+                    self._run_crypto_trim_cycle()
+                except Exception as e:
+                    logger.error(f"Crypto trim error: {e}")
+
                 # The forex margin book: carry and trend, long and short,
                 # rebalanced weekly (forex_carry_trend.py).
                 try:
@@ -1705,22 +1717,25 @@ class TradingAgent:
             return False
         return classify(symbol, self.config) != 'forex'
 
-    def _veto_is_advisory(self, symbol, verdict) -> bool:
+    def _veto_is_advisory(self, symbol, verdict, action: Optional[str] = None) -> bool:
         """True when an LLM 'hold' should be advisory only.
 
-        Only when llm_veto_enabled is false, and never for crypto (the 18%-win
-        strategy has no other gate) nor when the consensus check disagreed.
+        A crypto sell is never held back: it is crypto_trend's exit, the
+        rule's only protection after a large gain (the emergency stop is set
+        from the entry price), and scripts/crypto_study.py found that with
+        its exits blocked the rule's Sharpe fell from 1.28 to 1.08, no better
+        than holding, and its worst fall from 72% to 85%. Otherwise the hold
+        is advisory when llm_veto_enabled is false, unless the consensus
+        check disagreed; crypto is treated like every other market (it used
+        to be always vetoable, for an earlier crypto strategy that won 18% of
+        its trades and has since been replaced by the tested trend rule).
         """
+        if action == 'sell' and classify(symbol, self.config) == 'crypto':
+            return True
         if self.config.get('llm_veto_enabled', True):
             return False
         if verdict.get('consensus_verified') is False:
             return False
-        try:
-            from src.connectors.alpaca_broker import is_crypto_symbol
-            if is_crypto_symbol(symbol):
-                return False
-        except Exception:
-            pass
         return True
 
     def _evaluate_nse_symbols(self):
@@ -2770,6 +2785,98 @@ class TradingAgent:
                     f"{plan['gross_leverage']:.2f}x, {len(fills)} fill(s)")
         return fills
 
+    def _crypto_risk(self):
+        """The crypto position-cap settings and saved state, read once."""
+        if getattr(self, '_crypto_risk_cfg', None) is None:
+            from src.agent.core_portfolio import CoreState
+            from src.agent.crypto_risk import config_from_dict
+            self._crypto_risk_cfg = config_from_dict((self.config or {}).get('crypto_risk'))
+            self._crypto_risk_state = CoreState(str(DATA_DIR / 'crypto_risk.json'))
+            self._crypto_trim_last_check = 0.0
+        return self._crypto_risk_cfg, self._crypto_risk_state
+
+    def _crypto_closes(self, symbol: str) -> List[float]:
+        """A coin's daily closes as crypto_trend holds them (its last 200)."""
+        sm = (getattr(self, 'components', None) or {}).get('strategy_manager')
+        strat = (getattr(sm, 'strategies', None) or {}).get('crypto_trend') if sm is not None else None
+        return list((getattr(strat, 'historical_data', None) or {}).get(symbol) or [])
+
+    def _crypto_cap(self, symbol: str, portfolio_value: float, max_position_pct: float,
+                    closes: Optional[List[float]] = None) -> float:
+        """The most a coin may be worth (crypto_risk.cap_value): its maximum
+        share of the strategies' money, scaled by its volatility. Without the
+        setting on, the maximum itself."""
+        from src.agent import crypto_risk as cr
+        cfg, _ = TradingAgent._crypto_risk(self)
+        max_value = float(portfolio_value) * float(max_position_pct)
+        if not cfg.enabled:
+            return max_value
+        closes = closes if closes is not None else TradingAgent._crypto_closes(self, symbol)
+        return cr.cap_value(max_value, cr.annual_vol(closes, cfg.vol_days), cfg)
+
+    def _run_crypto_trim_cycle(self, now: Optional[datetime] = None,
+                               closes_for=None) -> List[Dict[str, Any]]:
+        """Once a week, sell any coin worth more than its cap by more than
+        trim_buffer back down to the cap (crypto_risk.py). Never buys; never
+        while halted. Returns the orders placed."""
+        from src.agent import crypto_risk as cr
+        from src.agent.volatility import risk_limits_for
+        cfg, state = TradingAgent._crypto_risk(self)
+        if not cfg.enabled or self.trading_halted:
+            return []
+        if now is None and time.time() - self._crypto_trim_last_check < 900:
+            return []
+        self._crypto_trim_last_check = time.time()
+        now = now or datetime.now(timezone.utc)
+        if not cr.due(state.data.get('last_trim'), now.date()):
+            return []
+        bm = self.components.get('broker_manager')
+        broker = bm.get_broker() if bm else None
+        if not broker or not broker.is_connected:
+            return []
+        acct = broker.get_account_info()
+        if not acct or not acct.equity:
+            return []
+        portfolio_value = TradingAgent._technical_equity(self, float(acct.equity))
+        max_pct = float(risk_limits_for(self.config, 'crypto').get('max_position_size', 0.05))
+        closes_for = closes_for or (lambda sym: TradingAgent._crypto_closes(self, sym))
+        fetch_pos = getattr(broker, 'fetch_positions', None)
+        positions = fetch_pos() if callable(fetch_pos) else (broker.get_positions() or [])
+        fetch_open = getattr(broker, 'fetch_open_orders', None)
+        planned, prices, review = [], {}, {}
+        for p in positions:
+            sym = str(getattr(p, 'symbol', ''))
+            if classify(sym, self.config) != 'crypto':
+                continue
+            qty = float(getattr(p, 'quantity', 0) or 0)
+            price = float(getattr(p, 'current_price', 0) or 0)
+            if qty <= 0 or price <= 0:
+                continue
+            value = float(getattr(p, 'market_value', 0) or qty * price)
+            closes = closes_for(sym)
+            if len(closes) <= cfg.vol_days:
+                review[sym] = {'value': round(value, 2), 'skipped': 'not enough history for a volatility reading'}
+                continue
+            cap = TradingAgent._crypto_cap(self, sym, portfolio_value, max_pct, closes=closes)
+            sell = min(cr.trim_quantity(value, price, cap, cfg), qty)
+            review[sym] = {'value': round(value, 2), 'cap': round(cap, 2),
+                           'vol': round(cr.annual_vol(closes, cfg.vol_days) or 0, 4),
+                           'trim_qty': sell}
+            if sell <= 0:
+                continue
+            pending = fetch_open(sym) if callable(fetch_open) else (broker.get_orders(sym) or [])
+            if any(str(getattr(o, 'symbol', '')).upper() == sym.upper() for o in pending):
+                review[sym]['skipped'] = 'an order is still working'
+                continue
+            planned.append({'symbol': sym, 'side': 'sell', 'quantity': sell, 'notional': round(sell * price, 2)})
+            prices[sym] = price
+        placed = TradingAgent._place_core_orders(self, broker, planned, prices, now,
+                                                 strategy=cr.STRATEGY) if planned else []
+        state.save(last_trim=now.date().isoformat(), review=review, orders=len(placed))
+        if placed:
+            logger.info(f"Crypto trim: {[(o['symbol'], o['quantity']) for o in placed]} sold back to their caps")
+        return placed
+
     def _check_risk_limits(self, risk_assessment: Dict[str, Any]) -> bool:
         """
         Check if risk assessment is within acceptable limits.
@@ -3076,6 +3183,14 @@ class TradingAgent:
                             from src.agent.event_calendar import EventCalendar
                             self.event_calendar = EventCalendar()
                         target_pos_value *= self.event_calendar.risk_multiplier()
+
+                        # A crypto buy is never larger than the coin's
+                        # volatility cap (crypto_risk.py), the size the weekly
+                        # trim holds it to afterwards.
+                        if asset_type == 'crypto' and action == 'buy':
+                            target_pos_value = min(target_pos_value, TradingAgent._crypto_cap(
+                                self, symbol, portfolio_value,
+                                float(limits.get('max_position_size', 0.05))))
                         
                         # The price the decision was made on this cycle, from
                         # the same feed the strategies read; the separate
