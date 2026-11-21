@@ -125,7 +125,7 @@ def real_rows(symbol: str, csv_dir: Path, actions=None) -> List[Dict[str, Any]]:
 
 def metrics_for(symbol: str, rows: List[Dict[str, Any]], cfg: Dict[str, Any],
                 today: Optional[date] = None) -> StockMetrics:
-    from src.connectors.nse_universe import name_of, sector_of
+    from src.connectors.nse_universe import is_ordinary_share, name_of, sector_of
     today = today or datetime.now(timezone.utc).date()
     # The warm-start loads only sessions before today (today's bar is still
     # forming), so history is counted the same way here: a stock passing the
@@ -160,7 +160,9 @@ def metrics_for(symbol: str, rows: List[Dict[str, Any]], cfg: Dict[str, Any],
     age = (today - date.fromisoformat(m.last_date)).days
     m.stale = age > cfg['stale_after_days']
     m.thin = len(recent) >= 5 and (m.avg_value_kes or 0) < cfg['min_avg_value_kes']
-    if m.stale:
+    if not is_ordinary_share(symbol):
+        m.reason = f'not an ordinary share ({m.sector})'
+    elif m.stale:
         m.reason = f'no price for {age} days'
     elif m.days < cfg['min_history_days']:
         m.reason = f"{m.days} of {cfg['min_history_days']} days of history"
