@@ -29,6 +29,9 @@ Rules (sources in docs/FOREX_AND_PROFESSIONAL_TRAINING_PLAN.md):
 - S&P 500 two-day RSI below 10 above the 200-day average, out above the
   5-day average (Connors and Alvarez, Short Term Trading Strategies That Work, 2008).
 - S&P 500 buy and hold.
+- The core's own mix (S&P 500, Treasuries, gold at equal risk, monthly),
+  with and without the 10-month filter on its stock fund: whether the
+  filter helps a portfolio that is already diversified.
 
 Usage:
     python scripts/rule_research.py                  # download, then test
@@ -113,19 +116,31 @@ def rules(px: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     last_day = pd.Series(px.index, index=px.index).groupby(month).transform('max') == pd.Series(px.index, index=px.index)
     tom = ((day_in_month <= 3) | last_day).astype(float)
     tom = tom.shift(-1).fillna(0)        # decided the evening before the day held
-    delta = spy.diff()
-    up = delta.clip(lower=0).ewm(alpha=1 / 2, adjust=False).mean()
-    down = (-delta.clip(upper=0)).ewm(alpha=1 / 2, adjust=False).mean()
-    rsi2 = 100 - 100 / (1 + up / down.replace(0, np.nan))
-    pos, held = [], 0.0
-    sma200, sma5 = spy.rolling(200).mean(), spy.rolling(5).mean()
-    for t in range(len(spy)):
-        if held and spy.iloc[t] > sma5.iloc[t]:
-            held = 0.0
-        elif not held and spy.iloc[t] > sma200.iloc[t] and rsi2.iloc[t] < 10:
-            held = 1.0
-        pos.append(held)
-    connors = pd.Series(pos, index=px.index)
+    # The pullback rule is the live agent's own code (src/agent/pullback_sleeve.py).
+    from src.agent.pullback_sleeve import PullbackConfig, replay_positions
+    connors = pd.Series(replay_positions(list(spy.ffill()), PullbackConfig()), index=px.index)
+
+    # The core's mix (stocks, Treasuries, gold, equal risk, monthly), with and
+    # without the 10-month filter on its stock fund (decided at month end).
+    core = [c for c in ('SPY', 'IEF', 'GLD') if c in px.columns]
+    month_end = px.groupby(px.index.to_period('M')).tail(1).index
+    spy_month = spy[month_end]
+
+    def core_weights(filtered):
+        rows = {}
+        for d in month_end:
+            i = px.index.get_loc(d)
+            if i < 250:
+                continue
+            inv = 1 / vol[core].iloc[i]
+            t = (inv / inv.sum()).clip(upper=0.6)
+            t = t / t.sum()
+            avg = spy_month[spy_month.index <= d].iloc[-10:]
+            if filtered and len(avg) == 10 and spy.iloc[i] < avg.mean():
+                t['SPY'] = 0.0
+            rows[d] = t
+        w = pd.DataFrame(rows).T.reindex(px.index).ffill().fillna(0)
+        return w.reindex(columns=px.columns, fill_value=0.0)
 
     return {
         'Cross-asset trend, long and short': sized(tsmom),
@@ -136,6 +151,8 @@ def rules(px: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         'S&P 500 turn of the month': only_spy(tom),
         'S&P 500 RSI(2) pullbacks': only_spy(connors),
         'S&P 500 buy and hold': only_spy(pd.Series(1.0, index=px.index)),
+        'Core mix (stocks, bonds, gold)': core_weights(False),
+        'Core mix with 10-month S&P filter': core_weights(True),
     }
 
 

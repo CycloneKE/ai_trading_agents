@@ -144,7 +144,7 @@ worst fall.
 - Success measure: positive return after costs over at least three months
   of paper trading, with the loss limits unchanged.
 
-**Phase 2: the strongest candidates from the wider search (section 9).**
+**Phase 2: the strongest candidates from the wider search (section 9). DONE, see section 12.**
 Commodities are watched but never traded today (no broker reaches commodity
 futures), and the search in section 9 found that trend rules on commodity
 funds did not beat simply holding them. The candidates that did pass every
@@ -259,6 +259,8 @@ settings, after 0.05% costs a side, with returns measured over cash.
 | Cross-asset trend, long and short | 2.70% | 0.25 | -8.5% | 0.23 / 0.28 | 0.15 to 0.25 |
 | S&P 500 turn of the month (McConnell and Xu 2008) | 2.54% | 0.14 | -15.6% | 0.09 / 0.21 | 0.03 to 0.14 |
 | Trend blend 1/3/12 months, long and short (Hurst, Ooi and Pedersen 2017) | 2.11% | 0.14 | -6.4% | 0.24 / 0.03 | -0.06 to 0.14 |
+| The core's own mix (S&P 500, Treasuries, gold at equal risk, monthly) | 6.70% | 0.74 | -17.1% | 0.99 / 0.52 | 0.73 |
+| The core's mix with the 10-month filter on its stock fund | 6.11% | 0.69 | -16.0% | 1.00 / 0.39 | 0.67 to 0.69 |
 
 What it says, in plain language:
 
@@ -339,5 +341,45 @@ What is possible, and what is not:
   section 4 warns about (look-ahead bias, no costs). They are useful for
   ideas; every idea still has to pass `scripts/rule_research.py` or
   `scripts/forex_factor_study.py` before it trades, even on paper.
+
+## 12. Phase 2: what was built, and what was not (21 November 2026)
+
+**Not built: the 10-month filter on the core.** Section 9 found the filter
+works on the S&P 500 held alone. Tested on the core as it actually is (the
+S&P 500, Treasuries and gold at equal risk, rebalanced monthly), it made
+things slightly worse: Sharpe 0.74 without it, 0.69 with it (0.64 to 0.74
+across five timings), for a worst fall only 1 to 3 points smaller. The
+core's bonds and gold already do the protecting that the filter does for
+a stock-only portfolio, so the filter mostly gives up return. The core is
+left as it was. Both versions are rows in `scripts/rule_research.py`, so
+this can be checked again at any time.
+
+**Built: the pullback sleeve** (`src/agent/pullback_sleeve.py`, settings in
+`pullback_sleeve` in `config/config.json`), paper money only:
+
+- It holds **IVV**, an S&P 500 fund no other book trades (the technical
+  strategies trade SPY, the core holds VOO), so the books never share a
+  position.
+- **Once a day, between 15:45 and 16:00 New York time** (23:45 to 00:00
+  Nairobi time), it reads today's live price as the close. If the S&P 500
+  fund is above its 200-day average and its 2-day RSI is below 10 (a sharp
+  dip in an uptrend), it buys with **15% of the strategies' money** (about
+  8% of the account; the technical strategies' share shrinks by the same
+  amount). It sells everything when the close rises back above its 5-day
+  average.
+- No daily stop-loss (the 5-day exit is the rule's own, as tested). While a
+  loss limit is reached it buys nothing; its sells always go. Nothing while
+  the agent is halted.
+- The research script runs this very module, and reproduces the tested
+  figures exactly: Sharpe 0.50 over cash, 4.74% a year including interest
+  on idle cash, worst fall 14.9%, invested about 11% of the time.
+
+**Expect it to be quiet.** It is in the market about one day in nine, in
+short bursts of a few days. On 20 November 2026, for example, the fund had
+just fallen sharply (2-day RSI 0.33) but was below its 200-day average
+(693.71 against 733.36), so the rule correctly stayed out: it buys dips in
+uptrends, not falling markets. Its trades appear on the US and crypto paper
+account page, labelled `rsi2_pullback`, and its last decision with the
+readings behind it is kept in `data/pullback_sleeve.json`.
 
 These are historical results, not forecasts, and not investment advice.

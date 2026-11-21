@@ -1603,6 +1603,15 @@ class TradingAgent:
                 except Exception as e:
                     logger.error(f"Momentum sleeve error: {e}")
 
+                # The pullback sleeve: buy S&P 500 dips in an uptrend, decided
+                # once a day near the US close (pullback_sleeve.py).
+                try:
+                    self._run_pullback_cycle()
+                    if getattr(self, 'heartbeat_monitor', None):
+                        self.heartbeat_monitor.ping()
+                except Exception as e:
+                    logger.error(f"Pullback sleeve error: {e}")
+
                 # The forex margin book: carry and trend, long and short,
                 # rebalanced weekly (forex_carry_trend.py).
                 try:
@@ -2457,20 +2466,134 @@ class TradingAgent:
         return self._sleeve_cfg, self._sleeve_state
 
     def _sleeve_symbols(self) -> set:
+        """Funds held to a sleeve's own schedule and exit rule (the momentum
+        sleeve's, the pullback sleeve's): no daily stop-loss touches them."""
         cfg, _ = TradingAgent._momentum_sleeve(self)
-        return set(cfg.universe) if cfg.enabled else set()
+        out = set(cfg.universe) if cfg.enabled else set()
+        pb, _ = TradingAgent._pullback(self)
+        if pb.enabled:
+            out.add(pb.symbol)
+        return out
 
     def _sleeve_value_now(self) -> float:
-        """Market value of the sleeve's funds at the last sleeve check."""
+        """Market value of the sleeves' funds at their last checks."""
         cfg, _ = TradingAgent._momentum_sleeve(self)
-        return float(getattr(self, '_sleeve_value', 0.0) or 0.0) if cfg.enabled else 0.0
+        pb, _ = TradingAgent._pullback(self)
+        value = float(getattr(self, '_sleeve_value', 0.0) or 0.0) if cfg.enabled else 0.0
+        return value + (float(getattr(self, '_pullback_value', 0.0) or 0.0) if pb.enabled else 0.0)
 
     def _technical_equity(self, equity: float) -> float:
         """What the technical strategies size from: the active share, less
-        the momentum sleeve's part of it when the sleeve is on."""
+        the momentum and pullback sleeves' parts of it when they are on."""
         active = TradingAgent._active_equity(self, equity)
         cfg, _ = TradingAgent._momentum_sleeve(self)
-        return active * (1.0 - cfg.share) if cfg.enabled else active
+        pb, _ = TradingAgent._pullback(self)
+        taken = (cfg.share if cfg.enabled else 0.0) + (pb.share if pb.enabled else 0.0)
+        return active * max(1.0 - taken, 0.0)
+
+    def _pullback(self):
+        """The pullback sleeve's settings and saved state, read once."""
+        if getattr(self, '_pullback_cfg', None) is None:
+            from src.agent.core_portfolio import CoreState
+            from src.agent.pullback_sleeve import config_from_dict
+            cfg = self.config or {}
+            dm = cfg.get('data_manager', {}) or {}
+            taken = (list(dm.get('symbols', []) or []) + list(dm.get('forex_symbols', []) or [])
+                     + list((cfg.get('core_satellite') or {}).get('core_symbols', []) or [])
+                     + list((cfg.get('momentum_sleeve') or {}).get('universe', []) or []))
+            self._pullback_cfg = config_from_dict(cfg.get('pullback_sleeve'), taken)
+            self._pullback_state = CoreState(str(DATA_DIR / 'pullback_sleeve.json'))
+            self._pullback_last_check = 0.0
+            self._pullback_value = 0.0
+        return self._pullback_cfg, self._pullback_state
+
+    def _run_pullback_cycle(self, now: Optional[datetime] = None, fetch_history=None,
+                            price_for=None) -> List[Dict[str, Any]]:
+        """Decide the pullback sleeve once a day near the US close
+        (pullback_sleeve.py): buy the fund on a dip in an uptrend, sell it
+        when the dip has bounced.
+
+        Never while halted; buys nothing while a loss limit is reached (its
+        sells still go); never borrows. Returns the orders placed.
+        """
+        from src.agent import core_portfolio as core
+        from src.agent import pullback_sleeve as pb
+        cfg, state = TradingAgent._pullback(self)
+        if not cfg.enabled or self.trading_halted:
+            return []
+        if now is None and time.time() - self._pullback_last_check < 120:
+            return []
+        self._pullback_last_check = time.time()
+        now = now or datetime.now(timezone.utc)
+        bm = self.components.get('broker_manager')
+        broker = bm.get_broker() if bm else None
+        if not broker or not broker.is_connected:
+            return []
+        fetch_pos = getattr(broker, 'fetch_positions', None)
+        positions = fetch_pos() if callable(fetch_pos) else (broker.get_positions() or [])
+        held_qty, price = 0.0, None
+        for p in positions:
+            if str(getattr(p, 'symbol', '')).upper() == cfg.symbol:
+                held_qty = float(getattr(p, 'quantity', 0) or 0)
+                price = float(getattr(p, 'current_price', 0) or 0) or None
+                self._pullback_value = float(getattr(p, 'market_value', 0) or held_qty * (price or 0))
+                break
+        else:
+            self._pullback_value = 0.0
+        if not core.us_session_open(now) or not pb.in_window(now, cfg):
+            return []
+        if pb.decided_today(state.data.get('last_decision'), now):
+            return []
+        fetch_open = getattr(broker, 'fetch_open_orders', None)
+        pending = fetch_open(cfg.symbol) if callable(fetch_open) else (broker.get_orders(cfg.symbol) or [])
+        if any(getattr(o, 'symbol', '').upper() == cfg.symbol for o in pending):
+            logger.info(f"Pullback sleeve waits: an order for {cfg.symbol} is still working")
+            return []
+
+        if price_for is None:
+            from src.utils.real_price_feed import price_feed
+            price_for = price_feed.get_price
+        live = price_for(cfg.symbol)
+        if not live or live <= 0:
+            logger.warning(f"Pullback sleeve: no live price for {cfg.symbol}; deciding later")
+            return []
+        if fetch_history is None:
+            from src.agent.history_warmstart import fetch_daily_history
+            fetch_history = fetch_daily_history
+        history = fetch_history([cfg.symbol], bars=cfg.bars_needed)
+        closes = list((history.get(cfg.symbol) or {}).get('close', []))
+        if len(closes) < cfg.trend_days:
+            logger.warning(f"Pullback sleeve: only {len(closes)} daily bars of {cfg.symbol}; deciding later")
+            return []
+        decision = pb.decide(closes + [float(live)], held_qty > 0, cfg)
+        planned = []
+        acct = broker.get_account_info()
+        if decision['action'] == 'sell' and held_qty > 0:
+            planned = [{'symbol': cfg.symbol, 'side': 'sell', 'quantity': held_qty,
+                        'notional': round(held_qty * live, 2)}]
+        elif decision['action'] == 'buy' and acct and acct.equity:
+            limits = getattr(self, 'loss_limits', None)
+            if limits is not None and limits.blocks_buys():
+                decision['held_back'] = 'loss_limit'
+                logger.warning("Pullback sleeve: a loss limit is reached; no buy today")
+            else:
+                target = TradingAgent._active_equity(self, float(acct.equity)) * cfg.share
+                notional = target - held_qty * live
+                if notional >= cfg.min_trade_usd:
+                    planned = core.fit_to_cash([{'symbol': cfg.symbol, 'side': 'buy',
+                                                 'notional': round(notional, 2)}],
+                                               float(getattr(acct, 'cash', 0) or 0))
+        placed = TradingAgent._place_core_orders(self, broker, planned, {cfg.symbol: float(live)}, now,
+                                                 strategy=pb.STRATEGY) if planned else []
+        state.save(last_decision=pb.new_york_date(now).isoformat(),
+                   decision={k: v for k, v in decision.items()}, orders=len(placed),
+                   holding_after=bool(held_qty > 0 and decision['action'] != 'sell') or
+                   (decision['action'] == 'buy' and bool(placed)))
+        logger.info(f"Pullback sleeve ({cfg.symbol}): {decision.get('action') or 'no action'} "
+                    f"(RSI2 {decision.get('rsi')}, close {decision.get('close')}, "
+                    f"200d {decision.get('sma_trend')}, 5d {decision.get('sma_exit')}), "
+                    f"{len(placed)} order(s)")
+        return placed
 
     def _run_momentum_cycle(self, now: Optional[datetime] = None, fetch_history=None,
                             price_for=None) -> List[Dict[str, Any]]:
@@ -2901,7 +3024,7 @@ class TradingAgent:
                             # less the momentum sleeve's, which trades on its own.
                             portfolio_value = TradingAgent._technical_equity(self, equity)
                             active_invested = max(equity - cash - TradingAgent._core_value_now(self)
-                                                  - TradingAgent._sleeve_value_now(self), 0.0)
+                                                  - TradingAgent._sleeve_value_now(self), 0.0)  # both sleeves
                         deployed_pct = active_invested / portfolio_value if portfolio_value else 0.0
                         if not hasattr(self, 'cash_policy'):
                             from src.agent.cash_policy import CashDeploymentPolicy

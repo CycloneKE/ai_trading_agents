@@ -151,9 +151,13 @@ def test_it_trades_only_in_the_us_session_and_never_while_halted(tmp_path, monke
 
 
 def test_the_technical_strategies_size_from_what_the_sleeve_leaves(tmp_path, monkeypatch):
+    # The shipped config also runs the pullback sleeve (15% of the active share).
     agent = _agent(tmp_path, monkeypatch, _Broker())
-    assert TradingAgent._technical_equity(agent, 100000) == pytest.approx(100000 * 0.55 * 0.7)
+    assert TradingAgent._technical_equity(agent, 100000) == pytest.approx(100000 * 0.55 * (1 - 0.3 - 0.15))
     off = _agent(tmp_path, monkeypatch, _Broker(), enabled=False)
+    assert TradingAgent._technical_equity(off, 100000) == pytest.approx(55000 * (1 - 0.15))
+    off.config['pullback_sleeve']['enabled'] = False
+    off._pullback_cfg = None
     assert TradingAgent._technical_equity(off, 100000) == pytest.approx(55000)
 
 

@@ -725,5 +725,17 @@
       "NZD": 3.25,
       "JPY": 1.68
     }
+  },
+  "pullback_sleeve": {
+    "_comment": "US account (src/agent/pullback_sleeve.py). Buys short dips in an S&P 500 fund: when the close is above its trend_days average and the rsi_days RSI is below rsi_entry, it puts share of the strategies' (active) money into `symbol`, and sells all of it when the close rises above its exit_days average. Decided once a day between decide_after and the 16:00 close, New York time, with the live price as the close. Its fund must not be one another book trades (IVV, not SPY or VOO); if it is, the sleeve stays off. No stop-loss: the 5-day exit is the rule's own. share is of the active share (0.15 x 0.55 = about 8% of equity), and the technical strategies' share shrinks by it. Tested 2007-2026 by scripts/rule_research.py with this same code: Sharpe 0.50 over cash, 0.50 in both halves, 0.35 to 0.50 when acted on one to five days late, worst fall 14.9% (holding the index: 53%), invested about 11% of the time. Set enabled to false to stop it.",
+    "enabled": true,
+    "symbol": "IVV",
+    "share": 0.15,
+    "trend_days": 200,
+    "exit_days": 5,
+    "rsi_days": 2,
+    "rsi_entry": 10,
+    "decide_after": "15:45",
+    "min_trade_usd": 100
   }
 }
