@@ -212,11 +212,25 @@ def build_view(kind: str, broker: Any, journal: Any, config: Optional[Dict[str, 
                       key=lambda h: -h['market_value'])
     invested = sum(h['market_value'] for h in holdings)
 
-    fills = [o for o in (journal.filled_orders() if journal else [])
-             if book_of(o.get('symbol', ''), cfg) == kind]
-    trips = closed_round_trips(fills, cfg)
-    modelled = sum(_num(o.get('filled_quantity')) * _num(o.get('filled_avg_price')) *
-                   fill_gap_pct(str(o.get('symbol', '')), cfg) for o in fills)
+    own_fills = getattr(broker, 'own_fills', None)
+    if callable(own_fills):
+        # A book that keeps its own trade log (the forex margin book, which
+        # sells short; the journal's round trips are long only).
+        own = own_fills()
+        trips = list(broker.own_round_trips())
+        modelled = sum(_num(f.get('spread_cost_usd')) for f in own)
+        fill_rows = own
+        fills = own
+    else:
+        fills = [o for o in (journal.filled_orders() if journal else [])
+                 if book_of(o.get('symbol', ''), cfg) == kind]
+        trips = closed_round_trips(fills, cfg)
+        modelled = sum(_num(o.get('filled_quantity')) * _num(o.get('filled_avg_price')) *
+                       fill_gap_pct(str(o.get('symbol', '')), cfg) for o in fills)
+        fill_rows = [{'id': o.get('client_order_id'), 'symbol': o['symbol'], 'side': o['side'],
+                      'quantity': _num(o.get('filled_quantity')), 'price': _num(o.get('filled_avg_price')),
+                      'strategy': o.get('strategy'), 'at': o.get('updated_at') or o.get('created_at')}
+                     for o in reversed(fills)][:100]
     working = [{'symbol': o['symbol'], 'side': o['side'], 'quantity': o['quantity'],
                 'status': o['status'], 'since': o.get('created_at')}
                for o in (journal.unresolved() if journal else [])
@@ -234,7 +248,9 @@ def build_view(kind: str, broker: Any, journal: Any, config: Optional[Dict[str, 
     trading = cfg.get('trading') or {}
     bias = cfg.get('bias_check') or {}
     core_cfg = cfg.get('core_satellite') or {}
+    summary = getattr(broker, 'summary', None)
     return {
+        'book_summary': summary() if callable(summary) else None,
         'enabled': True, 'kind': kind, 'title': spec['title'], 'currency': spec['currency'],
         'broker': {'name': getattr(info, 'broker_name', '') or getattr(broker, 'broker_name', ''),
                    'paper': getattr(broker, 'is_paper_trading', None)},
@@ -246,11 +262,9 @@ def build_view(kind: str, broker: Any, journal: Any, config: Optional[Dict[str, 
             'started_on': points[0]['day'] if points else None,
         },
         'holdings': holdings,
-        'stats': {**_stats(trips), 'modelled_costs': modelled, 'fills': len(fills)},
-        'fills': [{'id': o.get('client_order_id'), 'symbol': o['symbol'], 'side': o['side'],
-                   'quantity': _num(o.get('filled_quantity')), 'price': _num(o.get('filled_avg_price')),
-                   'strategy': o.get('strategy'), 'at': o.get('updated_at') or o.get('created_at')}
-                  for o in reversed(fills)][:100],
+        'stats': {**_stats(trips), 'modelled_costs': modelled,
+                  'fills': int(getattr(broker, 'fill_count', 0) or 0) if callable(own_fills) else len(fills)},
+        'fills': fill_rows,
         'working_orders': working,
         'equity_curve': points,
         'session': session,

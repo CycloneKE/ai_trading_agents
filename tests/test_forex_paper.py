@@ -33,11 +33,16 @@ def test_a_currency_pair_is_its_own_market_with_spread_costs():
     assert classify('BTC-USD', CONFIG) == 'crypto' and classify('AAPL', CONFIG) == 'us_equity'
 
 
-def test_the_shipped_config_trades_three_usd_pairs_on_a_paper_book():
+def test_the_shipped_config_trades_five_usd_pairs_on_the_margin_book_only():
+    # The fast technical rules no longer see forex (they lost money on it);
+    # the weekly carry and trend plan trades it on a margin book that can sell.
     dm = CONFIG['data_manager']
-    assert set(dm['forex_symbols']) == {'EUR_USD', 'GBP_USD', 'AUD_USD'} <= set(dm['symbols'])
+    pairs = {'EUR_USD', 'GBP_USD', 'AUD_USD', 'NZD_USD', 'USD_JPY'}
+    assert set(dm['forex_symbols']) == pairs and not pairs & set(dm['symbols'])
+    assert set(CONFIG['forex_carry_trend']['pairs']) == pairs and CONFIG['forex_carry_trend']['enabled']
     book = CONFIG['brokers'][FOREX_BOOK]
-    assert book['type'] == 'paper' and book['state_file'] == 'forex_paper_state.json'
+    assert book['type'] == 'forex_margin' and book['state_file'] == 'forex_margin_state.json'
+    assert book['max_leverage'] <= 3.0
     assert not book.get('primary') and CONFIG['brokers']['alpaca_broker']['primary']
 
 

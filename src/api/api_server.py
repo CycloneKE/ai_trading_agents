@@ -299,6 +299,8 @@ class TradingAPI:
         sleeve_symbols = sleeve() if callable(sleeve) else set()
 
         def stops_for(symbol):
+            if getattr(broker, 'self_managed', False):
+                return {}          # the forex margin book manages its own risk (forex_margin_broker.py)
             if str(symbol).upper() in sleeve_symbols:
                 return {}          # the momentum sleeve's funds carry no stops (momentum_sleeve.py)
             if callable(distances):

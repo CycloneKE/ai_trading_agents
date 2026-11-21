@@ -377,6 +377,8 @@ class TradingAgent:
             broker = TradingAgent._forex_broker(self)
             if broker is None:
                 return 'no_broker'
+            if getattr(broker, 'self_managed', False):
+                return 'self_managed_book'
         else:
             broker = bm.get_broker('coinbase_broker') if market == 'crypto' else None
         if not broker or not getattr(broker, 'is_connected', False):
@@ -427,7 +429,10 @@ class TradingAgent:
         primary = bm.get_broker() if bm is not None else None
         books = [primary] if primary is not None and getattr(primary, 'is_connected', False) else []
         fx = TradingAgent._forex_broker(self)
-        if fx is not None and fx not in books:
+        # The forex margin book trades only its weekly carry and trend plan
+        # and manages its own risk (forex_margin_broker.py): no daily stops,
+        # no journal fills, like the core and the momentum sleeve.
+        if fx is not None and fx not in books and not getattr(fx, 'self_managed', False):
             books.append(fx)
         return books
 
@@ -1598,6 +1603,15 @@ class TradingAgent:
                 except Exception as e:
                     logger.error(f"Momentum sleeve error: {e}")
 
+                # The forex margin book: carry and trend, long and short,
+                # rebalanced weekly (forex_carry_trend.py).
+                try:
+                    self._run_fx_carry_cycle()
+                    if getattr(self, 'heartbeat_monitor', None):
+                        self.heartbeat_monitor.ping()
+                except Exception as e:
+                    logger.error(f"Forex carry/trend error: {e}")
+
                 # Dead-Man's Switch heartbeat ping
                 if getattr(self, 'heartbeat_monitor', None):
                     self.heartbeat_monitor.ping()
@@ -2536,6 +2550,102 @@ class TradingAgent:
                     f"{ {s: round(w, 3) for s, w in weights.items()} or 'cash'}, {len(placed)} order(s)")
         return placed
 
+    def _fx_carry(self):
+        """The forex carry and trend settings and saved state, read once."""
+        if getattr(self, '_fx_cfg', None) is None:
+            from src.agent.core_portfolio import CoreState
+            from src.agent.forex_carry_trend import config_from_dict
+            self._fx_cfg = config_from_dict((self.config or {}).get('forex_carry_trend'))
+            self._fx_state = CoreState(str(DATA_DIR / 'forex_carry_trend.json'))
+            self._fx_last_check = 0.0
+        return self._fx_cfg, self._fx_state
+
+    def _run_fx_carry_cycle(self, now: Optional[datetime] = None, fetch_history=None,
+                            rates_for=None) -> List[Dict[str, Any]]:
+        """Run the forex margin book (forex_carry_trend.py), every 15 minutes.
+
+        Each check credits or charges the overnight interest and closes the
+        book if its drawdown limit is passed. In the first forex session of
+        each ISO week it rebalances to the carry and trend targets. Never
+        trades while the agent is halted or the book is. Returns the fills.
+        """
+        from src.agent import core_portfolio as core
+        from src.agent import forex_carry_trend as fx
+        cfg, state = TradingAgent._fx_carry(self)
+        if not cfg.enabled:
+            return []
+        if now is None and time.time() - self._fx_last_check < 900:
+            return []
+        self._fx_last_check = time.time()
+        now = now or datetime.now(timezone.utc)
+        book = TradingAgent._forex_broker(self)
+        if book is None or not getattr(book, 'self_managed', False):
+            return []
+
+        currencies = sorted({c for p in cfg.pairs for c in fx.split(p)})
+        if rates_for is None:
+            def rates_for(ccys):
+                return fx.current_rates(ccys, cfg, str(DATA_DIR / 'fx_rates.json'), today=now.date())
+        rates = rates_for(currencies)
+        rates_pct = rates.get('rates_pct') or {}
+        book.accrue_rollover(rates_pct, today=now.date())
+        halted = book.check_drawdown(now=now)
+        if halted:
+            alerter = getattr(self, 'alerter', None)
+            if alerter is not None:
+                alerter.send('fx:halt', 'the forex book has been halted',
+                             f"{halted}\n\nEvery forex position was closed. To trade again, "
+                             f"clear 'halted' in data/forex_margin_state.json and restart.",
+                             severity='critical')
+        if self.trading_halted or book.halted or not core.fx_session_open(now):
+            return []
+        reason = fx.due(state.data.get('last_rebalance'), now.date())
+        if not reason:
+            return []
+
+        if fetch_history is None:
+            from src.agent.history_warmstart import fetch_daily_history
+            fetch_history = fetch_daily_history
+        history = fetch_history(list(cfg.pairs), bars=cfg.bars_needed)
+        closes = {p: (history.get(p) or {}).get('close', []) for p in cfg.pairs}
+        plan = fx.target_weights(closes, rates_pct, cfg)
+        # A pair with no signal because its history, volatility or interest
+        # rate could not be read is a data gap, not a view: rebalancing on it
+        # would close that position. Wait and ask again in 15 minutes.
+        unread = {p: row.get('why_none') for p, row in plan['signals'].items() if row.get('signal') is None}
+        if unread:
+            logger.warning(f"Forex carry/trend waits: no signal for {unread}")
+            return []
+        prices = {p: book.price(p, live_only=True) for p in cfg.pairs}
+        prices = {p: px for p, px in prices.items() if px}
+        missing = [p for p in cfg.pairs if p not in prices]
+        if missing:
+            logger.warning(f"Forex carry/trend waits: no live price for {missing}")
+            return []
+        equity = book.equity()
+        targets = fx.target_units(plan['weights'], equity, prices)
+        changes = fx.plan_changes(book.current_units(), targets, prices, cfg)
+        # Reductions first, so the leverage check sees the freed room.
+        current = book.current_units()
+        order = sorted(changes, key=lambda p: abs(current.get(p, 0.0) + changes[p]) - abs(current.get(p, 0.0)))
+        fills = []
+        day_key = now.strftime('%Y%m%d')
+        for pair in order:
+            resp = book.trade(pair, changes[pair], client_order_id=f"{fx.STRATEGY}-{pair}-{day_key}",
+                              reason=fx.STRATEGY, now=now)
+            if resp is not None and resp.status == 'filled':
+                fills.append({'symbol': pair, 'side': resp.side, 'quantity': resp.filled_quantity,
+                              'price': resp.filled_avg_price})
+        state.save(last_rebalance=now.date().isoformat(), reason=reason, equity=round(equity, 2),
+                   weights={p: round(w, 4) for p, w in plan['weights'].items()},
+                   signals=plan['signals'], gross_leverage=plan['gross_leverage'],
+                   rates_pct=rates_pct, rate_sources=rates.get('sources') or {},
+                   fills=len(fills))
+        logger.info(f"Forex carry/trend rebalance ({reason}): weights "
+                    f"{ {p: round(w, 3) for p, w in plan['weights'].items()} }, gross "
+                    f"{plan['gross_leverage']:.2f}x, {len(fills)} fill(s)")
+        return fills
+
     def _check_risk_limits(self, risk_assessment: Dict[str, Any]) -> bool:
         """
         Check if risk assessment is within acceptable limits.
@@ -2735,6 +2845,11 @@ class TradingAgent:
                             # The forex paper book only: the primary broker
                             # (Alpaca) does not trade currencies.
                             broker = TradingAgent._forex_broker(self)
+                            if broker is not None and getattr(broker, 'self_managed', False):
+                                # Its weekly carry and trend plan is the only
+                                # thing that trades it (_run_fx_carry_cycle).
+                                _note(symbol, 'self_managed_book')
+                                continue
                         else:
                             broker = broker_manager.get_broker()  # primary
                             

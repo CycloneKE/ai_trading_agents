@@ -33,6 +33,7 @@ except Exception as e:
     OANDA_AVAILABLE = False
     OandaBroker = None
     logging.error(f"OandaBroker import failed: {e}")
+from src.connectors.forex_margin_broker import ForexMarginBroker  # noqa: E402  (no third-party imports)
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ def available_broker_types() -> Dict[str, TypingAny]:
     src/agent/run_readiness.py can ask the question without building a
     manager, and so the gate's answer cannot drift from the runtime's.
     """
-    types: Dict[str, TypingAny] = {'paper': PaperTradingBroker}
+    types: Dict[str, TypingAny] = {'paper': PaperTradingBroker, 'forex_margin': ForexMarginBroker}
     if ALPACA_AVAILABLE:
         types['alpaca'] = AlpacaBroker
     if COINBASE_AVAILABLE:

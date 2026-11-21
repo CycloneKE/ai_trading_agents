@@ -352,6 +352,15 @@ def test_us_class_shares_and_the_shipped_config_pass():
     assert all(c.ok for c in r.checks)
 
 
+def test_the_margin_book_values_a_dollar_based_pair_and_warns_only_on_a_cross():
+    cfg = _cfg(data_manager={'symbols': [], 'forex_symbols': ['EUR_USD', 'USD_JPY', 'EUR_GBP']},
+               brokers={'forex_paper': {'type': 'forex_margin'}})
+    r = Readiness()
+    check_symbols(cfg, r)
+    warn = {c.name: c for c in r.checks}['currency pairs are quoted in dollars']
+    assert not warn.ok and 'EUR_GBP' in warn.detail and 'USD_JPY' not in warn.detail
+
+
 def test_a_currency_pair_not_quoted_in_dollars_warns():
     r = Readiness()
     check_symbols(_cfg(data_manager={'symbols': ['EUR_USD', 'USD_JPY'], 'forex_symbols': ['EUR_USD', 'USD_JPY']}), r)

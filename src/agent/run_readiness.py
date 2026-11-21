@@ -305,7 +305,12 @@ def check_symbols(cfg: Dict[str, Any], r: Readiness) -> None:
           f"{', '.join(foreign)} are listed on foreign exchanges. The agent has no book for them: "
           f"it would trade them as US stocks (US hours, no fees) through Alpaca, which cannot"
           if foreign else '')
-    pairs = sorted({s.upper() for s in listed if len(s) == 7 and s[3] == '_' and s[4:].upper() != 'USD'})
+    # The forex margin book turns a USD_JPY profit (made in yen) into dollars,
+    # so only a pair with no dollar side is a problem there; the old cash
+    # paper book valued every pair as if it were quoted in dollars.
+    margin = ((cfg.get('brokers') or {}).get('forex_paper') or {}).get('type') == 'forex_margin'
+    pairs = sorted({s.upper() for s in listed if len(s) == 7 and s[3] == '_'
+                    and (('USD' not in (s[:3].upper(), s[4:].upper())) if margin else s[4:].upper() != 'USD')})
     r.add(WARN, 'currency pairs are quoted in dollars', not pairs,
           f"{', '.join(pairs)} are not quoted in US dollars; the forex book is valued in dollars, "
           f"so their results are only approximately right" if pairs else '')

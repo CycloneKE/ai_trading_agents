@@ -87,9 +87,9 @@ def load_rate(rate_dir: str, code: str, index: pd.DatetimeIndex) -> pd.Series:
 
 
 def evaluate(signal: pd.DataFrame, returns: pd.DataFrame, vol: pd.DataFrame,
-             start: pd.Timestamp) -> Dict[str, float]:
-    held = signal.shift(1).fillna(0)                          # traded the next day
-    weight = (held * (VOL_TARGET / vol.shift(1))).clip(-MAX_LEVERAGE, MAX_LEVERAGE).fillna(0)
+             start: pd.Timestamp, lag: int = 1) -> Dict[str, float]:
+    held = signal.shift(lag).fillna(0)                        # traded `lag` days later
+    weight = (held * (VOL_TARGET / vol.shift(lag))).clip(-MAX_LEVERAGE, MAX_LEVERAGE).fillna(0)
     net = (weight * returns).mean(axis=1) - weight.diff().abs().mean(axis=1).fillna(0) * COST
     net = net[net.index >= start]
     equity = (1 + net).cumprod()
@@ -131,14 +131,20 @@ def study(price_dir: str, rate_dir: str) -> Dict[str, Dict[str, float]]:
         'Buy and hold the currencies': pd.DataFrame(1.0, index=px.index, columns=px.columns),
     }
     print(f"Period {start.date()} to {px.index[-1].date()}; pairs {', '.join(PAIRS)}")
-    print(f"{'Approach':32s} {'CAGR':>7s} {'Sharpe':>7s} {'Max DD':>8s}   Sharpe by half")
+    print(f"{'Approach':32s} {'CAGR':>7s} {'Sharpe':>7s} {'Max DD':>8s}   Sharpe by half   "
+          f"Sharpe, 1-5 day delays")
     results = {}
     for name, sig in tests.items():
         r = results[name] = evaluate(sig, total, vol, start)
+        lags = [evaluate(sig, total, vol, start, lag=k)['sharpe'] for k in range(1, 6)]
+        r['sharpe_lag_mean'], r['sharpe_lag_min'] = sum(lags) / len(lags), min(lags)
         print(f"{name:32s} {r['cagr']:7.2%} {r['sharpe']:7.2f} {r['max_dd']:8.1%}"
-              f"   {r['first_half']:5.2f} / {r['second_half']:5.2f}")
+              f"   {r['first_half']:5.2f} / {r['second_half']:5.2f}"
+              f"     mean {r['sharpe_lag_mean']:5.2f}, worst {r['sharpe_lag_min']:5.2f}")
     print("\nSharpe is return per unit of risk (above 0.5 is respectable for one "
-          "asset class). An edge should be positive in both halves, not in one lucky stretch.")
+          "asset class). An edge should be positive in both halves, not in one lucky stretch, "
+          "and should survive acting one to five days later (timing luck): a slow signal "
+          "whose result swings with a day's delay is mostly noise.")
     return results
 
 
