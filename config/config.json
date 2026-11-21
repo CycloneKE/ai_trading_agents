@@ -116,16 +116,15 @@
       "XLE",
       "BTC-USD",
       "ETH-USD",
-      "SOL-USD",
-      "EUR_USD",
-      "GBP_USD",
-      "AUD_USD"
+      "SOL-USD"
     ],
-    "_forex_symbols": "Currency pairs traded on the forex paper book (brokers.forex_paper), written BASE_QUOTE. Only pairs quoted in US dollars, so the book's value stays in dollars: EUR_USD, GBP_USD, AUD_USD, NZD_USD. Like crypto_symbols, a pair must also be in `symbols` to be traded. Long only, no leverage.",
+    "_forex_symbols": "Currency pairs the agent classifies as forex, written BASE_QUOTE. They are traded only by the forex margin book's weekly carry and trend plan (forex_carry_trend, brokers.forex_paper), so they are deliberately NOT in `symbols`: the fast technical rules traded forex long only and lost money after costs over ten years (docs/FOREX_AND_PROFESSIONAL_TRAINING_PLAN.md). Dollar pairs only, so the book's value stays in dollars.",
     "forex_symbols": [
       "EUR_USD",
       "GBP_USD",
-      "AUD_USD"
+      "AUD_USD",
+      "NZD_USD",
+      "USD_JPY"
     ],
     "crypto_symbols": [
       "BTC-USD",
@@ -229,9 +228,9 @@
       "max_position_size": 0.05
     },
     "forex_trend": {
-      "_comment": "Forex only (src/agent/slow_strategies.py). The forex counterpart of crypto_trend: holds a pair while its close is more than `band` above its sma_period-day average and sells when it is more than `band` below. Long-only, no leverage. Unlike crypto it votes alongside momentum and mean reversion (their forex thresholds are set in market_overrides), so it confirms a trend rather than trading alone. It abstains until it has sma_period daily bars.",
+      "_comment": "Off since forex_carry_trend took over the forex book: forex pairs are no longer in data_manager.symbols, so this rule would have nothing to vote on. Kept for the record and the backtest. Forex only (src/agent/slow_strategies.py). The forex counterpart of crypto_trend: holds a pair while its close is more than `band` above its sma_period-day average and sells when it is more than `band` below. Long-only, no leverage. Unlike crypto it votes alongside momentum and mean reversion (their forex thresholds are set in market_overrides), so it confirms a trend rather than trading alone. It abstains until it has sma_period daily bars.",
       "type": "trend_following",
-      "enabled": true,
+      "enabled": false,
       "markets": [
         "forex"
       ],
@@ -388,13 +387,15 @@
       "is_paper": true
     },
     "forex_paper": {
-      "_comment": "The forex paper book: a simulated account inside the agent, filled at live Yahoo Finance prices (never at an old one), with about one pip of spread a side. Kept in data/forex_paper_state.json. Alpaca does not trade currencies.",
-      "type": "paper",
+      "_comment": "The forex margin book (src/connectors/forex_margin_broker.py): a simulated currency account at live Yahoo Finance prices that can sell short, as a real forex account can. Traded only by forex_carry_trend. spread_per_side is the fraction of each trade paid as spread (0.0001 is about one pip on a major pair). Gross exposure is capped at max_leverage times equity. rollover_markup_pct is the yearly markup charged on overnight interest (brokers keep one; 0.5 is an ESTIMATE, check yours). Past max_drawdown from its highest value it closes everything and stops until an operator clears 'halted' in data/forex_margin_state.json. The old long-only book's file, data/forex_paper_state.json, is no longer used.",
+      "type": "forex_margin",
       "enabled": true,
       "initial_cash": 10000,
-      "commission_per_trade": 0.0,
-      "slippage_percent": 0.01,
-      "state_file": "forex_paper_state.json",
+      "spread_per_side": 0.0001,
+      "max_leverage": 3.0,
+      "rollover_markup_pct": 0.5,
+      "max_drawdown": 0.15,
+      "state_file": "forex_margin_state.json",
       "primary": false
     }
   },
@@ -695,6 +696,46 @@
       "absolute_filter": true,
       "max_weight": 0.5
     },
+    "min_trade_usd": 100
+  },
+  "forex_carry_trend": {
+    "_comment": "The forex book's only strategy (src/agent/forex_carry_trend.py), long AND short. Each week, in the first forex session of the ISO week, each pair gets signal = (carry + trend) / 2: carry is +1 for a currency whose 3-month interest rate is above the pairs' median against the dollar, -1 below; trend is +1 if it rose against the dollar over trend_lookback days, -1 if it fell. Each pair is sized to vol_target yearly volatility divided by the number of pairs, the book is scaled down past max_leverage, and a change smaller than min_trade_usd or buffer of the target is not traded. Tested on 2017-2026 (scripts/forex_factor_study.py): Sharpe 0.47 before rollover markup, 0.35 averaged over one to five days' delay; every long-only version lost. A replay of this code itself, weekly, with spread and a 0.5% rollover markup (scripts/forex_book_replay.py), made 0.48% a year, Sharpe 0.15, worst fall 6.9%: a small edge that is not statistically proven, which is what this paper run is for. Interest rates are the OECD 3-month rates on FRED, refreshed weekly; a rate older than rate_max_age_days gives way to fallback_rates_pct (percent a year). The FRED euro and sterling series stopped at January 2026, so EUR and GBP use the fallback: update it when the ECB, the Bank of England or another central bank moves its rate. Set enabled to false to stop trading forex.",
+    "enabled": true,
+    "pairs": [
+      "EUR_USD",
+      "GBP_USD",
+      "AUD_USD",
+      "NZD_USD",
+      "USD_JPY"
+    ],
+    "vol_target": 0.1,
+    "max_leverage": 3.0,
+    "trend_lookback": 252,
+    "vol_window": 60,
+    "min_trade_usd": 200,
+    "buffer": 0.1,
+    "max_drawdown": 0.15,
+    "rate_max_age_days": 120,
+    "fallback_rates_pct": {
+      "_comment": "Last FRED readings at 21 November 2026 (EUR and GBP from January 2026). Check against the central banks before relying on them.",
+      "USD": 4.12,
+      "EUR": 2.03,
+      "GBP": 3.71,
+      "AUD": 4.8,
+      "NZD": 3.25,
+      "JPY": 1.68
+    }
+  },
+  "pullback_sleeve": {
+    "_comment": "US account (src/agent/pullback_sleeve.py). Buys short dips in an S&P 500 fund: when the close is above its trend_days average and the rsi_days RSI is below rsi_entry, it puts share of the strategies' (active) money into `symbol`, and sells all of it when the close rises above its exit_days average. Decided once a day between decide_after and the 16:00 close, New York time, with the live price as the close. Its fund must not be one another book trades (IVV, not SPY or VOO); if it is, the sleeve stays off. No stop-loss: the 5-day exit is the rule's own. share is of the active share (0.15 x 0.55 = about 8% of equity), and the technical strategies' share shrinks by it. Tested 2007-2026 by scripts/rule_research.py with this same code: Sharpe 0.50 over cash, 0.50 in both halves, 0.35 to 0.50 when acted on one to five days late, worst fall 14.9% (holding the index: 53%), invested about 11% of the time. Set enabled to false to stop it.",
+    "enabled": true,
+    "symbol": "IVV",
+    "share": 0.15,
+    "trend_days": 200,
+    "exit_days": 5,
+    "rsi_days": 2,
+    "rsi_entry": 10,
+    "decide_after": "15:45",
     "min_trade_usd": 100
   }
 }

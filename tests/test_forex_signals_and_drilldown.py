@@ -23,6 +23,13 @@ from src.utils.config_validator import load_config
 CONFIG = load_config('config/config.json')
 STRATEGIES = CONFIG['strategies']
 
+# forex_trend is off in the shipped config since the forex carry and trend
+# book took over forex (config forex_carry_trend); these tests check the rule
+# itself, which the backtest can still run, so they switch it back on.
+import copy  # noqa: E402
+FX_CONFIG = copy.deepcopy(CONFIG)
+FX_CONFIG['strategies']['forex_trend']['enabled'] = True
+
 
 def _ramp(start, total_move, n=10, flat=50):
     """`flat` bars at `start`, then n bars rising by `total_move` (a fraction)."""
@@ -67,7 +74,7 @@ def test_a_market_without_an_override_keeps_the_strategys_own_settings():
 
 @pytest.fixture(scope='module')
 def manager():
-    return StrategyManager(CONFIG)
+    return StrategyManager(FX_CONFIG)
 
 
 def test_forex_trend_votes_on_forex_only_and_the_other_markets_are_unchanged(manager):
@@ -96,7 +103,7 @@ def test_a_currency_sized_uptrend_reaches_a_buy_in_the_full_ensemble(manager):
     rise while its momentum is quiet, so it is now an overbought sell: a
     profit-take on a holding, dropped before any order when none is held.)"""
     up = _ramp(1.10, 0.008)
-    fresh = StrategyManager(CONFIG)
+    fresh = StrategyManager(FX_CONFIG)
     fresh.warm_start({'EUR_USD': up[:-1], 'AAPL': [p * 100 for p in up[:-1]]})
     fx = fresh.generate_signals({'symbol': 'EUR_USD', 'price': up[-1], 'bar_date': 'd1'})
     stock = fresh.generate_signals({'symbol': 'AAPL', 'price': up[-1] * 100, 'bar_date': 'd1'})

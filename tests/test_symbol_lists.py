@@ -75,9 +75,11 @@ def test_the_shipped_config_declares_all_its_crypto():
     assert mu.unclassified_crypto(_shipped()) == []
 
 
-def test_the_shipped_universe_is_the_trimmed_twenty_two_plus_three_currency_pairs():
+def test_the_shipped_universe_is_the_trimmed_twenty_two_without_currency_pairs():
+    # The currency pairs left the loop's lists for the forex carry and trend
+    # book (config forex_carry_trend), which keeps its own pair list.
     symbols = mu.all_symbols(_shipped())
-    assert len(symbols) == 25 and {'EUR_USD', 'GBP_USD', 'AUD_USD'} <= set(symbols)
+    assert len(symbols) == 22 and not {'EUR_USD', 'GBP_USD', 'AUD_USD'} & set(symbols)
 
 
 def test_the_sleeve_only_accumulates_names_the_scraper_fetches():
