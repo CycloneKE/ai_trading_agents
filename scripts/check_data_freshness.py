@@ -20,6 +20,15 @@ Three ways the answer is no, each of which the system survives quietly:
 Exits non-zero when any of those is true, so a scheduled job goes visibly red
 rather than succeeding quietly.
 
+Only the stocks the agent trades or holds can block: the configured NSE
+lists plus the screener's current short list (which always keeps every
+holding). The scraper also records every other listed issuer, for the weekly
+screen, and one of those going quiet (a suspension, a delisting, an issuer
+that dropped out of the NSE ticker) is reported as a warning: the screener
+already leaves out any stock without a recent price. If more than a quarter
+of those other stocks go stale at once, that is a broken feed, not one quiet
+issuer, and it blocks.
+
     python scripts/check_data_freshness.py
     python scripts/check_data_freshness.py --max-age-days 7 --json
 """
@@ -41,6 +50,10 @@ from src.utils.paths import DATA_DIR  # noqa: E402
 # Tighter than this and the job cries wolf every long weekend, which trains
 # you to ignore it.
 DEFAULT_MAX_AGE_DAYS = 4
+
+# Above this share of the untraded listed stocks stale at once, the feed is
+# broken rather than one issuer gone quiet.
+UNWATCHED_OUTAGE_SHARE = 0.25
 
 # Provenance markers that mean "this price was invented, not observed".
 SYNTHETIC_SOURCES = {'synthetic', 'fallback', 'generated', 'mock'}
@@ -73,10 +86,32 @@ def read_bars(path):
     return newest_date, newest_source, len(rows)
 
 
-def check_history(csv_dir, max_age_days, today=None):
-    """Age and provenance of every symbol's newest bar."""
+def watched_symbols(config_path, shortlist_path):
+    """The NSE stocks the agent trades or holds: data_manager.nse_symbols,
+    the dividend sleeve's universe and the screener's short list (holdings
+    included). None when the config cannot be read, so every stored symbol
+    then counts, as before."""
+    try:
+        with open(config_path, encoding='utf-8') as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return None
+    out = {str(s).upper() for s in (cfg.get('data_manager') or {}).get('nse_symbols') or []}
+    out |= {str(s).upper() for s in (cfg.get('sleeve') or {}).get('universe') or []}
+    try:
+        with open(shortlist_path, encoding='utf-8') as f:
+            out |= {str(s).upper() for s in (json.load(f) or {}).get('symbols') or []}
+    except (OSError, ValueError, AttributeError):
+        pass
+    return out
+
+
+def check_history(csv_dir, max_age_days, today=None, watched=None):
+    """Age and provenance of every symbol's newest bar. With `watched`, a
+    stale symbol outside it goes to 'stale_unwatched' instead of 'stale'."""
     today = today or datetime.now(timezone.utc).date()
-    out = {'symbols': [], 'stale': [], 'synthetic': [], 'unreadable': []}
+    out = {'symbols': [], 'stale': [], 'stale_unwatched': [], 'synthetic': [], 'unreadable': [],
+           'unwatched_total': 0}
     if not os.path.isdir(csv_dir):
         out['error'] = f'no such directory: {csv_dir}'
         return out
@@ -94,8 +129,11 @@ def check_history(csv_dir, max_age_days, today=None):
         entry = {'symbol': symbol, 'newest': newest.isoformat(),
                  'age_days': age, 'source': source, 'bars': count}
         out['symbols'].append(entry)
+        is_watched = watched is None or symbol in watched
+        if not is_watched:
+            out['unwatched_total'] += 1
         if age > max_age_days:
-            out['stale'].append(entry)
+            out['stale' if is_watched else 'stale_unwatched'].append(entry)
         if source in SYNTHETIC_SOURCES:
             out['synthetic'].append(entry)
     return out
@@ -144,13 +182,28 @@ def render(history, live, max_age_days):
 
         if history['stale']:
             lines.append('')
-            lines.append(f"[BLOCK]  {len(history['stale'])} symbol(s) have no bar "
-                         f"newer than {max_age_days} days:")
+            lines.append(f"[BLOCK]  {len(history['stale'])} symbol(s) the agent trades or holds "
+                         f"have no bar newer than {max_age_days} days:")
             for e in history['stale'][:8]:
                 lines.append(f"         {e['symbol']:8} newest {e['newest']} "
                              f"({e['age_days']}d)")
         else:
-            lines.append('[ok]     every symbol has a recent bar')
+            lines.append('[ok]     every symbol the agent trades or holds has a recent bar')
+        quiet = history.get('stale_unwatched') or []
+        if quiet:
+            level = 'BLOCK' if _unwatched_outage(history) else 'warn'
+            lines.append('')
+            lines.append(f"[{level}]  {len(quiet)} of {history.get('unwatched_total', 0)} other listed "
+                         f"stock(s) have no bar newer than {max_age_days} days. The agent does not "
+                         f"trade them, and the screener leaves out a stock without a recent price; "
+                         f"check the NSE's notices for a suspension or delisting:"
+                         if level == 'warn' else
+                         f"[{level}]  {len(quiet)} of {history.get('unwatched_total', 0)} other listed "
+                         f"stock(s) have no bar newer than {max_age_days} days: too many at once "
+                         f"for quiet issuers, so the feed is probably broken:")
+            for e in quiet[:8]:
+                lines.append(f"         {e['symbol']:8} newest {e['newest']} "
+                             f"({e['age_days']}d)")
 
         if history['synthetic']:
             lines.append('')
@@ -188,6 +241,13 @@ def render(history, live, max_age_days):
     return '\n'.join(lines)
 
 
+def _unwatched_outage(history):
+    """Too many untraded listed stocks stale at once to be quiet issuers."""
+    total = history.get('unwatched_total') or 0
+    quiet = len(history.get('stale_unwatched') or [])
+    return total > 0 and quiet >= 3 and quiet / total > UNWATCHED_OUTAGE_SHARE
+
+
 def failures(history, live):
     """The conditions that make this exit non-zero."""
     problems = []
@@ -198,6 +258,8 @@ def failures(history, live):
     else:
         if history['stale']:
             problems.append(f"{len(history['stale'])} symbol(s) with stale bars")
+        if _unwatched_outage(history):
+            problems.append(f"{len(history['stale_unwatched'])} other listed stock(s) stale at once")
         if history['synthetic']:
             problems.append(f"{len(history['synthetic'])} symbol(s) with synthetic bars")
     if live['available'] and live['total'] and live['share'] > 0.5:
@@ -210,6 +272,10 @@ def main():
     ap.add_argument('--csv-dir', default=str(DATA_DIR / 'nse_historical'),
                     help='directory of <SYMBOL>.csv price history')
     ap.add_argument('--decisions-db', default=str(DATA_DIR / 'decision_journal.db'))
+    ap.add_argument('--config', default='config/config.json',
+                    help='the agent config, for the NSE stocks it trades')
+    ap.add_argument('--shortlist', default=str(DATA_DIR / 'nse_shortlist.json'),
+                    help="the NSE screener's current short list (holdings included)")
     ap.add_argument('--max-age-days', type=int, default=DEFAULT_MAX_AGE_DAYS,
                     help=f'stale beyond this many days (default: '
                          f'{DEFAULT_MAX_AGE_DAYS}, which absorbs a weekend '
@@ -222,7 +288,8 @@ def main():
     ap.add_argument('--json', action='store_true')
     args = ap.parse_args()
 
-    history = check_history(args.csv_dir, args.max_age_days)
+    history = check_history(args.csv_dir, args.max_age_days,
+                            watched=watched_symbols(args.config, args.shortlist))
     live = check_live_feed(args.decisions_db, args.hours)
 
     if args.allow_synthetic:
