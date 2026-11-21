@@ -738,5 +738,13 @@
     "rsi_entry": 10,
     "decide_after": "15:45",
     "min_trade_usd": 100
+  },
+  "crypto_risk": {
+    "_comment": "Crypto position caps (src/agent/crypto_risk.py), US account. A coin's cap is crypto's max_position_size of the strategies' money scaled by vol_target / its yearly volatility over the last vol_days days (never above the maximum), so a coin swinging more gets less room. A crypto buy is never larger than its cap, and once a week a coin worth more than its cap by more than trim_buffer is sold back down to it; never up. Without this a winning coin grows unchecked: in the agent's backtest a 2015 Bitcoin position grew about 26 times and the 2018 crash took the account down 42%. Tested by scripts/crypto_study.py (BTC, ETH, SOL 2015-2026, 0.35% costs a side): worst fall 65% -> 43%, Sharpe 1.19 -> 1.27, yearly return 74% -> 51%. Set enabled to false to go back to sizing at entry only.",
+    "enabled": true,
+    "vol_target": 0.5,
+    "vol_days": 60,
+    "trim_buffer": 0.2,
+    "min_trade_usd": 25
   }
 }
