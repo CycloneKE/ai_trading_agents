@@ -172,3 +172,52 @@ def test_render_names_the_problem_in_words(tmp_path):
     text = fresh.render(r, {'available': False, 'total': 0, 'share': 0.0}, 4)
     assert 'SYNTHETIC' in text
     assert 'invented data' in text
+
+
+# ------------------------------------------------- traded versus other listed stocks
+
+LIVE_NONE = {'available': False, 'total': 0, 'share': 0.0}
+
+
+def _market(tmp_path, fresh_syms, stale_syms):
+    for s in fresh_syms:
+        _csv(tmp_path / f'{s}.csv', TODAY)
+    for s in stale_syms:
+        _csv(tmp_path / f'{s}.csv', TODAY - timedelta(days=50))
+
+
+def test_one_quiet_stock_the_agent_does_not_trade_only_warns(tmp_path):
+    # The 21 November 2026 email: HBER, untraded, silent since 1 October.
+    _market(tmp_path, [f'S{i}' for i in range(70)], ['HBER'])
+    r = fresh.check_history(str(tmp_path), 4, today=TODAY, watched={'S1', 'S2'})
+    assert r['stale'] == [] and [e['symbol'] for e in r['stale_unwatched']] == ['HBER']
+    assert not fresh.failures(r, LIVE_NONE)
+    text = fresh.render(r, LIVE_NONE, 4)
+    assert '[warn]' in text and 'HBER' in text and 'suspension or delisting' in text
+
+
+def test_a_stale_stock_the_agent_trades_still_blocks(tmp_path):
+    _market(tmp_path, ['SCOM'], ['KCB'])
+    r = fresh.check_history(str(tmp_path), 4, today=TODAY, watched={'SCOM', 'KCB'})
+    assert [e['symbol'] for e in r['stale']] == ['KCB']
+    assert fresh.failures(r, LIVE_NONE)
+
+
+def test_many_untraded_stocks_stale_at_once_is_a_broken_feed(tmp_path):
+    _market(tmp_path, ['SCOM'] + [f'F{i}' for i in range(6)], [f'Q{i}' for i in range(4)])
+    r = fresh.check_history(str(tmp_path), 4, today=TODAY, watched={'SCOM'})
+    assert r['stale'] == [] and len(r['stale_unwatched']) == 4
+    assert 'stale at once' in '; '.join(fresh.failures(r, LIVE_NONE))
+    assert 'feed is probably broken' in fresh.render(r, LIVE_NONE, 4)
+
+
+def test_the_watched_list_is_the_config_and_the_screeners_short_list(tmp_path):
+    import json
+    cfg = tmp_path / 'config.json'
+    cfg.write_text(json.dumps({'data_manager': {'nse_symbols': ['scom']},
+                               'sleeve': {'universe': ['EQTY']}}))
+    shortlist = tmp_path / 'nse_shortlist.json'
+    shortlist.write_text(json.dumps({'symbols': ['KCB', 'BAMB'], 'roles': {'BAMB': 'holding'}}))
+    assert fresh.watched_symbols(str(cfg), str(shortlist)) == {'SCOM', 'EQTY', 'KCB', 'BAMB'}
+    assert fresh.watched_symbols(str(cfg), str(tmp_path / 'none.json')) == {'SCOM', 'EQTY'}
+    assert fresh.watched_symbols(str(tmp_path / 'missing.json'), str(shortlist)) is None
