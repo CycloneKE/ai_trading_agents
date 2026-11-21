@@ -62,7 +62,7 @@ _ALIASES = {
     'ncba group': 'NCBA', 'the limuru tea co': 'LIMT', 'kapchorua tea kenya': 'KAPC',
     'williamson tea kenya': 'WTK', 'eaagads': 'EGAD', 'kakuzi': 'KUKZ', 'sasini': 'SASN',
     'car & general (k)': 'CGEN', 'eveready east africa': 'EVRD', 'express kenya': 'XPRS',
-    'homeboyz entertainment': 'HBER', 'kenya airways': 'KQ', 'longhorn publishers': 'LKL',
+    'homeboyz entertainment': 'HBE', 'kenya airways': 'KQ', 'longhorn publishers': 'LKL',
     'nairobi business ventures': 'NBV', 'nation media group': 'NMG', 'sameer africa': 'SMER',
     'standard group': 'SGL', 'tps eastern africa (serena)': 'TPSE', 'tps eastern africa': 'TPSE',
     'uchumi supermarket': 'UCHM', 'uchumi supermarkets': 'UCHM', 'wpp scangroup': 'SCAN',
