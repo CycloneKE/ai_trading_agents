@@ -382,4 +382,91 @@ uptrends, not falling markets. Its trades appear on the US and crypto paper
 account page, labelled `rsi2_pullback`, and its last decision with the
 readings behind it is kept in `data/pullback_sleeve.json`.
 
+## 13. What the published research says (read 21 November 2026)
+
+With `papers.ssrn.com` and `www.aqr.com` allowed, SSRN still refused every
+automated download ("Content Blocked" by its bot protection, which Claude
+does not try to get around). AQR, whose researchers wrote most of these
+papers, served three things, all read in full:
+
+1. Hurst, Ooi and Pedersen, "A Century of Evidence on Trend-Following
+   Investing", Journal of Portfolio Management, 2017 (full paper).
+2. AQR's monthly returns for the Time Series Momentum factors (Moskowitz,
+   Ooi and Pedersen 2012), January 1985 to May 2026.
+3. AQR's monthly returns for the Value and Momentum Everywhere factors
+   (Asness, Moskowitz and Pedersen 2013), January 1972 to August 2026.
+
+The data files matter more than the text: they show how each strategy has
+done *after* its paper was published, which is the honest test.
+
+### What the trend-following paper says
+
+- Trend following (12-month, 3-month and 1-month signals across 67 markets
+  in stocks, bonds, commodities and currencies, each sized to equal risk)
+  made money in every decade from 1880 to 2016: Sharpe 0.76 after
+  estimated costs and typical hedge-fund fees.
+- But it has weakened. By decade, after fees: 0.98 in the 1990s, 0.61 in
+  the 2000s, 0.41 in 2010 to 2016. The 1-month signal fell to a Sharpe of
+  0.06 in 2010 to 2016, against 0.73 for the 12-month signal: **slow trends
+  have held up; fast ones have not.**
+- It does best in long, gradual bear markets (positive in 8 of the 10
+  worst falls of a 60/40 portfolio since 1880) and poorly in sudden crashes
+  such as October 1987.
+- It works best when markets move independently. When everything moves
+  together ("risk on, risk off", as in 2008 to 2014) there are fewer real
+  trends to follow.
+- Its value is as a **diversifier**: moving 20% of a 60/40 portfolio into
+  trend following raised the Sharpe ratio from 0.39 to 0.55 and cut the
+  worst fall from 62% to 50%.
+- One definition matters: a trend is the sign of the **excess return**
+  (the return above cash; for a currency, the price move plus the interest
+  earned, as on a forward contract).
+
+### What AQR's live data says since publication
+
+Sharpe ratios of AQR's own long/short factors, before costs and fees:
+
+| Strategy | Paper's own sample | After publication |
+|---|---|---|
+| Trend, all markets | 1.41 (1985 to 2009) | 0.60 (2010 to 2016), -0.11 (2017 to 2021), 0.68 (2022 to May 2026) |
+| Trend, currencies only | 0.78 | 0.50, -0.13, 0.09 |
+| Trend, commodities only | 1.01 | 0.12, -0.09, 0.65 |
+| Value + momentum, currencies | 0.68 (to 2011) | -0.07 (2012 to August 2026) |
+| Value + momentum, commodities | 0.75 | 0.48 |
+| Value + momentum, all markets together | 1.23 | 0.58; 0.77 since 2020 |
+| Momentum in US stocks | 0.45 | 0.36; 0.49 since 2020 |
+
+What it means for this agent:
+
+- **Every published edge shrank after publication**, by roughly half on
+  average. This is normal (more money chases a known idea) and is why
+  this plan treats every backtest as an upper bound.
+- **Currencies are the weakest market for these styles since 2012**, even
+  for AQR with a dozen currencies and institutional costs. The forex book
+  should be expected to make little; it is worth running on paper as a
+  diversifier, not as a profit engine.
+- **What has held up is diversification**: value and momentum combined
+  across all markets (they move in opposite directions, correlation
+  about -0.6, so each cushions the other's bad years), trend following
+  across many markets, and momentum in US stocks. The momentum sleeve
+  (12-month momentum across 13 funds) is the agent's closest match, and
+  the strongest-evidenced part of what it runs.
+
+### What changed in the agent because of it
+
+**The forex trend now uses excess return, as the papers define it**
+(`forex_carry_trend.trend_on_excess`, on by default). The trend counts the
+year's average interest-rate gap as well as the price move. On the same
+2017 to 2026 data, carry plus trend improved from Sharpe 0.47 to 0.55, and
+became much steadier: 0.51 and 0.60 in the two halves, 0.47 or better at
+every delay of one to five days (it was 0.28 at worst). The replay of the
+live code, weekly, with spread and the rollover markup, improved from
+0.48% a year (Sharpe 0.15) to 0.87% a year (Sharpe 0.25), positive in both
+halves. Monday 23 November's plan is unchanged by it.
+
+**Candidates for later, not built:** a value signal for currencies (rejected:
+it has not worked since 2012 in AQR's data), and wider trend following
+across many markets (AQR's results recovered after 2022, but it needs a
+futures broker; the fund version tested in section 9 was weak).
+
 These are historical results, not forecasts, and not investment advice.

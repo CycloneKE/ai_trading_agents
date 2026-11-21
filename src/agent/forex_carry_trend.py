@@ -6,15 +6,21 @@ after costs over ten years (profit factor 0.88). scripts/forex_factor_study.py
 tested the two approaches professionals run on currencies, on five major
 pairs from 2017 to 2026, at their published settings:
 
-- trend: hold a currency that has risen against the dollar over the last
-  twelve months, sell one that has fallen (time-series momentum; Moskowitz,
-  Ooi and Pedersen, 2012);
+- trend: hold a currency whose excess return against the dollar over the
+  last twelve months was positive, sell one whose was negative
+  (time-series momentum; Moskowitz, Ooi and Pedersen, 2012). As in the
+  paper, the excess return is what a currency forward earned: the price
+  move PLUS the interest-rate gap over the year (Hurst, Ooi and Pedersen,
+  "A Century of Evidence on Trend-Following Investing", 2017, build their
+  currency returns from forwards in the same way);
 - carry: hold the currencies paying the higher interest rates, sell those
   paying the lower (Koijen, Moskowitz, Pedersen and Vrugt, 2018).
 
-Their blend, long AND short, had a Sharpe ratio of 0.47 (0.38 after a 0.5% a
-year rollover markup), positive in both halves of the period; every long-only
-version lost money. This module is that blend, unchanged:
+Their blend, long AND short, had a Sharpe ratio of 0.55 with the trend
+measured on excess return (0.47 measured on the price move alone), positive
+in both halves (0.51 and 0.60) and 0.47 or better when acted on one to five
+days late; every long-only version lost money. This module is that blend,
+unchanged:
 
     signal = (carry + trend) / 2          one of -1, -0.5, 0, +0.5, +1
 
@@ -63,6 +69,7 @@ class FxConfig:
     min_trade_usd: float = 200.0
     buffer: float = 0.10              # leave a position alone within 10% of its target
     max_drawdown: float = 0.15        # the book closes everything and stops past this
+    trend_on_excess: bool = True      # trend counts the year's interest gap, as the paper does
     rate_max_age_days: int = 120      # an older published rate gives way to fallback_rates_pct
     fallback_rates_pct: Dict[str, float] = field(default_factory=dict)
 
@@ -93,6 +100,7 @@ def config_from_dict(cfg: Optional[Dict[str, Any]]) -> FxConfig:
         min_trade_usd=float(cfg.get('min_trade_usd', 200.0)),
         buffer=float(cfg.get('buffer', 0.10)),
         max_drawdown=float(cfg.get('max_drawdown', 0.15)),
+        trend_on_excess=bool(cfg.get('trend_on_excess', True)),
         rate_max_age_days=int(cfg.get('rate_max_age_days', 120)),
         fallback_rates_pct={str(k).upper(): float(v)
                             for k, v in (cfg.get('fallback_rates_pct') or {}).items()
@@ -122,12 +130,14 @@ def sign(x: float) -> float:
     return 1.0 if x > 0 else -1.0 if x < 0 else 0.0
 
 
-def trend_signal(closes: Sequence[float], lookback: int) -> Optional[float]:
-    """+1 if the (oriented) price is above where it was `lookback` days ago,
-    -1 if below; None without enough history."""
+def trend_signal(closes: Sequence[float], lookback: int, interest: float = 0.0) -> Optional[float]:
+    """+1 if the (oriented) excess return over the last `lookback` days was
+    positive, -1 if negative; None without enough history. `interest` is
+    the interest-rate gap earned over the same days, as a fraction (0.02 for
+    a 2-point gap held a year); 0 measures the price move alone."""
     if len(closes) <= lookback:
         return None
-    return sign(closes[-1] / closes[-1 - lookback] - 1.0)
+    return sign(closes[-1] / closes[-1 - lookback] - 1.0 + interest)
 
 
 def carry_signals(rate_gaps: Dict[str, float]) -> Dict[str, float]:
@@ -154,13 +164,16 @@ def realised_vol(closes: Sequence[float], window: int) -> Optional[float]:
 
 
 def target_weights(closes_by_pair: Dict[str, Sequence[float]], rates_pct: Dict[str, float],
-                   cfg: FxConfig) -> Dict[str, Any]:
+                   cfg: FxConfig, avg_rates_pct: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
     """This week's weights, each as a fraction of equity held in the foreign
     currency against the dollar (negative: short the foreign currency), and
     the signals behind them for the record.
 
     A pair without enough history, a volatility reading or an interest
-    rate for both its currencies gets no position."""
+    rate for both its currencies gets no position. `avg_rates_pct` is each
+    currency's average rate over the trend's lookback, for the interest
+    part of the excess return; a currency missing from it uses its rate in
+    `rates_pct`."""
     usd = rates_pct.get('USD')
     series = {p: oriented(p, closes_by_pair.get(p) or []) for p in cfg.pairs}
     gaps = {p: rates_pct[foreign(p)] - usd for p in cfg.pairs
@@ -168,10 +181,15 @@ def target_weights(closes_by_pair: Dict[str, Sequence[float]], rates_pct: Dict[s
     carry = carry_signals(gaps)
     detail, raw = {}, {}
     n = len(cfg.pairs)
+    avg = {**rates_pct, **(avg_rates_pct or {})}
     for p in cfg.pairs:
-        trend = trend_signal(series[p], cfg.trend_lookback)
+        interest = 0.0
+        if cfg.trend_on_excess and 'USD' in avg and foreign(p) in avg:
+            interest = (avg[foreign(p)] - avg['USD']) / 100.0 * cfg.trend_lookback / TRADING_DAYS
+        trend = trend_signal(series[p], cfg.trend_lookback, interest)
         vol = realised_vol(series[p], cfg.vol_window)
         row = {'trend': trend, 'carry': carry.get(p), 'rate_gap_pct': gaps.get(p),
+               'trend_interest_pct': round(interest * 100, 3),
                'vol': round(vol, 4) if vol else None}
         if trend is None or vol is None or p not in carry:
             row['signal'] = None
@@ -291,7 +309,8 @@ def current_rates(currencies: Sequence[str], cfg: FxConfig, cache_path: str,
                 rows = fetch(code)
                 if rows:
                     month, value = rows[-1]
-                    series[ccy] = {'month': month.isoformat(), 'pct': value}
+                    series[ccy] = {'month': month.isoformat(), 'pct': value,
+                                   'history': [[m.isoformat(), v] for m, v in rows[-15:]]}
             except Exception as e:
                 logger.warning(f"Interest rate for {ccy} not fetched from FRED: {e}")
         cache = {'fetched_on': today.isoformat(), 'series': series}
@@ -302,11 +321,35 @@ def current_rates(currencies: Sequence[str], cfg: FxConfig, cache_path: str,
             os.replace(cache_path + '.tmp', cache_path)
         except OSError as e:
             logger.warning(f"Interest-rate cache not saved: {e}")
-    rates, sources = {}, {}
+    rates, sources, averages = {}, {}, {}
     for ccy in currencies:
         row = series.get(ccy)
         if row and (today - date.fromisoformat(row['month'])).days <= cfg.rate_max_age_days:
             rates[ccy], sources[ccy] = float(row['pct']), f"FRED {row['month'][:7]}"
         elif ccy in cfg.fallback_rates_pct:
             rates[ccy], sources[ccy] = cfg.fallback_rates_pct[ccy], 'config fallback_rates_pct'
-    return {'rates_pct': rates, 'sources': sources}
+        else:
+            continue
+        averages[ccy] = average_rate(row, rates[ccy], today)
+    return {'rates_pct': rates, 'sources': sources, 'avg_12m_pct': averages}
+
+
+def average_rate(row: Optional[Dict[str, Any]], current: float, today: date) -> float:
+    """A currency's average rate over the last twelve months, for the
+    interest part of the trend's excess return: the published months in that
+    year, with each month missing from FRED (a series that stopped, or not
+    yet published) counted at `current`."""
+    published = {}
+    for month, pct in (row or {}).get('history') or []:
+        try:
+            published[month[:7]] = float(pct)
+        except (TypeError, ValueError):
+            continue
+    values = []
+    y, m = today.year, today.month
+    for _ in range(12):
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+        values.append(published.get(f"{y:04d}-{m:02d}", current))
+    return sum(values) / len(values)

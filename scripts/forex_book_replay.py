@@ -58,6 +58,18 @@ def rates_on(rates, day: pd.Timestamp):
     return out
 
 
+def avg_rates_on(rates, day: pd.Timestamp):
+    """Each currency's average rate over the twelve months published by
+    `day`, for the interest part of the trend's excess return."""
+    out = {}
+    cutoff = day - pd.DateOffset(months=1)
+    for ccy, s in rates.items():
+        known = s[s.index <= cutoff]
+        if len(known):
+            out[ccy] = float(known.iloc[-12:].mean())
+    return out
+
+
 def replay(price_dir: str, rate_dir: str, config_path: str = 'config/config.json'):
     full = load_config(config_path)
     cfg = fx.config_from_dict(full.get('forex_carry_trend'))
@@ -78,7 +90,7 @@ def replay(price_dir: str, rate_dir: str, config_path: str = 'config/config.json
             if i > cfg.bars_needed and week != last_week and not book.halted:
                 last_week = week
                 hist = {p: list(px[p].iloc[:i]) for p in cfg.pairs}   # up to yesterday's close
-                plan = fx.target_weights(hist, r, cfg)
+                plan = fx.target_weights(hist, r, cfg, avg_rates_pct=avg_rates_on(rates, day))
                 targets = fx.target_units(plan['weights'], book.equity(), today['prices'])
                 changes = fx.plan_changes(book.current_units(), targets, today['prices'], cfg)
                 cur = book.current_units()
