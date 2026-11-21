@@ -120,13 +120,18 @@ def study(price_dir: str, rate_dir: str) -> Dict[str, Dict[str, float]]:
     rank = rate_gap.rank(axis=1)
     carry = np.sign(rank.sub(rank.median(axis=1), axis=0))
     blend = (carry + trend) / 2
+    # The papers' trend: the sign of the 12-month EXCESS return, i.e. what a
+    # currency forward earned (price move plus the interest-rate gap).
+    trend_x = np.sign((1 + total).rolling(TRADING_DAYS).apply(np.prod, raw=True) - 1)
     tests = {
         'Trend 12m, long and short': trend,
+        'Trend 12m on excess return, L/S': trend_x,
         'Trend 12m, long only': trend.clip(lower=0),
         'MA 50/200, long and short': ma,
         'MA 50/200, long only': ma.clip(lower=0),
         'Carry, long and short': carry,
         'Carry + trend, long and short': blend,
+        'Carry + excess-return trend, L/S': (carry + trend_x) / 2,
         'Carry + trend, long only': blend.clip(lower=0),
         'Buy and hold the currencies': pd.DataFrame(1.0, index=px.index, columns=px.columns),
     }

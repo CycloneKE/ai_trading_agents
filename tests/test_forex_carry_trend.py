@@ -48,6 +48,42 @@ def test_trend_needs_its_full_lookback():
     assert fx.trend_signal([1.0] * 10 + [0.9], 10) == -1.0
 
 
+def test_the_trend_counts_the_interest_a_forward_earns():
+    flat_dip = [1.0] * 10 + [0.99]                       # price down 1% over the lookback
+    assert fx.trend_signal(flat_dip, 10) == -1.0          # on price alone: falling
+    assert fx.trend_signal(flat_dip, 10, interest=0.03) == 1.0   # +3% interest: positive excess return
+
+
+def test_a_high_yielder_drifting_slightly_lower_still_trends_up_on_excess_return():
+    cfg = fx.config_from_dict({'enabled': True, 'pairs': ['AUD_USD', 'EUR_USD']})
+    closes = {'AUD_USD': _wave(0.66, -0.005), 'EUR_USD': _wave(1.10, -0.005)}
+    rates = {'USD': 4.0, 'AUD': 8.0, 'EUR': 4.0}
+    on_excess = fx.target_weights(closes, rates, cfg)['signals']['AUD_USD']
+    assert on_excess['trend'] == 1.0 and on_excess['trend_interest_pct'] == pytest.approx(4.0)
+    price_only = fx.config_from_dict({'enabled': True, 'pairs': ['AUD_USD', 'EUR_USD'], 'trend_on_excess': False})
+    assert fx.target_weights(closes, rates, price_only)['signals']['AUD_USD']['trend'] == -1.0
+    # A year's average rate, when given, is used instead of today's.
+    avg = fx.target_weights(closes, rates, cfg, avg_rates_pct={'USD': 4.0, 'AUD': 4.2})
+    assert avg['signals']['AUD_USD']['trend'] == -1.0
+
+
+def test_the_years_average_rate_fills_unpublished_months_with_the_current_rate():
+    row = {'history': [['2026-08-01', 3.0], ['2026-09-01', 3.0], ['2026-10-01', 3.0]]}
+    # Nov 2025 to Oct 2026: three published months at 3%, nine others at the current 5%.
+    assert fx.average_rate(row, 5.0, date(2026, 11, 21)) == pytest.approx((3 * 3 + 9 * 5) / 12)
+    assert fx.average_rate(None, 2.0, date(2026, 11, 21)) == pytest.approx(2.0)
+
+
+def test_rates_come_with_their_twelve_month_averages(tmp_path):
+    cfg = fx.config_from_dict({'enabled': True})
+    hist = [(date(2026, m, 1), 4.0 + m / 10) for m in range(1, 11)]
+    out = fx.current_rates(['USD'], cfg, str(tmp_path / 'r.json'), today=date(2026, 11, 21),
+                           fetch=lambda code: hist)
+    assert out['rates_pct']['USD'] == pytest.approx(5.0)
+    expected = (sum(4.0 + m / 10 for m in range(1, 11)) + 5.0 * 2) / 12     # Nov, Dec 2025 at today's rate
+    assert out['avg_12m_pct']['USD'] == pytest.approx(expected)
+
+
 def _wave(start, drift, n=400):
     import math
     return [start * (1 + drift * i / n) * (1 + 0.01 * math.sin(i)) for i in range(n)]

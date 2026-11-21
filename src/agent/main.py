@@ -2731,7 +2731,7 @@ class TradingAgent:
             fetch_history = fetch_daily_history
         history = fetch_history(list(cfg.pairs), bars=cfg.bars_needed)
         closes = {p: (history.get(p) or {}).get('close', []) for p in cfg.pairs}
-        plan = fx.target_weights(closes, rates_pct, cfg)
+        plan = fx.target_weights(closes, rates_pct, cfg, avg_rates_pct=rates.get('avg_12m_pct'))
         # A pair with no signal because its history, volatility or interest
         # rate could not be read is a data gap, not a view: rebalancing on it
         # would close that position. Wait and ask again in 15 minutes.
@@ -2763,6 +2763,7 @@ class TradingAgent:
                    weights={p: round(w, 4) for p, w in plan['weights'].items()},
                    signals=plan['signals'], gross_leverage=plan['gross_leverage'],
                    rates_pct=rates_pct, rate_sources=rates.get('sources') or {},
+                   avg_12m_rates_pct=rates.get('avg_12m_pct') or {},
                    fills=len(fills))
         logger.info(f"Forex carry/trend rebalance ({reason}): weights "
                     f"{ {p: round(w, 3) for p, w in plan['weights'].items()} }, gross "
